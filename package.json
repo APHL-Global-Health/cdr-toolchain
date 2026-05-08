@@ -1,0 +1,23 @@
+{
+  "name": "cdr-toolchain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DISA → OpenLDR v2 migration toolchain (CLI + API sharing the disalab library)",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=18.19.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.6.3",
+    "@types/node": "^20.17.10"
+  }
+}

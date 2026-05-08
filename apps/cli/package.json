@@ -1,0 +1,35 @@
+{
+  "name": "@cdr-toolchain/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI for querying the DISA database",
+  "type": "module",
+  "bin": {
+    "cdr": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/index.js",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "commander": "^12.1.0",
+    "disalab": "workspace:*",
+    "docx": "^9.6.1",
+    "dotenv": "^16.4.7",
+    "mssql": "^9.3.2",
+    "ora": "^8.1.1",
+    "pdfkit": "^0.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.7",
+    "@types/node": "^20.17.10",
+    "@types/pdfkit": "^0.17.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

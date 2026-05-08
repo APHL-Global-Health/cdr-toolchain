@@ -1,0 +1,33 @@
+{
+  "name": "disalab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared DISA database query + transform library for the cdr-toolchain monorepo",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+  },
+  "dependencies": {
+    "iconv-lite": "^0.6.3",
+    "mssql": "^9.3.2"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.7",
+    "@types/node": "^20.17.10",
+    "typescript": "^5.6.3"
+  }
+}

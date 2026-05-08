@@ -1,0 +1,11 @@
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "Read(//home/fredrick/Projects/Repositories/openldr-v2/apps/openldr-data-processing/src/services/**)"
+    ]
+  }
+}
