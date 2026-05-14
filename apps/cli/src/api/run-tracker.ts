@@ -80,56 +80,95 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
+const MAX_429_RETRIES = 5;
+const MAX_429_BACKOFF_MS = 30_000;
+
+/** Parse a Retry-After header value. Returns null when the header is absent
+ *  or unparseable. Supports both forms: integer/decimal seconds and HTTP-date. */
+function parseRetryAfter(header: string | null): number | null {
+  if (header === null) return null;
+  const trimmed = header.trim();
+  if (trimmed.length === 0) return null;
+  const seconds = Number(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds * 1000);
+  const epoch = Date.parse(trimmed);
+  if (Number.isFinite(epoch)) return Math.max(0, epoch - Date.now());
+  return null;
+}
+
 async function fetchRun(opts: TrackOptions): Promise<{ run: RunSnapshot; events: RunEvent[] } | null> {
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/api/v1/runs/${encodeURIComponent(opts.messageId)}`;
-  const controller = new AbortController();
   const requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const timer = setTimeout(() => { controller.abort(); }, requestTimeoutMs);
 
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Authorization": `Bearer ${opts.token}`,
-        "Accept": "application/json",
-      },
-      signal: controller.signal,
-    });
-  } catch (err) {
+  // Internal retry on HTTP 429 — v2's run-tracking endpoint rate-limits
+  // separately from the POST endpoint, and at high --concurrency a worker
+  // would otherwise throw on a single 429 before the outer poll loop gets
+  // a chance to retry. Honor Retry-After if present; otherwise exponential
+  // backoff. Capped at MAX_429_RETRIES so a permanently throttled endpoint
+  // still surfaces an error rather than spinning forever.
+  let throttleAttempts = 0;
+  for (;;) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); }, requestTimeoutMs);
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${opts.token}`,
+          "Accept": "application/json",
+        },
+        signal: controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      throw new CliError(
+        "API_UNAVAILABLE",
+        `Run-tracking endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        { url },
+      );
+    }
     clearTimeout(timer);
-    throw new CliError(
-      "API_UNAVAILABLE",
-      `Run-tracking endpoint unreachable: ${err instanceof Error ? err.message : String(err)}`,
-      { url },
-    );
-  }
-  clearTimeout(timer);
 
-  // Brief window after POST where the run row may not yet exist — caller treats null as "keep polling".
-  if (res.status === 404) return null;
+    if (res.status === 429 && throttleAttempts < MAX_429_RETRIES) {
+      const retryAfterMs = parseRetryAfter(res.headers.get("retry-after"));
+      // Exponential backoff fallback when Retry-After is missing or
+      // unparseable: 1s, 2s, 4s, 8s, 16s — capped at 30s.
+      const backoffMs = Math.min(1_000 * Math.pow(2, throttleAttempts), MAX_429_BACKOFF_MS);
+      const waitMs = Math.min(retryAfterMs ?? backoffMs, MAX_429_BACKOFF_MS);
+      throttleAttempts += 1;
+      // Drain the body so the connection can be reused.
+      try { await res.text(); } catch { /* ignore */ }
+      await sleep(waitMs);
+      continue;
+    }
 
-  const text = await res.text();
-  let parsed: unknown = null;
-  if (text.length > 0) {
-    try { parsed = JSON.parse(text); } catch { parsed = text; }
-  }
-  if (res.status < 200 || res.status >= 300) {
-    throw new CliError(
-      "API_REJECTED",
-      `Run-tracking endpoint returned HTTP ${res.status}`,
-      { url, status: res.status, body: parsed },
-    );
-  }
+    // Brief window after POST where the run row may not yet exist — caller treats null as "keep polling".
+    if (res.status === 404) return null;
 
-  if (parsed === null || typeof parsed !== "object") {
-    throw new CliError("API_REJECTED", "Run-tracking response was not an object", { url, body: parsed });
+    const text = await res.text();
+    let parsed: unknown = null;
+    if (text.length > 0) {
+      try { parsed = JSON.parse(text); } catch { parsed = text; }
+    }
+    if (res.status < 200 || res.status >= 300) {
+      throw new CliError(
+        "API_REJECTED",
+        `Run-tracking endpoint returned HTTP ${res.status}`,
+        { url, status: res.status, body: parsed, throttle_attempts: throttleAttempts },
+      );
+    }
+
+    if (parsed === null || typeof parsed !== "object") {
+      throw new CliError("API_REJECTED", "Run-tracking response was not an object", { url, body: parsed });
+    }
+    const obj = parsed as { run?: RunSnapshot; events?: RunEvent[] };
+    if (obj.run === undefined) {
+      throw new CliError("API_REJECTED", "Run-tracking response missing `run` field", { url, body: parsed });
+    }
+    return { run: obj.run, events: obj.events ?? [] };
   }
-  const obj = parsed as { run?: RunSnapshot; events?: RunEvent[] };
-  if (obj.run === undefined) {
-    throw new CliError("API_REJECTED", "Run-tracking response missing `run` field", { url, body: parsed });
-  }
-  return { run: obj.run, events: obj.events ?? [] };
 }
 
 export async function trackRun(opts: TrackOptions): Promise<TrackResult> {
