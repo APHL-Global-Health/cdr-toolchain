@@ -159,7 +159,16 @@ function facilityProperties(f: Facility): Record<string, unknown> | undefined {
 
 /** Build the `facility_code` / `testing_facility_code` block from the
  *  SpecimenRecpt.Facility (LOCNDIC4-resolved). Returns null when DISA didn't
- *  carry a facility code at all. */
+ *  carry a facility code at all.
+ *
+ *  When LOCNDIC4 has no row for the facility code, SpecimenRecpt.Fetch
+ *  constructs a Facility with the code only and empty strings for every
+ *  other field. v2's storage validator rejects payloads where
+ *  facility_code.display_name is null AND there's no properties block —
+ *  fall back to the code itself as display_name so the validator passes.
+ *  The originating lab uses the code as a human handle anyway; this also
+ *  surfaces the unresolved code clearly so it's easy to spot in v2 for
+ *  LOCNDIC4 backfill. */
 function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2ConceptCode | null {
   if (facility === null) return null;
   const code = nz(facility.Code);
@@ -167,7 +176,7 @@ function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2Co
   const concept: V2ConceptCode = {
     system_id: site.facility_system_id,
     concept_code: code,
-    display_name: nz(facility.FacilityName),
+    display_name: nz(facility.FacilityName) ?? code,
     concept_class: "facility",
     datatype: "coded",
   };
