@@ -398,13 +398,23 @@ export function diffResults(
   return { observations, summary };
 }
 
+/**
+ * The per-obs fidelity gate. Treats `only_disa` as acceptable (DISA decoded
+ * an observation v1's migration didn't carry — v2 will emit it faithfully
+ * from DISA, so the asymmetry isn't a toolchain bug). Keeps `mismatch` and
+ * `only_v1` strict: `mismatch` is a real disagreement on shared data, and
+ * `only_v1` means DISA's decoder failed to extract data v1 has (e.g. the
+ * TDS0010161 HIVDR five-obs gap), which IS a toolchain bug we want to keep
+ * surfacing.
+ *
+ * Symmetric with the request-level gate: ward asymmetry is tolerated via
+ * wardComparator, received_at-only-v1 via allowDisaEmpty.
+ */
 export function isResultPerfectMatch(s: ResultSummary): boolean {
   return (
     s.observations_mismatch === 0 &&
-    s.observations_only_disa === 0 &&
     s.observations_only_v1 === 0 &&
     s.fields_mismatch === 0 &&
-    s.fields_only_disa === 0 &&
     s.fields_only_v1 === 0
   );
 }
