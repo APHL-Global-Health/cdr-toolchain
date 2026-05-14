@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import type { DisaServer } from "../types.js";
@@ -61,7 +62,7 @@ export class PARMDICT {
         // itself carries the correct value, so we parse it via fromBytes
         // rather than trusting the columns.
         const sql = `SELECT [DATESTAMP] ,[ACTIVE] ,[PARMDICT_STATUS] FROM [DisaGlobal].[dbo].[PARMDICT] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {

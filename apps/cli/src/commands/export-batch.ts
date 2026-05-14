@@ -124,25 +124,6 @@ function buildServer(connectionString: string): DisaServer {
   };
 }
 
-// mssql exposes a single shared connection pool keyed implicitly by the
-// most recently passed connection string. Concurrent workers hopping
-// between DISA and v1 strings race the pool's open/close lifecycle and
-// produce "Connection not yet open" errors mid-batch. Serialize every
-// DB-touching call through this mutex so the POST phase can stay
-// parallel — that's the part rate-limit testing actually targets.
-let dbMutex: Promise<void> = Promise.resolve();
-async function withDbLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = dbMutex;
-  let release!: () => void;
-  dbMutex = new Promise<void>((r) => { release = r; });
-  try {
-    await previous;
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
 async function fetchDisaSpecimen(disaLabNo: string, connectionString: string): Promise<SpecimenRecpt | null> {
   try {
     const server = buildServer(connectionString);
@@ -337,10 +318,10 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
   };
 
   try {
-    // Fetch DISA + (optional) v1 rows under one DB lock so workers don't
-    // race the global mssql pool. CPU-only audit + payload build run free
-    // afterward; POST runs free too. So concurrency still pays off.
-    const fetched = await withDbLock(async () => {
+    // Fetch DISA + (optional) v1 rows. Workers run in parallel — the
+    // disalab pool registry (getPool) keeps a separate ConnectionPool per
+    // connection string, so DISA and v1 reads don't race a shared global.
+    const fetched = await (async () => {
       const specimen = await fetchDisaSpecimen(norm.disaLabNo, ctx.config.connectionString);
       if (specimen === null) {
         return { specimen: null as SpecimenRecpt | null, v1Request: null, v1Rows: [] as Awaited<ReturnType<typeof fetchLabResultsByRequestId>> };
@@ -362,7 +343,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
         return { specimen, v1Request, v1Rows };
       }
       return { specimen, v1Request: null, v1Rows: [] };
-    });
+    })();
 
     const specimen = fetched.specimen;
     if (specimen === null) {

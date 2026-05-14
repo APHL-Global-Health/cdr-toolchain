@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command, Option } from "commander";
 import { VERSION as DISALAB_VERSION } from "disalab";
+import { closeAllConnectionPools } from "./db.js";
 import { formatError } from "./errors.js";
 import { maybeEmitJsonHelp } from "./help.js";
 import { registerTablesCommand } from "./commands/tables.js";
@@ -73,7 +74,13 @@ async function main(): Promise<void> {
   } catch (err) {
     const { json, exitCode } = formatError(err);
     process.stderr.write(json + "\n");
+    await closeAllConnectionPools();
     process.exit(exitCode);
+  } finally {
+    // Drain mssql ConnectionPool instances so the Node event loop can
+    // release. Without this, the process hangs after a successful run
+    // because pools keep open TCP sockets.
+    await closeAllConnectionPools();
   }
 }
 

@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import mssql from "mssql";
+import { getPool } from "disalab";
 import { resolveEntity } from "../entities.js";
 import { CliError } from "../errors.js";
 import { emitArray } from "../output.js";
@@ -22,7 +23,7 @@ async function rawCount(
   connectionString: string,
 ): Promise<number> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const sql = `SELECT COUNT(*) AS Total FROM ${tableName} ${where}`;
     const result = await pool.request().query(sql);
     const row = result.recordset[0] as { Total: number } | undefined;

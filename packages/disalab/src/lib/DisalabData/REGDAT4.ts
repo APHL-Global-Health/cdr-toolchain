@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import { Order } from "../order.js";
@@ -200,7 +201,7 @@ export class REGDAT4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT [LabNo], [REGDAT4_STATUS] FROM [DisalabData].[dbo].[REGDAT4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         for (const row of list as Record<string, unknown>[]) {
@@ -227,7 +228,7 @@ export class REGDAT4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT distinct [LabNo] FROM [DisalabData].[dbo].[REGDAT4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
         results = list.map((l: Record<string, unknown>) => l.LabNo as string);
       } catch (error) {
@@ -245,7 +246,7 @@ export class REGDAT4 {
 
     let rows: REGDAT4[] = [];
 
-    const pool = await mssql.connect(DB_URI);
+    const pool = await getPool(DB_URI);
     const request = pool.request();
     request.stream = true;
     request.query(sql);

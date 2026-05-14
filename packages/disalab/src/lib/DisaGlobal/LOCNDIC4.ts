@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import type { DisaServer } from "../types.js";
@@ -78,7 +79,7 @@ export class LOCNDIC4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT [DATESTAMP] ,[CODE] ,[DESCRIPTION] ,[ABBREV] ,[TELEPHONE] ,[NAME] ,[POSTAL_ADDRESS1] ,[POSTAL_ADDRESS2] ,[POSTAL_ADDRESS3] ,[POSTAL_ADDRESS4] ,[POST_CODE] ,[ORGANISATION] ,[ACTIVE] ,[District] ,[FacilityType] ,[FacilityArrangement] ,[LOCNDIC4_STATUS] FROM [DisaGlobal].[dbo].[LOCNDIC4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {

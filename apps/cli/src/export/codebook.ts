@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "disalab";
 import { COMMDICT, PARMDICT, TESTDICT } from "disalab";
 import type { DisaServer } from "disalab";
 
@@ -164,7 +165,7 @@ export async function loadCodebook(server: DisaServer): Promise<Codebook> {
   // per deployment), one full pull per command.
   const userByCode = new Map<string, UserEntry>();
   try {
-    const pool = await mssql.connect(server.config.database.connection_string);
+    const pool = await getPool(server.config.database.connection_string);
     const result = await pool.request().query(`SELECT [CODE], [LOGIN], [DESCRIPTION] FROM [DisalabDict].[dbo].[USERDIC6]`);
     for (const row of result.recordset as Array<{ CODE?: string; LOGIN?: string; DESCRIPTION?: string }>) {
       const code = String(row.CODE ?? "").trim();

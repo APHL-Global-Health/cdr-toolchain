@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import type { DisaServer } from "../types.js";
@@ -67,7 +68,7 @@ export class PRINTQ4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT  [DATESTAMP] ,[QUEUE] ,[ROUTE] ,[LOCATION] ,[WARD] ,[DRCODE] ,[LABNO] ,[XPRINTSET] ,[LANGUAGE] ,[REPTYPE] ,[COPY_NO] ,[PRINTQ4_STATUS] FROM [DisalabData].[dbo].[PRINTQ4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {
@@ -105,7 +106,7 @@ export class PRINTQ4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT  COUNT([QUEUE]) "Total" FROM [DisalabData].[dbo].[PRINTQ4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         if (list.length > 0) {

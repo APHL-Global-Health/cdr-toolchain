@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "disalab";
 import { CliError } from "./errors.js";
 import { closePool } from "./db.js";
 
@@ -90,7 +91,7 @@ export async function fetchRequestByRequestId(
   databaseName: string,
 ): Promise<OpenLdrV1Request | null> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const result = await pool
       .request()
       .input("requestId", mssql.NVarChar, requestId)
@@ -126,7 +127,7 @@ export async function fetchAllRequestsByRequestId(
   databaseName: string,
 ): Promise<OpenLdrV1Request[]> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const result = await pool
       .request()
       .input("requestId", mssql.NVarChar, requestId)
@@ -165,7 +166,7 @@ export async function fetchOpenldrRequestIds(
   databaseName: string,
 ): Promise<string[]> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const result = await pool
       .request()
       .query(buildRequestIdsSql(databaseName, where, offset, limit));
@@ -207,7 +208,7 @@ export async function fetchLabResultsByRequestId(
   databaseName: string,
 ): Promise<OpenLdrV1LabResult[]> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const result = await pool
       .request()
       .input("requestId", mssql.NVarChar, requestId)

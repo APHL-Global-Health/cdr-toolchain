@@ -1,5 +1,6 @@
 import type { Command } from "commander";
 import mssql from "mssql";
+import { getPool } from "disalab";
 import { Core } from "disalab";
 import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
@@ -40,7 +41,7 @@ interface Candidate {
 
 async function fetchBlob(labNo: string, connectionString: string): Promise<Buffer> {
   try {
-    const pool = await mssql.connect(connectionString);
+    const pool = await getPool(connectionString);
     const escaped = labNo.replace(/'/g, "''");
     const sql = `SELECT TOP 1 [REGDAT4_STATUS] FROM [DisalabData].[dbo].[REGDAT4] WHERE [LabNo] = '${escaped}'`;
     const result = await pool.request().query(sql);

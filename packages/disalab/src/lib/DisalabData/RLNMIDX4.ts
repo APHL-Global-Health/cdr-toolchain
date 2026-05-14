@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaServer } from "../types.js";
 
@@ -25,7 +26,7 @@ export class RLNMIDX4 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT [LOCATION] ,[SURNAME] ,[REGDATE] ,[LABNO] FROM [DisalabData].[dbo].[RLNMIDX4] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {

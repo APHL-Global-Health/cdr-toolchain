@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import type { DisaServer } from "../types.js";
@@ -74,7 +75,7 @@ export class WLSTDAT6 {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT [DATESTAMP] ,[AREA] ,[WLSTGROUP] ,[WLSTATUS] ,[REQUESTED_DATE] ,[PRIORITY] ,[LABNO] ,[REGION] ,[REQUESTED_Time] ,[TESTINDEX] ,[TESTCODE] ,[REVIEWER] ,[WLSTDAT6_STATUS] FROM [DisalabData].[dbo].[WLSTDAT6] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {

@@ -1,4 +1,5 @@
 import mssql from "mssql";
+import { getPool } from "../pool.js";
 import * as Core from "../core.js";
 import type { DisaInput } from "../core.js";
 import type { DisaServer } from "../types.js";
@@ -47,7 +48,7 @@ export class TXT1DATA {
     if (DB_DRIVER === "mssql") {
       try {
         const sql = `SELECT [DATESTAMP] ,[LABNO] ,[TESTCODE] ,[TESTINDEX] ,[FRAMEREF] ,[TXT1DATA_STATUS] FROM [DisalabData].[dbo].[TXT1DATA] ${!Core.IsEmpty(where) ? where : ""}`;
-        const pool = await mssql.connect(DB_URI);
+        const pool = await getPool(DB_URI);
         const list = (await pool.request().query(sql)).recordset;
 
         list.forEach((row: Record<string, unknown>) => {

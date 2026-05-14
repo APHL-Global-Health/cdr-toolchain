@@ -56,3 +56,5 @@ export { TXT1DATA } from "./lib/DisalabData/TXT1DATA.js";
 export { WLSTDAT6 } from "./lib/DisalabData/WLSTDAT6.js";
 
 export { SpecimenRecpt } from "./lib/Forms/specimenrecpt.js";
+
+export { getPool, closeAllPools } from "./lib/pool.js";

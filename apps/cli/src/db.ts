@@ -1,11 +1,7 @@
-import mssql from "mssql";
 import type { DisaServer } from "disalab";
+import { getPool, closeAllPools } from "disalab";
 import { CliError } from "./errors.js";
 import type { LoadedConfig } from "./config.js";
-
-interface MssqlWithClose {
-  close?: () => Promise<void>;
-}
 
 export function buildServer(config: LoadedConfig): DisaServer {
   return {
@@ -18,14 +14,19 @@ export function buildServer(config: LoadedConfig): DisaServer {
   };
 }
 
+/**
+ * No-op kept for source-compat with existing per-operation `finally`
+ * blocks. Pools are now held by the disalab pool registry keyed by
+ * connection string and live for the whole process. Use
+ * `closeAllConnectionPools` at process exit (wired in src/index.ts).
+ */
 export async function closePool(): Promise<void> {
-  const m = mssql as unknown as MssqlWithClose;
-  if (typeof m.close !== "function") return;
-  try {
-    await m.close();
-  } catch {
-    // ignore — pool may never have been opened
-  }
+  return;
+}
+
+/** Drain every open ConnectionPool. Called once at process exit. */
+export async function closeAllConnectionPools(): Promise<void> {
+  await closeAllPools();
 }
 
 export async function withServer<T>(
@@ -39,19 +40,15 @@ export async function withServer<T>(
     if (err instanceof CliError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError("DB_QUERY_FAILED", message);
-  } finally {
-    await closePool();
   }
 }
 
 export async function assertConnection(config: LoadedConfig): Promise<void> {
   try {
-    const pool = await mssql.connect(config.connectionString);
+    const pool = await getPool(config.connectionString);
     await pool.request().query("SELECT 1 AS ok");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError("DB_CONNECT_FAILED", message);
-  } finally {
-    await closePool();
   }
 }
