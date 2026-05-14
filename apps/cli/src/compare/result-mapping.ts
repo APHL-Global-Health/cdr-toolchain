@@ -8,6 +8,12 @@ export interface DisaObs {
   panelCode: string;
   /** DISA TESTINDEX — distinguishes repeat orderings of the same panel. */
   panelIndex: number;
+  /**
+   * DISA TESTDATA.DATESTAMP — when the panel iteration was created. Used as
+   * the primary supersession key (latest date wins); TESTINDEX is the
+   * tiebreaker. Null when the row carried no timestamp.
+   */
+  datestamp: Date | null;
   /** Position of the OrderItem within its panel — used as a tie-breaker. */
   orderIndex: number;
   paramCode: string;
@@ -137,13 +143,25 @@ function isObservationStructurallyEmpty(
  * for "final") in the blob's 5-byte result slot. v1's migration drops these.
  * Applies to type 5 (Text) and type 6 (Graphic), which are the two types
  * that use TXT1DATA overflow rows.
+ *
+ * Discriminator: when TXT1DATA successfully resolved the row, `Value` was
+ * transformed from `RawValue` (e.g. byte `\x0a` → "C" for an HIV subtype),
+ * so `Value !== RawValue` — that's real data, keep it. When `Value` equals
+ * `RawValue`, no lookup ran and the 1-char string is the residual status
+ * flag we want to drop. Without this guard, single-letter codes like HIV
+ * subtype "C" (HIV1S/H1SRT, TDS0010161) get dropped while v1 keeps them.
  */
-function isStrayStatusFlag(typeChar: string, value: string | number): boolean {
+function isStrayStatusFlag(
+  typeChar: string,
+  value: string | number,
+  rawValue: string,
+): boolean {
   if (typeof value !== "string") return false;
   const trimmed = value.trim();
   if (trimmed.length > 1) return false;
   const t = typeChar.length > 0 ? typeChar.charCodeAt(0) : -1;
-  return t === 5 || t === 6;
+  if (t !== 5 && t !== 6) return false;
+  return trimmed === rawValue.trim();
 }
 
 /**
@@ -229,6 +247,16 @@ function numbersMatch(a: number, b: number): boolean {
 }
 
 /**
+ * Normalize a free-text value for string comparison. Maps backticks to
+ * apostrophes: v1's migration sometimes wrote backticks where DISA has
+ * literal apostrophes (e.g. "MNG'ONG'O" → "MNG`ONG`O"), so treat the two
+ * as equivalent rather than flagging a phantom mismatch.
+ */
+function normalizeText(v: unknown): unknown {
+  return typeof v === "string" ? v.replace(/`/g, "'") : v;
+}
+
+/**
  * Compare candidate arrays. Both sides may supply multiple candidates; any
  * non-empty × non-empty match wins. Empty candidates are filtered before the
  * cross product — otherwise an empty string on both sides would spuriously
@@ -268,7 +296,7 @@ function looseMultiCandidate(disa: unknown, v1: unknown): CompareResult {
       if (vNum !== null && dIneq !== null && inequalitySatisfied(vNum, dIneq)) {
         return { status: "match", reason: `v1 ${vNum} satisfies DISA bound ${dIneq.op}${dIneq.bound}` };
       }
-      const r = stringCiLoose(d, v);
+      const r = stringCiLoose(normalizeText(d), normalizeText(v));
       if (r.status === "match") return r;
       last = r;
     }
@@ -440,42 +468,79 @@ export interface SupersedeResult {
 }
 
 /**
- * Per panel code, keep only OrderItems whose `panelIndex` equals the highest
- * `panelIndex` seen for that panel. DISA reruns a panel by adding a new
- * TESTINDEX row (preliminary + final, two-tech verification, etc.); OpenLDR
- * v1's migration discarded the earlier iterations, so the fidelity check and
- * the v2 export both need to mirror that "latest wins" behaviour. Returns the
- * filtered observations plus a per-superseded-iteration sidecar that the
- * audit subsystem turns into a `panel_iterations_superseded` anomaly.
+ * Per panel code, keep only OrderItems from the LATEST iteration. DISA
+ * reruns a panel by adding a new TESTDATA row (preliminary + final, two-tech
+ * verification, retrospective re-evaluation, etc.); OpenLDR v1's migration
+ * discarded the earlier iterations, so the fidelity check and the v2 export
+ * both need to mirror that "latest wins" behaviour.
+ *
+ * Ranking: latest `datestamp` wins; `panelIndex` is the tiebreaker (higher
+ * wins when timestamps match or when one side has no datestamp). TESTINDEX
+ * alone was the original heuristic but breaks on labs like TDS0010161 where
+ * an OLDER iteration carries a HIGHER TESTINDEX (e.g. TESTINDEX=103 dated
+ * 2013 vs TESTINDEX=4 dated 2018 — 103 is a retrospective re-evaluation,
+ * not a newer rerun).
+ *
+ * Returns the filtered observations plus a per-superseded-iteration sidecar
+ * that the audit subsystem turns into a `panel_iterations_superseded` anomaly.
  */
 export function supersedePanelIterations(obs: DisaObs[]): SupersedeResult {
-  const maxIdx = new Map<string, number>();
+  interface IterKey {
+    panelIndex: number;
+    datestampMs: number | null;
+  }
+  // Higher datestampMs wins; null sorts as -Infinity so a dated iteration
+  // always beats an undated one. Same datestamp (or both null) → higher
+  // panelIndex wins.
+  function isLater(a: IterKey, b: IterKey): boolean {
+    const am = a.datestampMs ?? -Infinity;
+    const bm = b.datestampMs ?? -Infinity;
+    if (am !== bm) return am > bm;
+    return a.panelIndex > b.panelIndex;
+  }
+  function sameIter(a: IterKey, b: IterKey): boolean {
+    return a.panelIndex === b.panelIndex && a.datestampMs === b.datestampMs;
+  }
+
+  const winner = new Map<string, IterKey>();
   for (const o of obs) {
-    const cur = maxIdx.get(o.panelCode);
-    if (cur === undefined || o.panelIndex > cur) maxIdx.set(o.panelCode, o.panelIndex);
+    const k: IterKey = {
+      panelIndex: o.panelIndex,
+      datestampMs: o.datestamp === null ? null : o.datestamp.getTime(),
+    };
+    const cur = winner.get(o.panelCode);
+    if (cur === undefined || isLater(k, cur)) winner.set(o.panelCode, k);
   }
 
   const kept: DisaObs[] = [];
-  const droppedCounts = new Map<string, number>(); // `${panelCode}\t${panelIndex}` → count
+  // key: `${panelCode}\t${panelIndex}\t${datestampMs|null}` → count
+  const droppedCounts = new Map<string, number>();
+  // Track the panelIndex per dropped key for the sidecar output.
+  const droppedPanelIndex = new Map<string, number>();
   for (const o of obs) {
-    const max = maxIdx.get(o.panelCode);
-    if (max === undefined || o.panelIndex === max) {
+    const w = winner.get(o.panelCode);
+    const k: IterKey = {
+      panelIndex: o.panelIndex,
+      datestampMs: o.datestamp === null ? null : o.datestamp.getTime(),
+    };
+    if (w === undefined || sameIter(k, w)) {
       kept.push(o);
     } else {
-      const key = `${o.panelCode}\t${o.panelIndex}`;
+      const key = `${o.panelCode}\t${k.panelIndex}\t${k.datestampMs ?? "null"}`;
       droppedCounts.set(key, (droppedCounts.get(key) ?? 0) + 1);
+      droppedPanelIndex.set(key, k.panelIndex);
     }
   }
 
   const superseded: SupersededPanelIteration[] = [];
   for (const [key, count] of droppedCounts) {
-    const tab = key.indexOf("\t");
-    const panelCode = key.slice(0, tab);
-    const panelIndex = Number(key.slice(tab + 1));
+    const firstTab = key.indexOf("\t");
+    const panelCode = key.slice(0, firstTab);
+    const panelIndex = droppedPanelIndex.get(key)!;
     superseded.push({
       panelCode,
       panelIndex,
-      supersededBy: maxIdx.get(panelCode)!,
+      supersededBy: winner.get(panelCode)!.panelIndex,
       observationCount: count,
     });
   }
@@ -486,6 +551,18 @@ export function supersedePanelIterations(obs: DisaObs[]): SupersedeResult {
   return { kept, superseded };
 }
 
+/** Coerce a TESTDATA.DATESTAMP cell into a Date or null. mssql returns
+ *  DATETIME as a JS Date already; legacy callers may receive a string. */
+function coerceDatestamp(v: unknown): Date | null {
+  if (v === null || v === undefined) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    return Number.isNaN(t) ? null : new Date(t);
+  }
+  return null;
+}
+
 /** Flatten `SpecimenRecpt.TestResults` into one row per OrderItem. */
 export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaObs[] {
   const includeEmpty = opts.includeEmpty === true;
@@ -494,6 +571,7 @@ export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaO
     const panelCode = String(test.TESTCODE ?? "").trim();
     const rawIdx = test.TESTINDEX;
     const panelIndex = typeof rawIdx === "number" ? rawIdx : Number(rawIdx ?? 0);
+    const datestamp = coerceDatestamp(test.DATESTAMP);
     const order = test.ORDER;
     const items: OrderItem[] = order instanceof Order
       ? (order.ORDERS as OrderItem[])
@@ -515,7 +593,7 @@ export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaO
         const isCodedType = typeCode === 0 || typeCode === 3 || typeCode === 4 || typeCode === 11 || typeCode === 12;
         const hasCodedFallback = isCodedType && (item.RawValue ?? "").trim().length > 0;
         if (!item.IsResulted && !hasCodedFallback) return;
-        if (isStrayStatusFlag(item.Type, item.Value)) return;
+        if (isStrayStatusFlag(item.Type, item.Value, item.RawValue ?? "")) return;
         if (isInformationMissingSentinel(item.Value)) return;
         // Rejection metadata — DISA's reason-for-test-rejection fields.
         // RJREA = Rejection Reason (coded); RJREM = Rejection Memo (text).
@@ -525,6 +603,7 @@ export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaO
       out.push({
         panelCode,
         panelIndex: Number.isFinite(panelIndex) ? panelIndex : 0,
+        datestamp,
         orderIndex,
         paramCode,
         paramDesc: item.Description ?? null,

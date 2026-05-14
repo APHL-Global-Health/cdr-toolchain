@@ -35,6 +35,10 @@ function projectV1Observation(lr: OpenLdrV1LabResult): DisaObs {
   return {
     panelCode: (lr.LIMSPanelCode ?? "").trim(),
     panelIndex: lr.OBRSetID,
+    // v1 LabResults rows don't carry per-OBR datestamps; the audit-vs-v1
+    // path doesn't drive supersession from this projection (it only reuses
+    // DisaObs for the structural-validation detectors), so null is fine.
+    datestamp: null,
     orderIndex: lr.OBXSetID,
     paramCode: (lr.LIMSObservationCode ?? "").trim(),
     paramDesc: lr.LIMSObservationDesc,
