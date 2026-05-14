@@ -312,8 +312,8 @@ function buildLabRequest(
     specimen_code: specimenCode,
     taken_datetime: disaToIso(s.TakenDateTime),
     collected_datetime: disaToIso(s.CollectedDateTime),
-    received_at: disaToIso(s.ReceivedInLabDateTime),
-    registered_at: null, // disalab doesn't surface a registered_at distinct from received
+    received_at: disaToIso(s.ReceivedInLabDateTime) ?? disaToIso(s.RegisteredDateTime),
+    registered_at: disaToIso(s.RegisteredDateTime),
     analysis_at: null,   // disalab doesn't expose analysis_at on SpecimenRecpt
     authorised_at: null, // ditto authorised_at
     clinical_info: nz(s.ClinicalDiagnosisText) ?? nz(s.ClinicalDiagnosis),

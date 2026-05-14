@@ -354,8 +354,14 @@ export const RESULT_FIELDS: ResultFieldDef[] = [
       const trimmed = r.rptResult.trim();
       if (trimmed.length === 0) return [null];
       if (r.codedValue !== null && r.codedValue.trim().length > 0) return [null];
-      if (parseNumber(trimmed) !== null) return [null];
-      if (parseInequality(trimmed) !== null) return [null];
+      // When v1 explicitly types the row as text (resultType "T"), trust it —
+      // lot numbers and phone numbers parse as numbers but are still text.
+      // Content-sniffing only applies when v1 didn't tell us the type.
+      const resultType = r.resultType === null ? "" : r.resultType.trim().toUpperCase();
+      if (resultType !== "T") {
+        if (parseNumber(trimmed) !== null) return [null];
+        if (parseInequality(trimmed) !== null) return [null];
+      }
       return [r.rptResult];
     },
   },

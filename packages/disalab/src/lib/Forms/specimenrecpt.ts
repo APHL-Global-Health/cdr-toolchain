@@ -46,6 +46,7 @@ export class SpecimenRecpt {
   CollectedBy: string | null = null;
   ReceivedInLabDateTime: string | null = null;
   ReceivedInLabBy: string | null = null;
+  RegisteredDateTime: string | null = null;
   Priority: string | null = null;
 
   DoctorCode: string | null = null;
@@ -186,6 +187,7 @@ export class SpecimenRecpt {
       r.CollectedBy = regdat4.CollectedBy ?? null;
       r.ReceivedInLabDateTime = regdat4.ReceivedInLabDateTime;
       r.ReceivedInLabBy = regdat4.ReceivedInLabBy ?? null;
+      r.RegisteredDateTime = regdat4.RegisteredDatetime;
       r.Priority = regdat4.Priority;
 
       if (Core.IsNullOrEmpty(r.Specimen)) r.Specimen = null;
@@ -197,6 +199,7 @@ export class SpecimenRecpt {
       if (Core.IsNullOrEmpty(r.CollectedBy)) r.CollectedBy = null;
       if (Core.IsNullOrEmpty(r.ReceivedInLabDateTime)) r.ReceivedInLabDateTime = null;
       if (Core.IsNullOrEmpty(r.ReceivedInLabBy)) r.ReceivedInLabBy = null;
+      if (Core.IsNullOrEmpty(r.RegisteredDateTime)) r.RegisteredDateTime = null;
       if (Core.IsNullOrEmpty(r.Priority)) r.Priority = null;
 
       r.DoctorCode = regdat4.Ref_Dr_ID;

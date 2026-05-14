@@ -74,7 +74,11 @@ export const REQUEST_FIELDS: FieldDef[] = [
   {
     field: "received_at",
     comparator: datetime,
-    getDisa: (s) => s.ReceivedInLabDateTime,
+    // Older deployments left ReceivedInLabDateTime blank but populated
+    // RegisteredDateTime (REGDAT4 bytes 126-134, "logged into LIS" stamp).
+    // v1's migration appears to have used the LIS-registration time as its
+    // ReceivedDateTime — match either candidate.
+    getDisa: (s) => [s.ReceivedInLabDateTime, s.RegisteredDateTime],
     getV1: (r) => r.ReceivedDateTime,
   },
   {

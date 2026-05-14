@@ -222,7 +222,7 @@ export interface DiffResultsOpts extends FlattenDisaOpts {}
  * SCOM/VCOM coded-comment (e.g. "TLINT" → "Taqman Log interpretation"). When
  * such a comment is present AND quantitative slots are empty, v1's migration
  * synthesizes below-detection reports (HIVVQ="< 40", HIVVM="< 20",
- * HIVTL="0.00"). We treat those only_v1 rows as expected synthesis, not
+ * HIVTL="0.00", HIVTM="< 20"). We treat those only_v1 rows as expected synthesis, not
  * fidelity misses.
  */
 function detectSynthesisPanels(disaObs: DisaObs[]): Set<string> {
@@ -246,7 +246,7 @@ function isSynthesisedV1Obs(
   synthesisPanels: Set<string>,
 ): boolean {
   if (!synthesisPanels.has(panelCode)) return false;
-  if (paramCode !== "HIVVQ" && paramCode !== "HIVVM" && paramCode !== "HIVTL") return false;
+  if (paramCode !== "HIVVQ" && paramCode !== "HIVVM" && paramCode !== "HIVTL" && paramCode !== "HIVTM") return false;
   const rpt = (v.rptResult ?? "").trim();
   if (rpt.length === 0) return false;
   if (parseInequality(rpt) !== null) return true;
@@ -257,7 +257,7 @@ function isSynthesisedV1Obs(
 
 /**
  * Mirror of isSynthesisedV1Obs: when DISA stores a quantitative zero (or
- * other below-detection sentinel) on HIVVQ/HIVVM/HIVTL AND the panel has a
+ * other below-detection sentinel) on HIVVQ/HIVVM/HIVTL/HIVTM AND the panel has a
  * TLINT signal, v1 drops the row instead of migrating a zero result. Both
  * sides are expressing the same "below detection" fact — classify as match.
  */
@@ -268,7 +268,7 @@ function isSynthesisedDisaObs(
   synthesisPanels: Set<string>,
 ): boolean {
   if (!synthesisPanels.has(panelCode)) return false;
-  if (paramCode !== "HIVVQ" && paramCode !== "HIVVM" && paramCode !== "HIVTL") return false;
+  if (paramCode !== "HIVVQ" && paramCode !== "HIVVM" && paramCode !== "HIVTL" && paramCode !== "HIVTM") return false;
   if (typeof d.value === "number") return d.value === 0;
   const n = parseNumber(d.value);
   return n !== null && n === 0;

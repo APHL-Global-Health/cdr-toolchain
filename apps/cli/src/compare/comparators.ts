@@ -73,6 +73,22 @@ export function datetime(disa: unknown, v1: unknown): CompareResult {
   ) {
     return { status: "match" };
   }
+  // v1's historical migration truncated some datetimes to date-only (UTC
+  // midnight) — RegisteredDateTime in particular comes through as a clean
+  // 00:00 even when DISA kept the real registration time. Same calendar
+  // date with either side at midnight is the same event at different
+  // precision, not a mismatch.
+  const sameDate = dd.y === vd.y && dd.mo === vd.mo && dd.d === vd.d;
+  const v1Midnight = vd.h === 0 && vd.mi === 0;
+  const disaMidnight = dd.h === 0 && dd.mi === 0;
+  if (sameDate && (v1Midnight || disaMidnight)) {
+    return {
+      status: "match",
+      reason: v1Midnight
+        ? "same date; v1 stored as date-only (midnight)"
+        : "same date; DISA stored as date-only (midnight)",
+    };
+  }
   return {
     status: "mismatch",
     reason: `wall clock differs: DISA=${fmtWc(dd)} v1=${fmtWc(vd)}`,
