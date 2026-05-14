@@ -1,5 +1,5 @@
 import type { AUDTDATA, SpecimenRecpt } from "disalab";
-import { flattenDisa } from "../compare/result-mapping.js";
+import { flattenDisa, supersedePanelIterations } from "../compare/result-mapping.js";
 import type { Codebook } from "./codebook.js";
 import { collectOrderedPanels } from "./panels.js";
 import type { V1LabResult, V1Payload, V1Request } from "./types.js";
@@ -341,8 +341,10 @@ export function toV1(specimen: SpecimenRecpt, opts: ToV1Opts): V1Payload {
   // LabResults: drive iteration off flattenDisa so we inherit the same
   // resulted-only filter, stray-status-flag filter, "Information missing"
   // sentinel filter, and rejection-metadata filter that the v2 path uses.
-  // Group resulting rows by panelCode to assign OBRSetID + per-panel OBXSetID.
-  const obs = flattenDisa(specimen);
+  // supersedePanelIterations then drops preliminary panel reruns so a v1
+  // emit matches what v1's own historical migration produced. Group
+  // resulting rows by panelCode to assign OBRSetID + per-panel OBXSetID.
+  const obs = supersedePanelIterations(flattenDisa(specimen)).kept;
   const obrIndexByPanel = new Map<string, number>();
   orderedPanels.forEach((panelCode, i) => obrIndexByPanel.set(panelCode, i + 1));
 

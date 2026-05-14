@@ -6,6 +6,7 @@ import {
   parseInequality,
   parseNumber,
   RESULT_FIELDS,
+  supersedePanelIterations,
   type DisaObs,
   type FlattenDisaOpts,
   type V1Obs,
@@ -278,7 +279,11 @@ export function diffResults(
   v1Rows: OpenLdrV1LabResult[],
   opts: DiffResultsOpts = {},
 ): ResultDiff {
-  const disaObs = flattenDisa(disa, opts);
+  // DISA reruns a panel by adding a higher TESTINDEX row; v1's migration
+  // kept only the final iteration. Mirror that here so we don't pair v1's
+  // single OBR set against DISA's preliminary panel run (which would surface
+  // as a value mismatch + only_disa overhang on the final run).
+  const disaObs = supersedePanelIterations(flattenDisa(disa, opts)).kept;
   const v1Obs = flattenV1(v1Rows);
   const synthesisPanels = detectSynthesisPanels(disaObs);
 

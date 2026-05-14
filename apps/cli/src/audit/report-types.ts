@@ -114,6 +114,11 @@ export const CLASS_DESCRIPTIONS: Record<AnomalyClass, { title: string; rule: str
     rule: "Panel was ordered (appears in TestOrders) but has no observations recorded against it. Often legitimate (e.g. MSENS ordered prophylactically) but worth tracking volume.",
     severity: "info",
   },
+  panel_iterations_superseded: {
+    title: "Panel iterations superseded",
+    rule: "DISA stored multiple TESTINDEX iterations of the same panel (preliminary + final, or repeat-tech verification). v1's historical migration kept only the final iteration; the v2 export mirrors that choice, so observations from earlier iterations were dropped. Anomaly records what was dropped so reviewers can see panel reruns explicitly.",
+    severity: "info",
+  },
   specimen_description_vague: {
     title: "Specimen description vague",
     rule: "Specimen has a code but its description doesn't tokenise to any known specimen kind — vocabulary gap in the audit detector.",

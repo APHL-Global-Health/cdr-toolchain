@@ -1,5 +1,10 @@
 import type { SpecimenRecpt } from "disalab";
-import { flattenDisa, type DisaObs } from "../compare/result-mapping.js";
+import {
+  flattenDisa,
+  supersedePanelIterations,
+  type DisaObs,
+  type SupersededPanelIteration,
+} from "../compare/result-mapping.js";
 import type { Codebook } from "../export/codebook.js";
 import { collectOrderedPanels } from "../export/panels.js";
 import { extractKinds, kindsCompatible, type SpecimenKind } from "./specimen-vocab.js";
@@ -27,8 +32,13 @@ export interface AuditInputs {
   specimenCode: string | null;
   /** Panel codes from TestOrders, in order, deduped. */
   orderedPanels: string[];
-  /** All resulted observations across panels (the same shape as flattenDisa). */
+  /** Resulted observations across panels, after superseding earlier panel
+   *  iterations (the same shape exported to v2). */
   observations: DisaObs[];
+  /** Per-superseded-iteration sidecar: DISA panel reruns whose observations
+   *  were dropped in favour of a later iteration. Empty when no panel was
+   *  rerun. v1-source audits leave this empty (v1 already discarded reruns). */
+  supersededIterations: SupersededPanelIteration[];
   /** Raw DISA DobAge field — "MM/DD/YYYY" or null. v1-source audits leave this null. */
   dobRaw: string | null;
   /** Raw DISA "MM/DD/YYYY HH:MM" datetimes; null when not captured. */
@@ -414,11 +424,31 @@ function detectResultFormatIssues(input: AuditInputs, cb: Codebook): Anomaly[] {
   return out;
 }
 
+function detectSupersededIterations(input: AuditInputs, cb: Codebook): Anomaly[] {
+  const out: Anomaly[] = [];
+  for (const s of input.supersededIterations) {
+    out.push({
+      class: "panel_iterations_superseded",
+      severity: "info",
+      message: `Panel "${s.panelCode}" iteration ${s.panelIndex} (${s.observationCount} observation${s.observationCount === 1 ? "" : "s"}) was superseded by iteration ${s.supersededBy}.`,
+      panel_code: s.panelCode,
+      panel_index: s.panelIndex,
+      details: {
+        superseded_by_panel_index: s.supersededBy,
+        observation_count: s.observationCount,
+        panel_description: describePanel(cb, s.panelCode),
+      },
+    });
+  }
+  return out;
+}
+
 export function detectAnomalies(input: AuditInputs, cb: Codebook): Anomaly[] {
   return [
     ...detectPanelSpecimenMismatch(input, cb),
     ...detectObservationWrongPanel(input, cb),
     ...detectOrphanPanels(input, cb),
+    ...detectSupersededIterations(input, cb),
     ...detectResultFormatIssues(input, cb),
     ...detectPatientAnomalies(input),
   ];
@@ -439,7 +469,12 @@ export function auditFromSpecimen(
   cb: Codebook,
 ): AuditReport {
   const start = Date.now();
-  const observations = flattenDisa(specimen);
+  // Run the audit against the same observation set that gets posted to v2 —
+  // earlier panel iterations were already dropped by the v2 transform, so
+  // running result-format / wrong-panel checks against them would emit
+  // anomalies for data v2 never sees. The dropped iterations get their own
+  // structured anomaly via detectSupersededIterations.
+  const { kept: observations, superseded } = supersedePanelIterations(flattenDisa(specimen));
   const orderedPanels = collectOrderedPanels(specimen);
   const labNumber = nullIfEmpty(specimen.LabNumber) ?? "";
   const specimenCode = nullIfEmpty(specimen.Specimen);
@@ -449,6 +484,7 @@ export function auditFromSpecimen(
     specimenCode,
     orderedPanels,
     observations,
+    supersededIterations: superseded,
     dobRaw: nullIfEmpty(specimen.DobAge),
     takenAtRaw: nullIfEmpty(specimen.TakenDateTime),
     collectedAtRaw: nullIfEmpty(specimen.CollectedDateTime),

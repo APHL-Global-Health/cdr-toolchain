@@ -371,6 +371,68 @@ export interface FlattenDisaOpts {
   includeEmpty?: boolean;
 }
 
+/** One DISA panel iteration that was dropped in favour of a later run. */
+export interface SupersededPanelIteration {
+  panelCode: string;
+  panelIndex: number;
+  /** Highest panel_index seen for this panel — the iteration that survives. */
+  supersededBy: number;
+  /** Number of OrderItems dropped from this iteration. */
+  observationCount: number;
+}
+
+export interface SupersedeResult {
+  kept: DisaObs[];
+  superseded: SupersededPanelIteration[];
+}
+
+/**
+ * Per panel code, keep only OrderItems whose `panelIndex` equals the highest
+ * `panelIndex` seen for that panel. DISA reruns a panel by adding a new
+ * TESTINDEX row (preliminary + final, two-tech verification, etc.); OpenLDR
+ * v1's migration discarded the earlier iterations, so the fidelity check and
+ * the v2 export both need to mirror that "latest wins" behaviour. Returns the
+ * filtered observations plus a per-superseded-iteration sidecar that the
+ * audit subsystem turns into a `panel_iterations_superseded` anomaly.
+ */
+export function supersedePanelIterations(obs: DisaObs[]): SupersedeResult {
+  const maxIdx = new Map<string, number>();
+  for (const o of obs) {
+    const cur = maxIdx.get(o.panelCode);
+    if (cur === undefined || o.panelIndex > cur) maxIdx.set(o.panelCode, o.panelIndex);
+  }
+
+  const kept: DisaObs[] = [];
+  const droppedCounts = new Map<string, number>(); // `${panelCode}\t${panelIndex}` → count
+  for (const o of obs) {
+    const max = maxIdx.get(o.panelCode);
+    if (max === undefined || o.panelIndex === max) {
+      kept.push(o);
+    } else {
+      const key = `${o.panelCode}\t${o.panelIndex}`;
+      droppedCounts.set(key, (droppedCounts.get(key) ?? 0) + 1);
+    }
+  }
+
+  const superseded: SupersededPanelIteration[] = [];
+  for (const [key, count] of droppedCounts) {
+    const tab = key.indexOf("\t");
+    const panelCode = key.slice(0, tab);
+    const panelIndex = Number(key.slice(tab + 1));
+    superseded.push({
+      panelCode,
+      panelIndex,
+      supersededBy: maxIdx.get(panelCode)!,
+      observationCount: count,
+    });
+  }
+  superseded.sort((a, b) =>
+    a.panelCode.localeCompare(b.panelCode) || a.panelIndex - b.panelIndex,
+  );
+
+  return { kept, superseded };
+}
+
 /** Flatten `SpecimenRecpt.TestResults` into one row per OrderItem. */
 export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaObs[] {
   const includeEmpty = opts.includeEmpty === true;

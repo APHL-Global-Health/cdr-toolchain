@@ -91,13 +91,16 @@ export async function auditFromV1(
 
   // v1 doesn't preserve raw DOB — only AgeInYears/AgeInDays. Skip the
   // DOB anomaly checks by passing nulls. SpecimenDateTime stands in for
-  // both takenAt and collectedAt (v1 collapses the two).
+  // both takenAt and collectedAt (v1 collapses the two). v1 already
+  // discarded preliminary panel reruns during its own migration, so the
+  // supersededIterations sidecar is always empty in the v1-source path.
   const input: AuditInputs = {
     labNumber: requestId,
     requestId,
     specimenCode: specimenCode.length > 0 ? specimenCode : null,
     orderedPanels,
     observations,
+    supersededIterations: [],
     dobRaw: null,
     takenAtRaw: isoFromDate(head.SpecimenDateTime),
     collectedAtRaw: isoFromDate(head.SpecimenDateTime),

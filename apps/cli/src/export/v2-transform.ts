@@ -1,5 +1,10 @@
 import type { Facility, SpecimenRecpt } from "disalab";
-import { flattenDisa, parseNumber, type DisaObs } from "../compare/result-mapping.js";
+import {
+  flattenDisa,
+  parseNumber,
+  supersedePanelIterations,
+  type DisaObs,
+} from "../compare/result-mapping.js";
 import { splitPointOfCare } from "../openldr.js";
 import type { AuditReport } from "../audit/types.js";
 import type { Codebook } from "./codebook.js";
@@ -611,7 +616,11 @@ function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
 }
 
 export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
-  const obs = flattenDisa(specimen);
+  // DISA's preliminary panel runs (lower TESTINDEX) are superseded by later
+  // reruns of the same panel — v1 dropped them, so v2 mirrors that to keep
+  // a single canonical observation per (panelCode, paramCode). The audit
+  // surfaces the dropped iterations via `panel_iterations_superseded`.
+  const obs = supersedePanelIterations(flattenDisa(specimen)).kept;
   const groups = groupByPanel(obs);
   const primary = selectPrimaryPanel(groups, opts.codebook);
   const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook);
