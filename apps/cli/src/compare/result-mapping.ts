@@ -99,7 +99,8 @@ function isDisaValueEmpty(v: string | number): boolean {
  *     Value="#"). The garbage is not whitespace-only, so the base
  *     emptiness check keeps the obs and we emit a false `only_disa`
  *     against v1's correctly-dropped row. Treat any C0 control byte in
- *     a Date/Time value as a decode failure.
+ *     a Date/Time value — or any shape that isn't `DD/MM/YYYY` (Date)
+ *     or `HH[:MM[:SS]]` (Time) — as a decode failure / data-entry slip.
  */
 function isObservationStructurallyEmpty(
   typeChar: string,
@@ -114,6 +115,13 @@ function isObservationStructurallyEmpty(
       for (let i = 0; i < value.length; i++) {
         if (value.charCodeAt(i) < 0x20) return true;
       }
+      // Shape gate: disalab's Date decoder canonicalises to DD/MM/YYYY,
+      // and Time values are HH, HH:MM, or HH:MM:SS. Anything else (e.g.
+      // TPT Value="2" — operator typed a duration into a Time slot) is
+      // a data-entry slip v1 drops, so we drop it too.
+      const trimmed = value.trim();
+      const shape = t === 7 ? /^\d{2}\/\d{2}\/\d{4}$/ : /^\d{2}(?::\d{2}(?::\d{2})?)?$/;
+      if (!shape.test(trimmed)) return true;
     }
     return false;
   }
