@@ -5,7 +5,7 @@ export interface CompareResult {
   reason?: string;
 }
 
-function isEmpty(v: unknown): boolean {
+export function isEmpty(v: unknown): boolean {
   if (v === null || v === undefined) return true;
   if (typeof v === "string") return v.trim().length === 0;
   return false;
@@ -44,6 +44,27 @@ export function stringCiStripV1Prefix(prefix: string): (disa: unknown, v1: unkno
     }
     return stringCi(disa, v1Stripped);
   };
+}
+
+/**
+ * Ward / WardClinic comparator. v1's `LIMSPointOfCareDesc` is a single
+ * column that sometimes carries both facility and ward separated by `~`,
+ * and sometimes carries facility alone — the ward is lost during the v1
+ * migration when the source row lacks the separator. When DISA has a
+ * ward and v1's parsed ward is empty, treat as a match (v1 data loss,
+ * not a toolchain bug — v2 will emit the ward from DISA correctly).
+ * Other cases fall back to case-insensitive string equality.
+ */
+export function wardComparator(disa: unknown, v1: unknown): CompareResult {
+  if (isEmpty(disa) && isEmpty(v1)) return { status: "match" };
+  if (isEmpty(disa) && !isEmpty(v1)) return { status: "only_v1" };
+  if (!isEmpty(disa) && isEmpty(v1)) {
+    return {
+      status: "match",
+      reason: "v1 dropped ward (no separator in LIMSPointOfCareDesc)",
+    };
+  }
+  return stringCi(disa, v1);
 }
 
 export function stringCiLoose(disa: unknown, v1: unknown): CompareResult {

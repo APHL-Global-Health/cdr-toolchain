@@ -30,6 +30,16 @@ export interface OpenLdrV1Request {
   AttendingDoctor: string | null;
   TestedBy: string | null;
   AuthorisedBy: string | null;
+  /**
+   * All non-null LIMSPanelCode values across every OBR-set row for this
+   * RequestID, deduplicated. v1 may split DISA's parent panel into several
+   * OBR rows (one per sub-test) so the parent panel code can sit on any
+   * OBRSetID, not just OBR=1. The request-level comparator treats these
+   * as candidates so a match on any row counts. Populated by
+   * fetchRequestByRequestId; absent from rows returned by
+   * fetchAllRequestsByRequestId (each of those rows represents one OBR).
+   */
+  allPanelCodes: string[];
 }
 
 /**
@@ -75,10 +85,13 @@ function quoteIdent(name: string): string {
 }
 
 export function buildRequestSql(databaseName: string): string {
-  // Pick the first OBR-set row per request — matches the convention in temp/script.sql
+  // Fetch every OBR-set row per request so we can (a) treat the lowest
+  // OBRSetID as the canonical request-level row, matching the convention
+  // in temp/script.sql, and (b) collect the full panel-code set across
+  // sibling OBR rows for the request-level comparator.
   const fqTable = `${quoteIdent(databaseName)}.[dbo].[Requests]`;
   return `
-    SELECT TOP 1 ${REQUEST_COLUMNS}
+    SELECT ${REQUEST_COLUMNS}
     FROM ${fqTable}
     WHERE [RequestID] = @requestId
     ORDER BY [OBRSetID]
@@ -96,8 +109,21 @@ export async function fetchRequestByRequestId(
       .request()
       .input("requestId", mssql.NVarChar, requestId)
       .query(buildRequestSql(databaseName));
-    const row = result.recordset[0] as OpenLdrV1Request | undefined;
-    return row ?? null;
+    const rows = result.recordset as OpenLdrV1Request[];
+    if (rows.length === 0) return null;
+    const first = rows[0]!;
+    const seen = new Set<string>();
+    const allPanelCodes: string[] = [];
+    for (const r of rows) {
+      const code = r.LIMSPanelCode;
+      if (code === null || code === undefined) continue;
+      const trimmed = String(code).trim();
+      if (trimmed.length === 0 || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      allPanelCodes.push(trimmed);
+    }
+    first.allPanelCodes = allPanelCodes;
+    return first;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError("DB_QUERY_FAILED", `OpenLDR v1 query failed: ${message}`);
@@ -132,7 +158,14 @@ export async function fetchAllRequestsByRequestId(
       .request()
       .input("requestId", mssql.NVarChar, requestId)
       .query(buildAllRequestsSql(databaseName));
-    return result.recordset as OpenLdrV1Request[];
+    // Each row represents one OBR, so per-row allPanelCodes is just that
+    // row's own code. fetchRequestByRequestId is the place that aggregates
+    // across rows.
+    return (result.recordset as OpenLdrV1Request[]).map((r) => {
+      const code = typeof r.LIMSPanelCode === "string" ? r.LIMSPanelCode.trim() : "";
+      r.allPanelCodes = code.length > 0 ? [code] : [];
+      return r;
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError("DB_QUERY_FAILED", `OpenLDR v1 query failed: ${message}`);

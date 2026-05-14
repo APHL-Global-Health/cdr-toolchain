@@ -6,6 +6,7 @@ import {
   stringCi,
   stringCiLoose,
   stringCiStripV1Prefix,
+  wardComparator,
   type CompareResult,
 } from "./comparators.js";
 
@@ -20,7 +21,21 @@ export interface FieldDef {
    * TakenDateTime or CollectedDateTime).
    */
   getDisa: (s: SpecimenRecpt) => unknown | unknown[];
-  getV1: (r: OpenLdrV1Request) => unknown;
+  /**
+   * Pull the v1-side value(s) for this field. Mirrors getDisa: returning an
+   * array marks the values as candidates and the comparator is tried against
+   * each. Use when v1 split a single DISA field across multiple rows (e.g.
+   * v1 emits one OBR per sub-test, so the authoritative panel code may be
+   * on any OBRSetID, not just the first).
+   */
+  getV1: (r: OpenLdrV1Request) => unknown | unknown[];
+  /**
+   * If true, when EVERY DISA candidate is empty the field counts as a match
+   * regardless of what v1 has. Use for fields where v1 stores data DISA's
+   * schema has no source for — v2 can't reproduce it from DISA either, so
+   * the asymmetry isn't a toolchain bug.
+   */
+  allowDisaEmpty?: boolean;
 }
 
 export const REQUEST_FIELDS: FieldDef[] = [
@@ -39,16 +54,26 @@ export const REQUEST_FIELDS: FieldDef[] = [
     getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc).facilityName,
   },
   {
+    // v1's LIMSPointOfCareDesc is sometimes "facility~ward", sometimes just
+    // "facility" — when the source row lacks the tilde, v1 stores no ward.
+    // DISA always carries the ward in REGDAT4.WardClinic. wardComparator
+    // treats the v1-dropped-ward case as match (v1 data loss, not a
+    // toolchain bug — v2 will emit the ward from DISA).
     field: "ward",
-    comparator: stringCi,
+    comparator: wardComparator,
     getDisa: (s) => s.WardClinic,
     getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc).ward,
   },
   {
+    // DISA's order may bundle a panel (e.g. COAGF "Coagulation Indices");
+    // v1 splits the panel into one OBR row per sub-test, so v1's
+    // LIMSPanelCode varies by OBRSetID — the parent panel code may sit on
+    // OBR=2 while OBR=1 carries a child like "INR". Treat allPanelCodes
+    // as candidates so a match on any OBR row counts.
     field: "panel_code",
     comparator: stringCi,
     getDisa: (s) => (s.TestOrders.length > 0 ? String(s.TestOrders[0]) : null),
-    getV1: (r) => r.LIMSPanelCode,
+    getV1: (r) => r.allPanelCodes,
   },
   {
     field: "specimen_code",
@@ -77,9 +102,13 @@ export const REQUEST_FIELDS: FieldDef[] = [
     // Older deployments left ReceivedInLabDateTime blank but populated
     // RegisteredDateTime (REGDAT4 bytes 126-134, "logged into LIS" stamp).
     // v1's migration appears to have used the LIS-registration time as its
-    // ReceivedDateTime — match either candidate.
+    // ReceivedDateTime — match either candidate. When BOTH are empty, v1
+    // sometimes still has a date (an unrecoverable source we haven't
+    // mapped — a few rows even share an obvious literal default like
+    // 2013-02-06); allowDisaEmpty stops the gate from failing on those.
     getDisa: (s) => [s.ReceivedInLabDateTime, s.RegisteredDateTime],
     getV1: (r) => r.ReceivedDateTime,
+    allowDisaEmpty: true,
   },
   {
     field: "priority",

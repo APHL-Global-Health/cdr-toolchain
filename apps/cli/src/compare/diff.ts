@@ -1,7 +1,7 @@
 import type { SpecimenRecpt } from "disalab";
 import type { OpenLdrV1Request } from "../openldr.js";
 import { REQUEST_FIELDS } from "./mapping.js";
-import type { CompareStatus } from "./comparators.js";
+import { isEmpty, type CompareStatus } from "./comparators.js";
 
 export interface FieldRow {
   field: string;
@@ -44,20 +44,47 @@ export function diffRecord(disa: SpecimenRecpt, v1: OpenLdrV1Request): DiffResul
   for (const def of REQUEST_FIELDS) {
     const disaRaw = def.getDisa(disa);
     const disaCandidates = Array.isArray(disaRaw) ? disaRaw : [disaRaw];
-    const v1Val = def.getV1(v1);
+    const v1Raw = def.getV1(v1);
+    const v1Candidates = Array.isArray(v1Raw) ? v1Raw : [v1Raw];
 
-    let result = def.comparator(disaCandidates[0], v1Val);
+    // Try every DISA × v1 pair. The first match wins; otherwise the
+    // primary pair (disaCandidates[0], v1Candidates[0]) is what we
+    // report — matches the previous "first candidate is canonical"
+    // behaviour for single-valued fields.
+    let result = def.comparator(disaCandidates[0], v1Candidates[0]);
     let chosenDisa: unknown = disaCandidates[0];
-    let matchedFallback = false;
-    for (let i = 1; i < disaCandidates.length; i++) {
-      if (result.status === "match") break;
-      const alt = def.comparator(disaCandidates[i], v1Val);
-      if (alt.status === "match") {
-        result = alt;
-        chosenDisa = disaCandidates[i];
-        matchedFallback = true;
-        break;
+    let chosenV1: unknown = v1Candidates[0];
+    let matchedDisaFallback = false;
+    let matchedV1Fallback = false;
+    outer: for (let i = 0; i < disaCandidates.length; i++) {
+      for (let j = 0; j < v1Candidates.length; j++) {
+        if (i === 0 && j === 0) continue;
+        const alt = def.comparator(disaCandidates[i], v1Candidates[j]);
+        if (alt.status === "match") {
+          result = alt;
+          chosenDisa = disaCandidates[i];
+          chosenV1 = v1Candidates[j];
+          matchedDisaFallback = i > 0;
+          matchedV1Fallback = j > 0;
+          break outer;
+        }
       }
+      if (result.status === "match") break;
+    }
+
+    // Field-level escape hatch: when every DISA candidate is empty and the
+    // field opts in, downgrade a final `only_v1` to a `match`. Used for
+    // fields where v1 stores data DISA has no source for (e.g.
+    // received_at — v2 can't reproduce what isn't there).
+    if (
+      def.allowDisaEmpty === true &&
+      result.status === "only_v1" &&
+      isEmpty(disaCandidates[0])
+    ) {
+      result = {
+        status: "match",
+        reason: "DISA has no source for this field; v1-only value not gated",
+      };
     }
 
     summary.total++;
@@ -67,10 +94,15 @@ export function diffRecord(disa: SpecimenRecpt, v1: OpenLdrV1Request): DiffResul
       field: def.field,
       status: result.status,
       disa: valueForOutput(chosenDisa),
-      openldr_v1: valueForOutput(v1Val),
+      openldr_v1: valueForOutput(chosenV1),
     };
     if (result.reason !== undefined) row.reason = result.reason;
-    if (matchedFallback) row.note = "matched via DISA fallback candidate";
+    if (matchedDisaFallback || matchedV1Fallback) {
+      const sides: string[] = [];
+      if (matchedDisaFallback) sides.push("DISA");
+      if (matchedV1Fallback) sides.push("v1");
+      row.note = `matched via ${sides.join(" + ")} fallback candidate`;
+    }
     fields.push(row);
   }
 
