@@ -85,6 +85,45 @@ function isDisaValueEmpty(v: string | number): boolean {
 }
 
 /**
+ * Per-type structural-emptiness check. The plain `isDisaValueEmpty(Value)`
+ * misses two cases:
+ *
+ *   - Coded observations (types 0/3/4/11/12) store the code in `RawValue`
+ *     and the COMMDICT-decoded description in `Value`. When COMMDICT
+ *     doesn't resolve, `Value` is empty but `RawValue` carries the real
+ *     data (e.g. TPCON RawValue="CC", Value=""). v1 still migrates these
+ *     as coded rows, so dropping them produces false `only_v1` diffs.
+ *
+ *   - Date (7) and Time (8) observations whose underlying bytes failed
+ *     to decode end up with control-byte garbage in `Value` (e.g. TPT
+ *     Value="#"). The garbage is not whitespace-only, so the base
+ *     emptiness check keeps the obs and we emit a false `only_disa`
+ *     against v1's correctly-dropped row. Treat any C0 control byte in
+ *     a Date/Time value as a decode failure.
+ */
+function isObservationStructurallyEmpty(
+  typeChar: string,
+  value: string | number,
+  rawValue: string,
+): boolean {
+  const t = typeChar.length > 0 ? typeChar.charCodeAt(0) : -1;
+  const valueEmpty = isDisaValueEmpty(value);
+  if (t === 7 || t === 8) {
+    if (valueEmpty) return true;
+    if (typeof value === "string") {
+      for (let i = 0; i < value.length; i++) {
+        if (value.charCodeAt(i) < 0x20) return true;
+      }
+    }
+    return false;
+  }
+  if (t === 0 || t === 3 || t === 4 || t === 11 || t === 12) {
+    return valueEmpty && isDisaValueEmpty(rawValue);
+  }
+  return valueEmpty;
+}
+
+/**
  * True for OrderItems whose narrative text was supposed to live in TXT1DATA
  * but wasn't — leaving only a stray 1-char HL7 status flag (commonly "F"
  * for "final") in the blob's 5-byte result slot. v1's migration drops these.
@@ -458,8 +497,16 @@ export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaO
       const paramCode = String(item.Code ?? "").trim();
       if (paramCode.length === 0) return;
       if (!includeEmpty) {
-        if (!item.IsResulted) return;
-        if (isDisaValueEmpty(item.Value)) return;
+        if (isObservationStructurallyEmpty(item.Type, item.Value, item.RawValue ?? "")) return;
+        // IsResulted is the decoder's own "this row has data" flag, but it
+        // can be false for coded observations whose COMMDICT lookup failed
+        // — RawValue still carries the code (e.g. TPCON RawValue="CC",
+        // Value=""), and v1 migrates these rows. Trust RawValue as the
+        // resulted signal for coded types.
+        const typeCode = item.Type.length > 0 ? item.Type.charCodeAt(0) : -1;
+        const isCodedType = typeCode === 0 || typeCode === 3 || typeCode === 4 || typeCode === 11 || typeCode === 12;
+        const hasCodedFallback = isCodedType && (item.RawValue ?? "").trim().length > 0;
+        if (!item.IsResulted && !hasCodedFallback) return;
         if (isStrayStatusFlag(item.Type, item.Value)) return;
         if (isInformationMissingSentinel(item.Value)) return;
         // Rejection metadata — DISA's reason-for-test-rejection fields.
