@@ -33,6 +33,9 @@ export interface ObservationRow {
   disa: DisaObsOutput | null;
   openldr_v1: V1ObsOutput | null;
   fields: ResultFieldRow[];
+  /** Populated when this row was reclassified to `match` for a structural reason
+   *  (v1 multi-occurrence overflow, below-detection synthesis, etc.). */
+  reason?: string;
 }
 
 export interface ResultSummary {
@@ -144,6 +147,62 @@ function groupBy<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
     else bucket.push(item);
   }
   return m;
+}
+
+/**
+ * Score a candidate (DISA, v1) pair by whether the primary `result` field
+ * matches. v1 frequently stores multiple OBX rows per (panel, param) —
+ * drafts, corrections, comments — and the older zip-by-index alignment
+ * paired DISA's single final value against v1's first row even when a
+ * later v1 row was the real match (TDS0011176 MAL/MALTS: DISA="1976"
+ * paired with v1 occ=0 "200" instead of v1 occ=1 "1976"). Returns 100
+ * when the result field comparator says match, 0 otherwise.
+ */
+function scoreMatch(d: DisaObs, v: V1Obs): number {
+  const def = RESULT_FIELDS.find((f) => f.field === "result");
+  if (def === undefined) return 0;
+  const r = def.comparator(def.getDisa(d), def.getV1(v));
+  return r.status === "match" ? 100 : 0;
+}
+
+/**
+ * Greedy best-match alignment within a (panel, param) bucket. For each DISA
+ * row in order, pick the v1 row with the highest scoreMatch; if no v1 row
+ * matches, fall back to the first unused v1 row so real value disagreements
+ * still surface as `mismatch` (not best-match). Returns pairs of (disa, v1)
+ * plus trailing (null, v1) rows for v1 entries with no DISA partner.
+ */
+function alignBucket(
+  disaBucket: DisaObs[],
+  v1Bucket: V1Obs[],
+): Array<[DisaObs | null, V1Obs | null]> {
+  const v1Used = new Array<boolean>(v1Bucket.length).fill(false);
+  const pairs: Array<[DisaObs | null, V1Obs | null]> = [];
+  for (const d of disaBucket) {
+    let bestI = -1;
+    let bestScore = -1;
+    for (let i = 0; i < v1Bucket.length; i++) {
+      if (v1Used[i] === true) continue;
+      const s = scoreMatch(d, v1Bucket[i]!);
+      if (s > bestScore) { bestScore = s; bestI = i; }
+    }
+    if (bestI >= 0 && bestScore > 0) {
+      v1Used[bestI] = true;
+      pairs.push([d, v1Bucket[bestI]!]);
+    } else {
+      const firstUnused = v1Used.indexOf(false);
+      if (firstUnused >= 0) {
+        v1Used[firstUnused] = true;
+        pairs.push([d, v1Bucket[firstUnused]!]);
+      } else {
+        pairs.push([d, null]);
+      }
+    }
+  }
+  for (let i = 0; i < v1Bucket.length; i++) {
+    if (v1Used[i] !== true) pairs.push([null, v1Bucket[i]!]);
+  }
+  return pairs;
 }
 
 function diffOneField(
@@ -324,11 +383,10 @@ export function diffResults(
     const [panelCode, paramCode] = key.split("\t") as [string, string];
     const disaBucket = disaByKey.get(key) ?? [];
     const v1Bucket = v1ByKey.get(key) ?? [];
-    const n = Math.max(disaBucket.length, v1Bucket.length);
+    const pairs = alignBucket(disaBucket, v1Bucket);
 
-    for (let i = 0; i < n; i++) {
-      const d = disaBucket[i] ?? null;
-      const v = v1Bucket[i] ?? null;
+    for (let i = 0; i < pairs.length; i++) {
+      const [d, v] = pairs[i]!;
 
       // Below-detection synthesis, both directions: either v1 emits a
       // sentinel row (HIVVQ="< 40") that DISA has no quantitative slot for,
@@ -338,20 +396,34 @@ export function diffResults(
         (d === null && v !== null && isSynthesisedV1Obs(panelCode, paramCode, v, synthesisPanels)) ||
         (v === null && d !== null && isSynthesisedDisaObs(panelCode, paramCode, d, synthesisPanels));
 
+      // v1 multi-occurrence overflow: an orphan v1 row in a bucket where
+      // DISA has already paired against another v1 row in the same bucket.
+      // v1 historically stored drafts, corrections, comments as additional
+      // OBX rows per (panel, param) while DISA keeps only the final value;
+      // the overflow rows are migration history, not toolchain bugs.
+      // Only applies when DISA has at least one row in the bucket — otherwise
+      // a v1-only row is a real DISA decoder gap and stays only_v1.
+      const isV1MultiOccurrence =
+        d === null && v !== null && !isSynthesized && disaBucket.length > 0;
+
       const fields: ResultFieldRow[] = [];
       for (const def of RESULT_FIELDS) {
         if (shouldSkipField(def, d, v)) continue;
         if (d === null) {
           fields.push({
             field: def.field,
-            status: isSynthesized ? "match" : "only_v1",
+            status: isSynthesized || isV1MultiOccurrence ? "match" : "only_v1",
             disa: null,
             openldr_v1: valueForOutput(
               Array.isArray(def.getV1(v as V1Obs))
                 ? (def.getV1(v as V1Obs) as unknown[])[0]
                 : def.getV1(v as V1Obs),
             ),
-            ...(isSynthesized ? { reason: "v1 below-detection synthesis from DISA SCOM" } : {}),
+            ...(isSynthesized
+              ? { reason: "v1 below-detection synthesis from DISA SCOM" }
+              : isV1MultiOccurrence
+                ? { reason: "v1 multi-occurrence overflow row (DISA stored single final value)" }
+                : {}),
           });
         } else if (v === null) {
           fields.push({
@@ -368,7 +440,7 @@ export function diffResults(
         }
       }
 
-      const obsStatus: CompareStatus = isSynthesized
+      const obsStatus: CompareStatus = isSynthesized || isV1MultiOccurrence
         ? "match"
         : d === null
           ? "only_v1"
@@ -380,6 +452,7 @@ export function diffResults(
         panel_code: panelCode,
         param_code: paramCode,
         occurrence: i,
+        ...(isV1MultiOccurrence ? { reason: "v1 multi-occurrence overflow row (DISA stored single final value)" } : {}),
         status: obsStatus,
         disa: d !== null ? disaOut(d) : null,
         openldr_v1: v !== null ? v1Out(v) : null,
