@@ -67,6 +67,29 @@ export function wardComparator(disa: unknown, v1: unknown): CompareResult {
   return stringCi(disa, v1);
 }
 
+/**
+ * Facility-name comparator. v1's `LIMSPointOfCareDesc` is also the source for
+ * facility_name (via the `Facility~Ward` split), so the same migration-era
+ * data loss that drops the ward also drops the facility name — observed
+ * empirically on 594 labs in the TDS extract whose DISA Facility.FacilityName
+ * is populated while v1's parsed facilityName is null. When DISA has it and
+ * v1 doesn't, treat as a match (v1 data loss, not a toolchain bug — v2
+ * emits the value from DISA correctly). Real partial-name divergences
+ * (e.g. DISA="KCMC CLINICAL LABORATORY" vs v1="KCMC") still fall through
+ * to stringCi and surface as mismatch.
+ */
+export function facilityNameComparator(disa: unknown, v1: unknown): CompareResult {
+  if (isEmpty(disa) && isEmpty(v1)) return { status: "match" };
+  if (isEmpty(disa) && !isEmpty(v1)) return { status: "only_v1" };
+  if (!isEmpty(disa) && isEmpty(v1)) {
+    return {
+      status: "match",
+      reason: "v1 dropped facility name (LIMSPointOfCareDesc null/empty)",
+    };
+  }
+  return stringCi(disa, v1);
+}
+
 export function stringCiLoose(disa: unknown, v1: unknown): CompareResult {
   const a = asymmetric(disa, v1);
   if (a !== null) return a;

@@ -7,6 +7,7 @@ import {
   stringCiLoose,
   stringCiStripV1Prefix,
   wardComparator,
+  facilityNameComparator,
   type CompareResult,
 } from "./comparators.js";
 
@@ -48,8 +49,12 @@ export const REQUEST_FIELDS: FieldDef[] = [
     getV1: (r) => r.RequestingFacilityCode,
   },
   {
+    // Mirror wardComparator: v1's LIMSPointOfCareDesc was empty for 594 TDS
+    // labs whose DISA side had a facility name, so a non-empty DISA against
+    // an empty v1 is v1 data loss, not a toolchain bug. Real divergences
+    // (both sides populated but different) still surface as mismatch.
     field: "facility_name",
-    comparator: stringCi,
+    comparator: facilityNameComparator,
     getDisa: (s) => s.Facility?.FacilityName ?? null,
     getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc).facilityName,
   },
