@@ -325,6 +325,29 @@ function detectOrphanPanels(input: AuditInputs, cb: Codebook): Anomaly[] {
   return out;
 }
 
+// Clinically empty records: panels ordered, but the entire lab produced
+// zero observations. v2 storage validation rejects these with
+// CANONICAL_STORAGE_VALIDATION_FAILED because lab_request.panel_code resolves
+// to null (no PanelGroups) and lab_results is []. Tag as error so the
+// default quarantine threshold catches them before POST.
+function detectEmptyRecord(input: AuditInputs, cb: Codebook): Anomaly[] {
+  if (input.observations.length > 0) return [];
+  if (input.orderedPanels.length === 0) return [];
+  return [
+    {
+      class: "record_has_no_observations",
+      severity: "error",
+      message: `Record has ${input.orderedPanels.length} ordered panel(s) but no observations — clinically empty.`,
+      details: {
+        ordered_panels: input.orderedPanels.map((p) => ({
+          panel_code: p,
+          panel_description: describePanel(cb, p),
+        })),
+      },
+    },
+  ];
+}
+
 function detectResultFormatIssues(input: AuditInputs, cb: Codebook): Anomaly[] {
   const out: Anomaly[] = [];
   for (const o of input.observations) {
@@ -448,6 +471,7 @@ export function detectAnomalies(input: AuditInputs, cb: Codebook): Anomaly[] {
     ...detectPanelSpecimenMismatch(input, cb),
     ...detectObservationWrongPanel(input, cb),
     ...detectOrphanPanels(input, cb),
+    ...detectEmptyRecord(input, cb),
     ...detectSupersededIterations(input, cb),
     ...detectResultFormatIssues(input, cb),
     ...detectPatientAnomalies(input),

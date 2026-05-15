@@ -5,6 +5,7 @@ export type AnomalyClass =
   | "observation_wrong_panel"
   | "cross_panel_duplicate_observation"
   | "orphan_ordered_panel"
+  | "record_has_no_observations"
   | "panel_iterations_superseded"
   | "result_format_invalid_decoded"
   | "result_format_units_inline"
