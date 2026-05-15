@@ -36,6 +36,23 @@ export function IsUndefinedOrNull(data: unknown): data is null | undefined {
   return data === undefined || data === null;
 }
 
+/**
+ * Escape a value for safe interpolation into a raw SQL string literal
+ * (`'${SqlEscape(x)}'`). DISA blob slices regularly carry stray NUL padding
+ * and apostrophes inside free-text comments; SQL Server rejects both —
+ * "Unclosed quotation mark" for unescaped `'`, "invalid name … NULL character"
+ * for raw `\0`. We strip NULs (they're padding artefacts, never legitimate
+ * lookup keys) and double apostrophes per T-SQL string-literal rules.
+ *
+ * The helper does not rewrite the surrounding `'...'` quotes — callers wrap
+ * the result themselves so the existing SQL stays grep-able for audit.
+ */
+export function SqlEscape(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const s = typeof value === "string" ? value : String(value);
+  return s.replace(/\0/g, "").replace(/'/g, "''");
+}
+
 export function IsEmpty(data: unknown): boolean {
   if (IsUndefinedOrNull(data)) return true;
   return String(data).trim().length === 0;

@@ -152,7 +152,7 @@ export class REGDAT4 {
 
     if (this.#server === undefined) return;
 
-    const all_with_id = await TXT1DATA.All(`WHERE [LABNO] = '${this.LabNumber}'`, this.#server);
+    const all_with_id = await TXT1DATA.All(`WHERE [LABNO] = '${Core.SqlEscape(this.LabNumber)}'`, this.#server);
     for (const txt of all_with_id) {
       if (txt.FRAMEREF === 63) {
         const items = txt.VALUE.split("|");

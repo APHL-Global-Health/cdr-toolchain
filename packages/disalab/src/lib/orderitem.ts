@@ -116,7 +116,7 @@ export class OrderItem {
         let description: string | null = null;
         if (!Core.IsEmpty(code) && !Core.IsUndefinedOrNull(server)) {
           const parmdictList = await PARMDICT.All(
-            `WHERE [CODE] = '${par.replace(/\0/g, " ").trim()}'`,
+            `WHERE [CODE] = '${Core.SqlEscape(par.replace(/\0/g, " ").trim())}'`,
             server,
           );
           if (parmdictList.length > 0) {
@@ -124,7 +124,7 @@ export class OrderItem {
             description = parmdict.DESCRIPTION;
 
             const textDataList = await TXT1DATA.All(
-              `WHERE [LABNO] = '${labnumber}' AND [TESTCODE] = '${code}' AND [TESTINDEX] = '${testIndex}' AND [FRAMEREF] = '${frameRef}' `,
+              `WHERE [LABNO] = '${Core.SqlEscape(labnumber)}' AND [TESTCODE] = '${Core.SqlEscape(code)}' AND [TESTINDEX] = '${Core.SqlEscape(testIndex)}' AND [FRAMEREF] = '${Core.SqlEscape(frameRef)}' `,
               server,
             );
             const textData = textDataList[0];
@@ -137,7 +137,7 @@ export class OrderItem {
               !Core.IsEmpty(result.replace(/\0/g, " "))
             ) {
               const comdictList = await COMMDICT.All(
-                `WHERE [CONTEXT] = '${parmdict.CONTEXT}' AND LTRIM(RTRIM([CODE])) = '${result.trim()}'`,
+                `WHERE [CONTEXT] = '${Core.SqlEscape(parmdict.CONTEXT)}' AND LTRIM(RTRIM([CODE])) = '${Core.SqlEscape(result.trim())}'`,
                 server,
               );
               if (comdictList.length > 0) {

@@ -77,12 +77,13 @@ export class SpecimenRecpt {
 
     try {
       const labno = regdat4.LabNumber;
+      const labnoEsc = Core.SqlEscape(labno);
       const audtdata = await AUDTDATA.All(
-        `WHERE [LabNo] = '${labno}' ORDER BY  [DATESTAMP] desc`,
+        `WHERE [LabNo] = '${labnoEsc}' ORDER BY  [DATESTAMP] desc`,
         server,
       );
-      const rdobidx4 = await RDOBIDX4.All(`WHERE [LabNo] = '${labno}'`, server);
-      const rtknidx5 = await RTKNIDX5.All(`WHERE [INVOICENO] = '${labno}'`, server);
+      const rdobidx4 = await RDOBIDX4.All(`WHERE [LabNo] = '${labnoEsc}'`, server);
+      const rtknidx5 = await RTKNIDX5.All(`WHERE [INVOICENO] = '${labnoEsc}'`, server);
 
       const r = new SpecimenRecpt(labno, server);
 
@@ -95,7 +96,7 @@ export class SpecimenRecpt {
       if (Core.IsNullOrEmpty(r.NID)) r.NID = null;
 
       if (!Core.IsEmpty(regdat4.Location)) {
-        const locndic4List = await LOCNDIC4.All(`WHERE [CODE] = '${regdat4.Location}'`, server);
+        const locndic4List = await LOCNDIC4.All(`WHERE [CODE] = '${Core.SqlEscape(regdat4.Location)}'`, server);
         if (locndic4List !== null && locndic4List.length > 0) {
           const location = locndic4List[0]!;
           r.Facility = new Facility(
@@ -238,7 +239,7 @@ export class SpecimenRecpt {
         if (!Core.IsNullOrEmpty(test.CODE)) r.TestOrders.push(test.CODE);
       });
 
-      r.TestResults = await TESTDATA.All(`WHERE [LabNo] = '${labno}'`, server);
+      r.TestResults = await TESTDATA.All(`WHERE [LabNo] = '${labnoEsc}'`, server);
       return r;
     } catch (error) {
       throw error;
