@@ -87,6 +87,30 @@ export function facilityNameComparator(disa: unknown, v1: unknown): CompareResul
       reason: "v1 dropped facility name (LIMSPointOfCareDesc null/empty)",
     };
   }
+  // Both populated: v1 frequently stores the short/abbreviated form of the
+  // facility name (e.g. DISA="KCMC CLINICAL LABORATORY" vs v1="KCMC" — 87
+  // labs in the TDS extract). Substring containment is the safe rule —
+  // both sides clearly identify the same facility. True divergences with
+  // no substring overlap still surface as mismatch.
+  return stringCiLoose(disa, v1);
+}
+
+/**
+ * ICD-10 comparator. The DISA ICD10 column is occasionally populated when
+ * v1's ICD10ClinicalInfoCodes is empty (1 lab in the TDS extract had
+ * DISA="B50.9" malaria vs v1=""). Same migration-era data-loss pattern as
+ * facility_name and ward — v1 dropped the code, v2 will carry DISA's value
+ * correctly. Other axes fall through to strict equality.
+ */
+export function icd10Comparator(disa: unknown, v1: unknown): CompareResult {
+  if (isEmpty(disa) && isEmpty(v1)) return { status: "match" };
+  if (isEmpty(disa) && !isEmpty(v1)) return { status: "only_v1" };
+  if (!isEmpty(disa) && isEmpty(v1)) {
+    return {
+      status: "match",
+      reason: "v1 dropped ICD10 code",
+    };
+  }
   return stringCi(disa, v1);
 }
 

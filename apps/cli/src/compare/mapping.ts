@@ -8,6 +8,7 @@ import {
   stringCiStripV1Prefix,
   wardComparator,
   facilityNameComparator,
+  icd10Comparator,
   type CompareResult,
 } from "./comparators.js";
 
@@ -129,7 +130,7 @@ export const REQUEST_FIELDS: FieldDef[] = [
   },
   {
     field: "icd10",
-    comparator: stringCi,
+    comparator: icd10Comparator,
     getDisa: (s) => s.ICD10,
     getV1: (r) => r.ICD10ClinicalInfoCodes,
   },
