@@ -19,7 +19,7 @@
     "build": "tsc -p tsconfig.build.json",
     "dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist .turbo *.tsbuildinfo"
+    "clean": "node -e \"const fs=require('fs');['dist','.turbo'].forEach(p=>fs.rmSync(p,{recursive:true,force:true}));fs.readdirSync('.').filter(f=>f.endsWith('.tsbuildinfo')).forEach(f=>fs.rmSync(f,{force:true}))\""
   },
   "dependencies": {
     "iconv-lite": "^0.6.3",

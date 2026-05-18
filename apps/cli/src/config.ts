@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { z } from "zod";
 import { CliError } from "./errors.js";
@@ -91,8 +92,24 @@ function parseBool(v: string | undefined): boolean {
   return lower === "1" || lower === "true" || lower === "yes" || lower === "on";
 }
 
+// Resolve `.env` for an implicit (no --env-file flag) load:
+//   1. cwd-relative wins — deployments with per-directory .envs still work,
+//      and pnpm-driven `pnpm -C apps/cli dev` keeps its existing behaviour.
+//   2. Fallback: .env next to the compiled CLI (apps/cli/.env), so a
+//      globally-linked `cdr` invoked from anywhere finds config without
+//      requiring --env-file. This module compiles to apps/cli/dist/config.js
+//      and runs from apps/cli/src/config.ts under tsx; both resolve via
+//      dirname(import.meta.url) + ".." to apps/cli/.
+function resolveImplicitEnvPath(): string {
+  const cwdEnv = resolve(process.cwd(), ".env");
+  if (existsSync(cwdEnv)) return cwdEnv;
+  const packageEnv = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".env");
+  if (existsSync(packageEnv)) return packageEnv;
+  return cwdEnv;
+}
+
 export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
-  const envFilePath = overrides.envFile ?? resolve(process.cwd(), ".env");
+  const envFilePath = overrides.envFile ?? resolveImplicitEnvPath();
 
   if (overrides.envFile !== undefined) {
     let contents: string;

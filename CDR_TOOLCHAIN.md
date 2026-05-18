@@ -104,6 +104,125 @@ pnpm dev ping
 
 If `ping` fails with `DB_CONNECT_FAILED`, your `DISA_CONNECTION_STRING` is wrong or the SQL Server isn't reachable. The error JSON includes the underlying mssql message.
 
+### Windows (PowerShell / cmd) setup
+
+The toolchain runs natively on Windows. `pnpm install`, `pnpm build`, `pnpm clean`, and `pnpm dev <subcommand>` all work in PowerShell, cmd, Git Bash, and WSL — the package.json `build` and `clean` scripts use `node -e` rather than `chmod`/`rm -rf`, so they're shell-agnostic.
+
+The shell *examples* in this doc default to bash/zsh, but the only POSIX-only bits are the path conventions and output redirection. Quick reference for the PowerShell / cmd equivalents:
+
+**Copy `.env.example` → `.env`** in PowerShell:
+
+```powershell
+Copy-Item apps/cli/.env.example apps/cli/.env
+```
+
+**Output redirection.** PowerShell's `>` writes UTF-16 with a BOM by default, which corrupts NDJSON consumers (`openldr ingest stream`, `jq`, `--resume-from`). For all `> file.ndjson` examples in this doc, use one of:
+
+```powershell
+# Force UTF-8 (no BOM) — works in PowerShell 7+
+pnpm dev export-batch ... | Out-File -FilePath out.ndjson -Encoding utf8NoBOM
+
+# Or use cmd.exe redirection (UTF-8, no BOM)
+cmd /c "pnpm dev export-batch ... > out.ndjson 2> out.log"
+```
+
+Git Bash / WSL do not have this problem — bash `>` is byte-stream-clean.
+
+**Path separators.** Forward slashes work in pnpm scripts and Node tooling. Examples like `--out ../../temp/output.json` work as-is in PowerShell. Backslashes are required only for native Windows commands (`Copy-Item`, `Remove-Item`).
+
+**Unix-style paths in examples.** Several examples use `/tmp/...` and `/var/lib/...` paths. Substitute Windows equivalents:
+
+| Unix example | Windows substitute |
+|---|---|
+| `/tmp/scan.ndjson` | `$env:TEMP\scan.ndjson` (PowerShell) or `%TEMP%\scan.ndjson` (cmd) |
+| `/var/lib/disa/quarantine` | `C:\disa\quarantine` (or any writable path) |
+| `apps/cli/node_modules/.bin/tsx` | `apps/cli/node_modules/.bin/tsx.cmd` (PowerShell auto-resolves either) |
+
+### Installing `cdr` as a global command
+
+The CLI auto-discovers `apps/cli/.env` regardless of cwd ([config.ts](apps/cli/src/config.ts) falls back to the package-relative `.env` when no cwd-relative one is present), so once `cdr` is on PATH it works from any directory.
+
+#### Linux / macOS
+
+`apps/cli/dist/index.js` carries a `#!/usr/bin/env node` shebang and the build's `chmod +x` makes it directly executable. Two options:
+
+```bash
+# Build first
+pnpm --filter disalab build
+pnpm --filter @cdr-toolchain/cli build
+
+# Option 1 — symlink the bin shim into a directory on PATH
+chmod +x apps/cli/dist/index.js     # already done by build, but harmless
+ln -s "$(pwd)/apps/cli/dist/index.js" ~/.local/bin/cdr
+cdr ping
+
+# Option 2 — pnpm link --global (handles PATH for you via pnpm setup)
+pnpm -C apps/cli link --global
+cdr ping
+```
+
+Caveat for Option 2: `pnpm link --global` resolves the workspace's `disalab: workspace:*` dep by symlink, so the link breaks if you move or delete the monorepo directory. Option 1 has the same constraint (the symlink target is a fixed path), but is easier to reason about.
+
+#### Windows (PowerShell / cmd)
+
+Windows has no shebang concept, so you need an explicit launcher to type a bare `cdr ping` from any directory. Three options, easiest first:
+
+**Option 1 — PowerShell function in `$PROFILE` (no setup, instant).**
+
+```powershell
+# One-time: ensure the profile file exists (PowerShell doesn't create it for
+# you — `notepad $PROFILE` on a fresh machine errors with "system cannot
+# find the path specified" because the parent dir doesn't exist either).
+if (-not (Test-Path $PROFILE)) {
+  New-Item -ItemType File -Path $PROFILE -Force | Out-Null
+}
+notepad $PROFILE
+
+# Add this line (substitute the absolute path to your clone):
+function cdr { node D:\Projects\Repositories\cdr-toolchain\apps\cli\dist\index.js @args }
+
+# Save, close Notepad, then reload — or open a new PowerShell window
+. $PROFILE
+
+# Now from anywhere:
+cdr ping
+```
+
+**Option 2 — `.cmd` shim on PATH (works in PowerShell, cmd, and any tool that shells out).**
+
+```powershell
+# Create a directory on PATH, e.g. C:\Users\you\bin (add to PATH via System Properties → Environment Variables)
+# Then create C:\Users\you\bin\cdr.cmd with these two lines:
+@echo off
+node "D:\Projects\Repositories\cdr-toolchain\apps\cli\dist\index.js" %*
+```
+
+Identical behaviour to Option 1 but visible to every Windows process, not just PowerShell.
+
+**Option 3 — `pnpm link --global` (closest to "install once globally").**
+
+Requires a one-time machine setup:
+
+```powershell
+# One-time: set up pnpm's global bin directory + PATH
+pnpm setup
+# → Restart your terminal so the new $env:PNPM_HOME is picked up
+
+# Build the CLI (and its workspace dep) so `dist/` exists
+pnpm -C packages/disalab build
+pnpm -C apps/cli build
+
+# Link the workspace package globally
+pnpm -C apps/cli link --global
+
+# Verify
+cdr ping
+```
+
+Caveat: `pnpm link --global` resolves the workspace's `disalab: workspace:*` dep by symlink, so the link breaks if you move or delete the monorepo directory. For long-term portability, prefer Option 1 or 2.
+
+**Rebuilding after code changes.** Options 1 and 2 invoke `dist/index.js`, so `pnpm -C apps/cli build` after each change. Or skip the build entirely during development with `pnpm -C apps/cli dev <subcommand>` (tsx, runs TS directly — no `cdr` shortcut, but no build step either).
+
 ### Running the CLI
 
 There are three equivalent ways:
@@ -1028,6 +1147,7 @@ pnpm dev compare-batch --where "WHERE [LabNo] LIKE 'TDS013%'" --limit 100 --resu
 - **Git Bash on Windows path-mangles leading-`/` args.** A CLI arg starting with `/` (e.g. `--api-path /post`) gets prepended with the Git installation path (`/c/Program Files/Git/post`). Workaround: use `//post` (Git Bash strips one slash). Env vars in `.env` are not affected.
 - **`pnpm dev export TDS… > out.json` includes pnpm's lifecycle banner** on Windows because pnpm writes it to stdout (not stderr). Use `--out <path>` for clean file output.
 - **Running from repo root via `pnpm dev <subcommand>`** goes through Turbo, which runs every workspace's `dev` and eats `--` args. Run from `apps/cli/` or use `pnpm --filter @cdr-toolchain/cli dev <subcommand>`.
+- **PowerShell `>` redirection writes UTF-16 with a BOM**, which breaks NDJSON consumers (e.g. `openldr ingest stream`, `jq`, `--resume-from`). When piping `cdr export-batch` output to a file in PowerShell, use `| Out-File -Encoding utf8NoBOM out.ndjson` (PowerShell 7+) or wrap the call in `cmd /c "... > out.ndjson"`. Git Bash / WSL do not have this problem. See [Windows (PowerShell / cmd) setup](#windows-powershell--cmd-setup) for the full PowerShell / cmd reference.
 
 ### Data semantics
 
