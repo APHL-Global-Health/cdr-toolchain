@@ -178,8 +178,20 @@ if (-not (Test-Path $PROFILE)) {
 }
 notepad $PROFILE
 
-# Add this line (substitute the absolute path to your clone):
-function cdr { node D:\Projects\Repositories\cdr-toolchain\apps\cli\dist\index.js @args }
+# Add this block (substitute the absolute path to your clone). The conditional
+# matters — a plain `function cdr { node ... @args }` does NOT forward
+# pipeline input to node's stdin, so `cat foo.ndjson | cdr ...` (and the
+# `cdr export-batch --emit-payloads | openldr ingest stream` workflow)
+# silently receive empty stdin. The $MyInvocation.ExpectingInput check
+# forwards only when actually piped, so interactive `cdr ping` (no pipe)
+# still works.
+function cdr {
+    if ($MyInvocation.ExpectingInput) {
+        $input | & node D:\Projects\Repositories\cdr-toolchain\apps\cli\dist\index.js @args
+    } else {
+        & node D:\Projects\Repositories\cdr-toolchain\apps\cli\dist\index.js @args
+    }
+}
 
 # Save, close Notepad, then reload — or open a new PowerShell window
 . $PROFILE
