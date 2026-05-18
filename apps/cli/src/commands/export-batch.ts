@@ -51,6 +51,7 @@ interface ExportBatchOpts {
   dryRun?: boolean;
   summaryOnly?: boolean;
   explain?: boolean;
+  emitPayloads?: boolean;
 }
 
 type LabStatus =
@@ -59,7 +60,8 @@ type LabStatus =
   | "quarantined"
   | "check_failed"
   | "not_found"
-  | "errored";
+  | "errored"
+  | "emitted";
 
 interface LabResult {
   lab_number: string;
@@ -302,6 +304,11 @@ interface ProcessLabContext {
   quarantineThreshold: Severity;
   openldrCs: string | undefined;
   dryRun: boolean;
+  /** When set, write the v2 payload to stdout (via writePayload) and skip the POST. */
+  emitPayloads: boolean;
+  /** Sink for the NDJSON payload line. Provided by the action handler so the
+   *  EPIPE-safe writeOut helper can be reused. */
+  writePayload?: (line: string) => void;
 }
 
 /** Process one lab end-to-end: fetch -> (--check) -> build -> audit ->
@@ -454,6 +461,15 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       auditReport,
     });
 
+    // -------- emit payloads (stdin to `openldr ingest stream`) --------
+    if (ctx.emitPayloads) {
+      ctx.writePayload?.(JSON.stringify(payload) + "\n");
+      result.status = "emitted";
+      result.reason = "emit-payloads (skipped POST)";
+      result.duration_ms = Date.now() - start;
+      return result;
+    }
+
     // -------- dry run --------
     if (ctx.dryRun) {
       result.status = "posted";
@@ -566,6 +582,7 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--dry-run", "Run the entire pipeline EXCEPT the POST. Useful for confirming the gates against many labs without sending anything.")
     .option("--summary-only", "Suppress per-lab stdout output; emit only the final summary.")
     .option("--explain", "Show the lab-selection query and effective config; exit without running.")
+    .option("--emit-payloads", "Build each v2 payload and write it to stdout as NDJSON (one per line) instead of POSTing. Per-lab journal goes to stderr in this mode. Designed to pipe into `openldr ingest stream`.")
     .action(async (opts: ExportBatchOpts, cmd: Command) => {
       const { config } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
@@ -735,6 +752,8 @@ export function registerExportBatchCommand(program: Command): void {
         quarantineThreshold,
         openldrCs,
         dryRun: opts.dryRun === true,
+        emitPayloads: opts.emitPayloads === true,
+        writePayload: opts.emitPayloads === true ? writeOut : undefined,
       };
 
       const tally = (r: LabResult): void => {
@@ -745,8 +764,16 @@ export function registerExportBatchCommand(program: Command): void {
           case "check_failed": checkFailed++; break;
           case "not_found": notFound++; break;
           case "errored": errored++; break;
+          case "emitted": posted++; break;
         }
-        if (opts.summaryOnly !== true) writeOut(JSON.stringify(r) + "\n");
+        if (opts.summaryOnly !== true) {
+          // In --emit-payloads mode the payload itself goes to stdout (via
+          // ctx.writePayload). Route the per-lab journal to stderr so the
+          // consuming `openldr ingest stream` sees pure payloads.
+          const line = JSON.stringify(r) + "\n";
+          if (opts.emitPayloads === true) process.stderr.write(line);
+          else writeOut(line);
+        }
         if (attempted % HEARTBEAT_EVERY === 0) writeHeartbeat();
       };
 
