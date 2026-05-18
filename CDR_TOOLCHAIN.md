@@ -542,6 +542,9 @@ cdr export-batch
   [--dry-run]                      # run gates + build payload, skip POST
   [--summary-only]                 # suppress per-lab stdout
   [--explain]                      # show config, exit
+  [--emit-payloads]                # write v2 payloads to stdout as NDJSON
+                                   # instead of POSTing — pipes into
+                                   # `openldr ingest stream`
 ```
 
 **Per-lab status** (one NDJSON line per lab on stdout):
@@ -554,6 +557,7 @@ cdr export-batch
 | `check_failed` | `--check` found v1-fidelity drift; POST skipped. |
 | `not_found` | DISA had no REGDAT4 row for the lab number. |
 | `errored` | Fetch / build / POST / track failed. `error_code` + `error_message` populated. |
+| `emitted` | `--emit-payloads` mode only: payload was written to stdout. Tallied as `posted` in the summary so existing exit-code logic still works. |
 
 **Token freshness.** Keycloak access tokens are short-lived (default 5 min). The batch resolves a token resolver at startup (not the token itself) and calls it before every POST, so multi-hour runs don't fail with stale-token 401s. Resolver is the cached `fetchKeycloakToken` from [`apps/cli/src/api/keycloak.ts`](apps/cli/src/api/keycloak.ts) — refreshes ~30s before expiry, otherwise returns the cached value (essentially free).
 
@@ -594,6 +598,52 @@ cdr export-batch --limit 5000000 --concurrency 1 \
 # 3. Quarantined / errored labs land in temp/quarantine/ — review, fix
 #    in DISA, then re-run export-batch with --resume-from temp/export.ndjson
 #    so only the previously-blocked labs get retried.
+```
+
+### Stream into `openldr ingest stream` (`--emit-payloads`)
+
+Faster alternative to the per-lab `--post` path: cdr-toolchain builds the v2 payload as usual but writes it to **stdout as NDJSON** instead of POSTing. `openldr ingest stream` reads stdin and POSTs each line through the gateway with its own worker pool. Two CLIs each do what they're good at; the OS pipe handles back-pressure.
+
+```bash
+# Quick smoke
+cdr export-batch --where "LabNo LIKE '00613%'" --emit-payloads --limit 10 \
+  | openldr ingest stream --feed <feedId> --concurrency 4 --track
+
+# Production bulk migration — drop --check on the cdr side (the fidelity
+# gate dominates per-lab cost), raise both concurrencies
+cdr export-batch \
+    --where "LabNo BETWEEN '0061300000' AND '0061399999'" \
+    --emit-payloads \
+    --no-check \
+    --concurrency 8 \
+  | openldr ingest stream \
+      --feed <feedId> \
+      --concurrency 16 \
+  > ./temp/submitted.ndjson \
+  2> ./temp/summary.ndjson
+```
+
+**What changes in `--emit-payloads` mode:**
+
+- **stdout** carries the v2 payload, one JSON object per line — ready for `openldr ingest stream` (or `jq`, or `curl`, or anything else that reads NDJSON).
+- **stderr** carries the per-lab journal (same NDJSON shape as the normal-mode stdout journal) plus the progress heartbeat and the final `_meta: "export-batch-summary"` line. This keeps stdout clean of metadata so the consumer sees only payloads.
+- **`--post`, `--target-api`, `--token`, `--data-feed-id`, `--track`** are ignored — there's no POST in this mode. cdr-toolchain stops at "payload built"; openldr-cli takes over the network and tracking.
+- **`--check` and `--quarantine-on-anomaly` still run** ahead of payload build. A `check_failed` or `quarantined` lab is skipped on the cdr side and never reaches the consumer pipe — the upstream fidelity / data-quality gates remain enforced.
+- **`--no-check`** is recommended when you've already accepted v1 fidelity drift (or you don't have a v1 mirror configured). The v1-diff query is the largest single per-lab cost — disabling it drops `avg_ms_per_lab` from ~120 ms to ~30 ms.
+
+**Why pipe instead of `--post`?**
+
+- **Concurrency on both sides.** cdr's `--concurrency` parallelises DISA reads + v2 transforms; openldr's `--concurrency` parallelises POSTs. The two pools size independently to their respective bottlenecks.
+- **Path-scoped relaxed nginx zone.** openldr's gateway has a `limit_req zone=ingest-bulk rate=500r/s burst=200 nodelay;` location specifically on `/data-processing/api/v1/processor/process-feed`, so a single ingest client can sustain ~10× more throughput than the default 50 r/s ceiling. See `apps/openldr-gateway/nginx.conf.template` in the openldr-v2 repo.
+- **OS-level back-pressure.** If the openldr consumer slows down (server-side stage congestion, Kafka lag), the OS pipe buffer fills and cdr's worker pool blocks on `process.stdout.write`. No retry queue, no head-of-line blocking — natural flow control.
+
+**Shell quoting tip.** pnpm prints workspace banners (`Scope: all`, `> @cdr-toolchain/cli@...`) to stdout that pollute the pipe. Either run with `pnpm -s` (silent) or bypass pnpm entirely:
+
+```bash
+# Cleanest invocation — no pnpm banner risk
+apps/cli/node_modules/.bin/tsx apps/cli/src/index.ts export-batch \
+    --where "LabNo LIKE '00613%'" --emit-payloads \
+  | openldr ingest stream --feed <feedId> --concurrency 16
 ```
 
 ---
