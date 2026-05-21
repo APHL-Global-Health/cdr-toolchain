@@ -173,7 +173,9 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     driver: "mssql",
     outputFormat: requestedFormat,
     openldrConnectionString: overrides.openldrConnectionString ?? env.data.OPENLDR_V1_CONNECTION_STRING,
-    openldrLabnoPrefix: overrides.openldrLabnoPrefix ?? env.data.OPENLDR_LABNO_PREFIX ?? "TZDISA",
+    // Empty by default: deployments that prefix v1 RequestIDs (e.g. Tanzania "TZDISA")
+    // must set OPENLDR_LABNO_PREFIX explicitly. Zambia uses no prefix so empty is correct.
+    openldrLabnoPrefix: overrides.openldrLabnoPrefix ?? env.data.OPENLDR_LABNO_PREFIX ?? "",
     openldrDataDatabase: overrides.openldrDataDatabase ?? env.data.OPENLDR_V1_DATABASE_DATA ?? "OpenLDRData",
     openldrDictDatabase: overrides.openldrDictDatabase ?? env.data.OPENLDR_V1_DATABASE_DICT ?? "OpenLDRDict",
     openldrV1PocFormat: overrides.openldrV1PocFormat ?? env.data.OPENLDR_V1_POC_FORMAT ?? "facility_ward",

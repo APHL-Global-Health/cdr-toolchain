@@ -70,7 +70,7 @@ export function registerCompareCommand(program: Command): void {
   program
     .command("compare <labNumber>")
     .description(
-      "Compare a single record between DISA and OpenLDR v1. Accepts the labno with or without the configured prefix (default TZDISA).",
+      "Compare a single record between DISA and OpenLDR v1. Accepts the labno with or without the configured OPENLDR_LABNO_PREFIX (empty for deployments like Zambia that don't prefix).",
     )
     .option("--openldr-cs <url>", "OpenLDR v1 connection string (overrides env / .env)")
     .option("--prefix <str>", "Override the OpenLDR labno prefix for this invocation")
@@ -141,13 +141,23 @@ export function registerCompareCommand(program: Command): void {
       if (!foundDisa || !foundV1) {
         const report = buildEmptyReport(norm.disaLabNo, norm.openldrRequestId, foundDisa, foundV1);
         process.stdout.write(JSON.stringify(report) + "\n");
+        const missing = `${!foundDisa ? "DISA" : ""}${!foundDisa && !foundV1 ? " and " : ""}${!foundV1 ? "OpenLDR v1" : ""}`;
+        // Common footgun: DISA hit but v1 missed → wrong (or missing) prefix.
+        // Surface the prefix that was used so operators can verify it.
+        const prefixHint =
+          foundDisa && !foundV1
+            ? norm.prefix.length > 0
+              ? ` (v1 lookup used prefix '${norm.prefix}' — verify OPENLDR_LABNO_PREFIX matches your deployment, or pass --prefix '' if v1 RequestIDs aren't prefixed)`
+              : ` (no prefix configured — if your deployment prefixes v1 RequestIDs, set OPENLDR_LABNO_PREFIX or pass --prefix)`
+            : "";
         throw new CliError(
           "GET_NO_ROWS",
-          `Record missing: ${!foundDisa ? "DISA" : ""}${!foundDisa && !foundV1 ? " and " : ""}${!foundV1 ? "OpenLDR v1" : ""}`,
+          `Record missing: ${missing}${prefixHint}`,
           {
             lab_number: norm.disaLabNo,
             openldr_request_id: norm.openldrRequestId,
             found_in: report.found_in,
+            ...(foundDisa && !foundV1 ? { prefix_used: norm.prefix } : {}),
           },
         );
       }

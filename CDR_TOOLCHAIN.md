@@ -310,7 +310,7 @@ Used to prove `disalab` decodes DISA correctly by diffing against the existing v
 
 Common flags on `compare` / `compare-results`:
 - `--openldr-cs <url>` — override v1 connection
-- `--prefix <str>` — override the OpenLDR labno prefix (default `TZDISA`)
+- `--prefix <str>` — override the OpenLDR labno prefix (empty by default; set per deployment, e.g. `TZDISA` for Tanzania, empty for Zambia)
 - `--only-differences` — hide perfect-match fields/rows
 - `--explain` — print the SQL plan and exit without hitting either DB
 
@@ -971,7 +971,7 @@ All env vars live in `apps/cli/.env` (or override via global flags). See `apps/c
 | `DISA_CONNECTION_STRING` | yes | every command except `errors` / `tables` / `schema` / `config show` | MSSQL connection string. Two formats supported: `Server=...;Database=...;User=...;Password=...;Encrypt=false` or `mssql://user:pass@host:1433/db`. |
 | `DISA_OUTPUT` | no | every command | Default output format (`ndjson` \| `json` \| `pretty`). Overridable per-call with `--output`. |
 | `OPENLDR_V1_CONNECTION_STRING` | only for `compare*` / `export --check` | `compare`, `compare-results`, `compare-batch`, `export --check` | OpenLDR v1 SQL Server. Same format as DISA. |
-| `OPENLDR_LABNO_PREFIX` | no | `compare*`, `export` | Prefix added to DISA labno when constructing v1 RequestID. Default `TZDISA`. |
+| `OPENLDR_LABNO_PREFIX` | no | `compare*`, `export` | Prefix added to DISA labno when constructing v1 RequestID. Empty by default — set per deployment (e.g. `TZDISA` for Tanzania; leave empty for Zambia). |
 | `OPENLDR_V1_DATABASE_DATA` | no | `compare*` | Default `OpenLDRData`. SQL is fully-qualified, so the DB name doesn't have to match the connection string's. |
 | `OPENLDR_V1_DATABASE_DICT` | no | (placeholder) | Default `OpenLDRDict`. Reserved for future commands. |
 | `OPENLDR_V2_URL` | only for `export --post` | `export --post` | Base URL of the OpenLDR v2 API. No trailing slash. |

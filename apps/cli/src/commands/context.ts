@@ -61,7 +61,7 @@ export function loadRuntime(
           connectionString: "",
           driver: "mssql",
           outputFormat: fallbackFormat,
-          openldrLabnoPrefix: process.env.OPENLDR_LABNO_PREFIX ?? "TZDISA",
+          openldrLabnoPrefix: process.env.OPENLDR_LABNO_PREFIX ?? "",
           openldrConnectionString: globals.openldrCs ?? process.env.OPENLDR_V1_CONNECTION_STRING,
           openldrDataDatabase: process.env.OPENLDR_V1_DATABASE_DATA ?? "OpenLDRData",
           openldrDictDatabase: process.env.OPENLDR_V1_DATABASE_DICT ?? "OpenLDRDict",
