@@ -256,40 +256,66 @@ export async function fetchLabResultsByRequestId(
 }
 
 /**
- * PointOfCareDesc ordering convention. Tanzania v1 stores `facility~ward`;
- * Mozambique v1 stores `district~facility` (verified on `MZDISA001-010315`:
- * v1 LIMSPointOfCareDesc="Maputo Cidade Kamubukwane~CS Bagamoio" against DISA
- * Facility.FacilityName="CS Bagamoio"). Default is `facility_ward` to keep
- * the historical Tanzania behaviour stable when the env var is unset.
+ * PointOfCareDesc ordering convention.
+ *
+ * - `facility_ward` (Tanzania default): `facility~ward`, up to 2 segments.
+ * - `district_facility_ward` (Mozambique): `province district~facility~ward`,
+ *   up to 3 segments. The column is varchar(50) so the trailing ward (and
+ *   occasionally the facility) is frequently truncated mid-word — examples
+ *   in the wild include "…CS Mavalane~Consulta de Cri" and "…CS 1 De Maio
+ *   (Maputo)~Tube". 2-segment rows (`district~facility`, no ward) also occur.
+ *
+ * Default stays `facility_ward` so Tanzania behaviour is unchanged when the
+ * env var is unset.
  */
-export type PocFormat = "facility_ward" | "district_facility";
+export type PocFormat = "facility_ward" | "district_facility_ward";
 
 /**
  * Strip CHAR(6) (a Disa-specific bell-like delimiter, see temp/script.sql line 53)
  * and split a tilde-delimited PointOfCareDesc into its semantic parts.
  *
- * Under `district_facility`, the right-hand segment is the facility and the
- * left-hand segment is the district. The return shape stays `{ facilityName,
- * ward }` so callers don't branch — `ward` carries the district value under
- * that convention. When there is no `~`, the whole value is treated as the
- * facility (both conventions degrade to a single-name fallback).
+ * Returns `{ district, facilityName, ward }`. `district` is always `null`
+ * under `facility_ward` since Tanzania's column has no district slot.
+ *
+ * When the input contains MORE tildes than the format expects (e.g. a facility
+ * name with an embedded "~"), any extra segments are joined back into the
+ * trailing field (`ward` for both formats) so we don't silently drop data.
+ * When there is no `~`, the whole value is treated as the facility — both
+ * conventions degrade gracefully to a single-name fallback.
+ *
+ * 50-char truncation in the source is opaque here — we just parse whatever
+ * arrived. Comparator-level truncation tolerance is the caller's job.
  */
 export function splitPointOfCare(
   raw: string | null | undefined,
   format: PocFormat = "facility_ward",
-): { facilityName: string | null; ward: string | null } {
-  if (raw === null || raw === undefined) return { facilityName: null, ward: null };
+): { district: string | null; facilityName: string | null; ward: string | null } {
+  const empty = { district: null, facilityName: null, ward: null };
+  if (raw === null || raw === undefined) return empty;
   const cleaned = raw.replace(/\x06/g, "");
-  const tildeIdx = cleaned.indexOf("~");
-  if (tildeIdx === -1) {
-    return { facilityName: cleaned.trim() || null, ward: null };
+  if (cleaned.trim().length === 0) return empty;
+
+  const parts = cleaned.split("~").map((s) => s.trim());
+
+  // Single segment → treat as facility for both conventions.
+  if (parts.length === 1) {
+    return { district: null, facilityName: parts[0]!.length > 0 ? parts[0]! : null, ward: null };
   }
-  const left = cleaned.slice(0, tildeIdx).trim();
-  const right = cleaned.slice(tildeIdx + 1).trim();
-  const facility = format === "district_facility" ? right : left;
-  const ward = format === "district_facility" ? left : right;
-  return {
-    facilityName: facility.length > 0 ? facility : null,
-    ward: ward.length > 0 ? ward : null,
-  };
+
+  if (format === "district_facility_ward") {
+    // [district][facility][ward + any extra ~ segments rejoined].
+    const district = parts[0]!.length > 0 ? parts[0]! : null;
+    const facility = parts[1]!.length > 0 ? parts[1]! : null;
+    let ward: string | null = null;
+    if (parts.length >= 3) {
+      const wardJoined = parts.slice(2).join("~").trim();
+      ward = wardJoined.length > 0 ? wardJoined : null;
+    }
+    return { district, facilityName: facility, ward };
+  }
+
+  // facility_ward: [facility][ward + any extra ~ segments rejoined].
+  const facility = parts[0]!.length > 0 ? parts[0]! : null;
+  const wardJoined = parts.slice(1).join("~").trim();
+  return { district: null, facilityName: facility, ward: wardJoined.length > 0 ? wardJoined : null };
 }

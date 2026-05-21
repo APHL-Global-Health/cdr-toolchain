@@ -77,7 +77,7 @@ const EnvSchema = z.object({
   OPENLDR_LABNO_PREFIX: z.string().optional(),
   OPENLDR_V1_DATABASE_DATA: z.string().optional(),
   OPENLDR_V1_DATABASE_DICT: z.string().optional(),
-  OPENLDR_V1_POC_FORMAT: z.enum(["facility_ward", "district_facility"]).optional(),
+  OPENLDR_V1_POC_FORMAT: z.enum(["facility_ward", "district_facility_ward"]).optional(),
   OPENLDR_V2_URL: z.string().url().optional(),
   OPENLDR_V2_TOKEN: z.string().min(1).optional(),
   OPENLDR_V2_PATH: z.string().optional(),

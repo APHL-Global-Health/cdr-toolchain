@@ -110,7 +110,7 @@ export function registerExportCommand(program: Command): void {
     .option("--quarantine-severity <level>", "Severity threshold for --quarantine-on-anomaly: error (default), warn, or info.")
     .option(
       "--poc-format <fmt>",
-      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT. Only used with --check.",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default; facility~ward) or district_facility_ward (Mozambique; district~facility~ward, frequently truncated at 50 chars). Overrides OPENLDR_V1_POC_FORMAT. Only used with --check.",
     )
     .action(async (labNumberArg: string, opts: ExportOpts, cmd: Command) => {
       const { config, output } = loadRuntime(cmd, { requireConnection: false });

@@ -70,16 +70,16 @@ export const REQUEST_FIELD_NAMES: readonly string[] = [
  *  silent fallback to facility_ward. */
 export function resolvePocFormat(override: string | undefined, fallback: PocFormat): PocFormat {
   if (override === undefined || override.length === 0) return fallback;
-  if (override === "facility_ward" || override === "district_facility") return override;
+  if (override === "facility_ward" || override === "district_facility_ward") return override;
   throw new CliError(
     "USAGE",
-    `--poc-format must be "facility_ward" or "district_facility" (got "${override}")`,
+    `--poc-format must be "facility_ward" or "district_facility_ward" (got "${override}")`,
   );
 }
 
 export interface RequestFieldsOptions {
   /** How v1 stores LIMSPointOfCareDesc in this deployment. `facility_ward`
-   *  (Tanzania default) means left=facility, right=ward. `district_facility`
+   *  (Tanzania default) means left=facility, right=ward. `district_facility_ward`
    *  (Mozambique) flips it: left=district, right=facility — `ward` then
    *  carries the district value. See `splitPointOfCare` in openldr.ts. */
   pocFormat: PocFormat;
@@ -113,7 +113,7 @@ export function getRequestFields(opts: RequestFieldsOptions): FieldDef[] {
     // treats the v1-dropped-ward case as match (v1 data loss, not a
     // toolchain bug — v2 will emit the ward from DISA).
     //
-    // Under the `district_facility` convention (Mozambique) the v1 left-hand
+    // Under the `district_facility_ward` convention (Mozambique) the v1 left-hand
     // segment is the district, surfaced here under the `ward` field — the
     // diff schema stays uniform across deployments while the semantics shift.
     field: "ward",

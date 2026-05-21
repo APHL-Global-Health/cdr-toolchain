@@ -140,7 +140,7 @@ export function registerCompareBatchCommand(program: Command): void {
     )
     .option(
       "--poc-format <fmt>",
-      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default; facility~ward) or district_facility_ward (Mozambique; district~facility~ward, frequently truncated at 50 chars). Overrides OPENLDR_V1_POC_FORMAT.",
     )
     .option("--explain", "Show the lab-selection query and field list, exit without running")
     .action(async (opts: BatchOpts, cmd: Command) => {

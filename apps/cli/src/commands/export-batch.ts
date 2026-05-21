@@ -589,7 +589,7 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--emit-payloads", "Build each v2 payload and write it to stdout as NDJSON (one per line) instead of POSTing. Per-lab journal goes to stderr in this mode. Designed to pipe into `openldr ingest stream`.")
     .option(
       "--poc-format <fmt>",
-      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default; facility~ward) or district_facility_ward (Mozambique; district~facility~ward, frequently truncated at 50 chars). Overrides OPENLDR_V1_POC_FORMAT.",
     )
     .action(async (opts: ExportBatchOpts, cmd: Command) => {
       const { config } = loadRuntime(cmd, { requireConnection: false });

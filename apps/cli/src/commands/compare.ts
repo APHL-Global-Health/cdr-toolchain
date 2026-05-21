@@ -80,7 +80,7 @@ export function registerCompareCommand(program: Command): void {
     )
     .option(
       "--poc-format <fmt>",
-      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default; facility~ward) or district_facility_ward (Mozambique; district~facility~ward, frequently truncated at 50 chars). Overrides OPENLDR_V1_POC_FORMAT.",
     )
     .option("--explain", "Show the queries that would run, exit without hitting either DB")
     .action(async (labNumberArg: string, opts: CompareOpts, cmd: Command) => {
