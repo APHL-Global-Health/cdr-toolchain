@@ -65,6 +65,7 @@ export function loadRuntime(
           openldrConnectionString: globals.openldrCs ?? process.env.OPENLDR_V1_CONNECTION_STRING,
           openldrDataDatabase: process.env.OPENLDR_V1_DATABASE_DATA ?? "OpenLDRData",
           openldrDictDatabase: process.env.OPENLDR_V1_DATABASE_DICT ?? "OpenLDRDict",
+          openldrV1PocFormat: process.env.OPENLDR_V1_POC_FORMAT === "district_facility" ? "district_facility" : "facility_ward",
           openldrV2Url: process.env.OPENLDR_V2_URL,
           openldrV2Token: process.env.OPENLDR_V2_TOKEN,
           openldrV2Path: process.env.OPENLDR_V2_PATH ?? "/api/v2/lab-requests",

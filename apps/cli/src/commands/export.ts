@@ -9,6 +9,7 @@ import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { diffRecord, isPerfectMatch } from "../compare/diff.js";
+import { resolvePocFormat } from "../compare/mapping.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadRuntime } from "./context.js";
 import { loadCodebook } from "../export/codebook.js";
@@ -47,6 +48,7 @@ interface ExportOpts {
   dataQuality?: boolean;
   quarantineOnAnomaly?: string;
   quarantineSeverity?: string;
+  pocFormat?: string;
 }
 
 function buildServer(connectionString: string): DisaServer {
@@ -106,6 +108,10 @@ export function registerExportCommand(program: Command): void {
     .option("--no-data-quality", "Suppress the data_quality audit-annotation block from v2 payloads. Default: include it when anomalies are detected.")
     .option("--quarantine-on-anomaly <path>", "When the audit finds anomalies at or above --quarantine-severity, write the payload + audit report to <path>/<labNumber>.json instead of POSTing. v2 + --post only.")
     .option("--quarantine-severity <level>", "Severity threshold for --quarantine-on-anomaly: error (default), warn, or info.")
+    .option(
+      "--poc-format <fmt>",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT. Only used with --check.",
+    )
     .action(async (labNumberArg: string, opts: ExportOpts, cmd: Command) => {
       const { config, output } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
@@ -156,7 +162,8 @@ export function registerExportCommand(program: Command): void {
           config.openldrDataDatabase,
         );
 
-        const requestDiff = diffRecord(disa, v1Request);
+        const pocFormat = resolvePocFormat(opts.pocFormat, config.openldrV1PocFormat);
+        const requestDiff = diffRecord(disa, v1Request, { pocFormat });
         if (!isPerfectMatch(requestDiff.summary)) {
           throw new CliError(
             "MISMATCH",

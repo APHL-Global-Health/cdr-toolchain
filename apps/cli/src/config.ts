@@ -5,6 +5,7 @@ import dotenv from "dotenv";
 import { z } from "zod";
 import { CliError } from "./errors.js";
 import { isValidFormat } from "./output.js";
+import type { PocFormat } from "./openldr.js";
 
 export interface LoadedConfig {
   connectionString: string;
@@ -14,6 +15,9 @@ export interface LoadedConfig {
   openldrLabnoPrefix: string;
   openldrDataDatabase: string;
   openldrDictDatabase: string;
+  /** PointOfCareDesc ordering convention used by v1 in this deployment.
+   *  Tanzania = `facility_ward` (default), Mozambique = `district_facility`. */
+  openldrV1PocFormat: PocFormat;
   /** OpenLDR v2 API base URL, e.g. https://v2.openldr.example.com (no trailing slash). */
   openldrV2Url?: string;
   /** Bearer token for v2 API auth. */
@@ -51,6 +55,7 @@ export interface ConfigOverrides {
   openldrLabnoPrefix?: string;
   openldrDataDatabase?: string;
   openldrDictDatabase?: string;
+  openldrV1PocFormat?: PocFormat;
   openldrV2Url?: string;
   openldrV2Token?: string;
   openldrV2Path?: string;
@@ -72,6 +77,7 @@ const EnvSchema = z.object({
   OPENLDR_LABNO_PREFIX: z.string().optional(),
   OPENLDR_V1_DATABASE_DATA: z.string().optional(),
   OPENLDR_V1_DATABASE_DICT: z.string().optional(),
+  OPENLDR_V1_POC_FORMAT: z.enum(["facility_ward", "district_facility"]).optional(),
   OPENLDR_V2_URL: z.string().url().optional(),
   OPENLDR_V2_TOKEN: z.string().min(1).optional(),
   OPENLDR_V2_PATH: z.string().optional(),
@@ -170,6 +176,7 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     openldrLabnoPrefix: overrides.openldrLabnoPrefix ?? env.data.OPENLDR_LABNO_PREFIX ?? "TZDISA",
     openldrDataDatabase: overrides.openldrDataDatabase ?? env.data.OPENLDR_V1_DATABASE_DATA ?? "OpenLDRData",
     openldrDictDatabase: overrides.openldrDictDatabase ?? env.data.OPENLDR_V1_DATABASE_DICT ?? "OpenLDRDict",
+    openldrV1PocFormat: overrides.openldrV1PocFormat ?? env.data.OPENLDR_V1_POC_FORMAT ?? "facility_ward",
     openldrV2Url: overrides.openldrV2Url ?? env.data.OPENLDR_V2_URL,
     openldrV2Token: overrides.openldrV2Token ?? env.data.OPENLDR_V2_TOKEN,
     openldrV2Path: overrides.openldrV2Path ?? env.data.OPENLDR_V2_PATH ?? "/api/v2/lab-requests",

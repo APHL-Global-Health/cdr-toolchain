@@ -256,18 +256,38 @@ export async function fetchLabResultsByRequestId(
 }
 
 /**
- * Strip CHAR(6) (a Disa-specific bell-like delimiter, see temp/script.sql line 53)
- * and split a "Facility~Ward" string into its parts.
+ * PointOfCareDesc ordering convention. Tanzania v1 stores `facility~ward`;
+ * Mozambique v1 stores `district~facility` (verified on `MZDISA001-010315`:
+ * v1 LIMSPointOfCareDesc="Maputo Cidade Kamubukwane~CS Bagamoio" against DISA
+ * Facility.FacilityName="CS Bagamoio"). Default is `facility_ward` to keep
+ * the historical Tanzania behaviour stable when the env var is unset.
  */
-export function splitPointOfCare(raw: string | null | undefined): { facilityName: string | null; ward: string | null } {
+export type PocFormat = "facility_ward" | "district_facility";
+
+/**
+ * Strip CHAR(6) (a Disa-specific bell-like delimiter, see temp/script.sql line 53)
+ * and split a tilde-delimited PointOfCareDesc into its semantic parts.
+ *
+ * Under `district_facility`, the right-hand segment is the facility and the
+ * left-hand segment is the district. The return shape stays `{ facilityName,
+ * ward }` so callers don't branch — `ward` carries the district value under
+ * that convention. When there is no `~`, the whole value is treated as the
+ * facility (both conventions degrade to a single-name fallback).
+ */
+export function splitPointOfCare(
+  raw: string | null | undefined,
+  format: PocFormat = "facility_ward",
+): { facilityName: string | null; ward: string | null } {
   if (raw === null || raw === undefined) return { facilityName: null, ward: null };
   const cleaned = raw.replace(/\x06/g, "");
   const tildeIdx = cleaned.indexOf("~");
   if (tildeIdx === -1) {
     return { facilityName: cleaned.trim() || null, ward: null };
   }
-  const facility = cleaned.slice(0, tildeIdx).trim();
-  const ward = cleaned.slice(tildeIdx + 1).trim();
+  const left = cleaned.slice(0, tildeIdx).trim();
+  const right = cleaned.slice(tildeIdx + 1).trim();
+  const facility = format === "district_facility" ? right : left;
+  const ward = format === "district_facility" ? left : right;
   return {
     facilityName: facility.length > 0 ? facility : null,
     ward: ward.length > 0 ? ward : null,

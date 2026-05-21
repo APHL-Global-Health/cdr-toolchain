@@ -1,6 +1,6 @@
 import type { SpecimenRecpt } from "disalab";
 import type { OpenLdrV1Request } from "../openldr.js";
-import { REQUEST_FIELDS } from "./mapping.js";
+import { getRequestFields, type RequestFieldsOptions } from "./mapping.js";
 import { isEmpty, type CompareStatus } from "./comparators.js";
 
 export interface FieldRow {
@@ -31,7 +31,11 @@ export function valueForOutput(v: unknown): unknown {
   return v;
 }
 
-export function diffRecord(disa: SpecimenRecpt, v1: OpenLdrV1Request): DiffResult {
+export function diffRecord(
+  disa: SpecimenRecpt,
+  v1: OpenLdrV1Request,
+  opts: RequestFieldsOptions,
+): DiffResult {
   const fields: FieldRow[] = [];
   const summary: DiffSummary = {
     total: 0,
@@ -41,7 +45,8 @@ export function diffRecord(disa: SpecimenRecpt, v1: OpenLdrV1Request): DiffResul
     only_v1: 0,
   };
 
-  for (const def of REQUEST_FIELDS) {
+  const requestFields = getRequestFields(opts);
+  for (const def of requestFields) {
     const disaRaw = def.getDisa(disa);
     const disaCandidates = Array.isArray(disaRaw) ? disaRaw : [disaRaw];
     const v1Raw = def.getV1(v1);

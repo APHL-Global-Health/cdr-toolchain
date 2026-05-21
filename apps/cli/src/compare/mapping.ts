@@ -1,6 +1,7 @@
 import type { SpecimenRecpt } from "disalab";
-import type { OpenLdrV1Request } from "../openldr.js";
+import type { OpenLdrV1Request, PocFormat } from "../openldr.js";
 import { splitPointOfCare } from "../openldr.js";
+import { CliError } from "../errors.js";
 import {
   datetime,
   stringCi,
@@ -40,7 +41,53 @@ export interface FieldDef {
   allowDisaEmpty?: boolean;
 }
 
-export const REQUEST_FIELDS: FieldDef[] = [
+/**
+ * Display-ordered list of every comparator field. Stable across PocFormat —
+ * the convention only changes how `facility_name` and `ward` are extracted
+ * from v1's LIMSPointOfCareDesc, not the schema of the diff. Use this when
+ * you need just the names (e.g. `--explain` output) without instantiating
+ * the full FieldDef array.
+ */
+export const REQUEST_FIELD_NAMES: readonly string[] = [
+  "facility_code",
+  "facility_name",
+  "ward",
+  "panel_code",
+  "specimen_code",
+  "taken_at",
+  "collected_at",
+  "received_at",
+  "priority",
+  "sex",
+  "icd10",
+  "therapy",
+  "clinical_info",
+];
+
+/** Resolve the effective PocFormat: a non-empty CLI override wins; otherwise
+ *  the env-derived config fallback is used. Throws CliError("USAGE") if the
+ *  override is a malformed string so the user gets a clear error rather than
+ *  silent fallback to facility_ward. */
+export function resolvePocFormat(override: string | undefined, fallback: PocFormat): PocFormat {
+  if (override === undefined || override.length === 0) return fallback;
+  if (override === "facility_ward" || override === "district_facility") return override;
+  throw new CliError(
+    "USAGE",
+    `--poc-format must be "facility_ward" or "district_facility" (got "${override}")`,
+  );
+}
+
+export interface RequestFieldsOptions {
+  /** How v1 stores LIMSPointOfCareDesc in this deployment. `facility_ward`
+   *  (Tanzania default) means left=facility, right=ward. `district_facility`
+   *  (Mozambique) flips it: left=district, right=facility — `ward` then
+   *  carries the district value. See `splitPointOfCare` in openldr.ts. */
+  pocFormat: PocFormat;
+}
+
+export function getRequestFields(opts: RequestFieldsOptions): FieldDef[] {
+  const { pocFormat } = opts;
+  return [
   {
     // OpenLDR v1 prepends a literal "DISA" system prefix to DISA facility
     // codes (e.g. DISA "BAKAA" → v1 "DISABAKAA"). Strip it before comparing.
@@ -57,7 +104,7 @@ export const REQUEST_FIELDS: FieldDef[] = [
     field: "facility_name",
     comparator: facilityNameComparator,
     getDisa: (s) => s.Facility?.FacilityName ?? null,
-    getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc).facilityName,
+    getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc, pocFormat).facilityName,
   },
   {
     // v1's LIMSPointOfCareDesc is sometimes "facility~ward", sometimes just
@@ -65,10 +112,14 @@ export const REQUEST_FIELDS: FieldDef[] = [
     // DISA always carries the ward in REGDAT4.WardClinic. wardComparator
     // treats the v1-dropped-ward case as match (v1 data loss, not a
     // toolchain bug — v2 will emit the ward from DISA).
+    //
+    // Under the `district_facility` convention (Mozambique) the v1 left-hand
+    // segment is the district, surfaced here under the `ward` field — the
+    // diff schema stays uniform across deployments while the semantics shift.
     field: "ward",
     comparator: wardComparator,
     getDisa: (s) => s.WardClinic,
-    getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc).ward,
+    getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc, pocFormat).ward,
   },
   {
     // DISA's order may bundle a panel (e.g. COAGF "Coagulation Indices");
@@ -155,4 +206,5 @@ export const REQUEST_FIELDS: FieldDef[] = [
     ],
     getV1: (r) => r.ClinicalInfo,
   },
-];
+  ];
+}

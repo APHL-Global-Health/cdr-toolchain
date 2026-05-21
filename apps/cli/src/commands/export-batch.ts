@@ -9,6 +9,8 @@ import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { diffRecord, isPerfectMatch } from "../compare/diff.js";
+import { resolvePocFormat } from "../compare/mapping.js";
+import type { PocFormat } from "../openldr.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
 import { DEFAULT_SITE } from "../export/site-config.js";
@@ -52,6 +54,7 @@ interface ExportBatchOpts {
   summaryOnly?: boolean;
   explain?: boolean;
   emitPayloads?: boolean;
+  pocFormat?: string;
 }
 
 type LabStatus =
@@ -303,6 +306,7 @@ interface ProcessLabContext {
   quarantineDir: string | null;
   quarantineThreshold: Severity;
   openldrCs: string | undefined;
+  pocFormat: PocFormat;
   dryRun: boolean;
   /** When set, write the v2 payload to stdout (via writePayload) and skip the POST. */
   emitPayloads: boolean;
@@ -374,7 +378,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
         result.duration_ms = Date.now() - start;
         return result;
       }
-      const requestDiff = diffRecord(specimen, fetched.v1Request);
+      const requestDiff = diffRecord(specimen, fetched.v1Request, { pocFormat: ctx.pocFormat });
       if (!isPerfectMatch(requestDiff.summary)) {
         result.status = "check_failed";
         result.reason = "request-level v1 fidelity mismatch";
@@ -583,6 +587,10 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--summary-only", "Suppress per-lab stdout output; emit only the final summary.")
     .option("--explain", "Show the lab-selection query and effective config; exit without running.")
     .option("--emit-payloads", "Build each v2 payload and write it to stdout as NDJSON (one per line) instead of POSTing. Per-lab journal goes to stderr in this mode. Designed to pipe into `openldr ingest stream`.")
+    .option(
+      "--poc-format <fmt>",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+    )
     .action(async (opts: ExportBatchOpts, cmd: Command) => {
       const { config } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
@@ -595,6 +603,7 @@ export function registerExportBatchCommand(program: Command): void {
       }
 
       const doCheck = opts.check !== false;
+      const pocFormat = resolvePocFormat(opts.pocFormat, config.openldrV1PocFormat);
       const doQuarantine = opts.quarantine !== false;
       const quarantineDir = doQuarantine ? resolve(opts.quarantineDir ?? "./temp/quarantine") : null;
       const quarantineThresholdRaw = (opts.quarantineSeverity ?? "error").toLowerCase();
@@ -751,6 +760,7 @@ export function registerExportBatchCommand(program: Command): void {
         quarantineDir,
         quarantineThreshold,
         openldrCs,
+        pocFormat,
         dryRun: opts.dryRun === true,
         emitPayloads: opts.emitPayloads === true,
         writePayload: opts.emitPayloads === true ? writeOut : undefined,

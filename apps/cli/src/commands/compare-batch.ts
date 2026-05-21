@@ -5,7 +5,7 @@ import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
-import { REQUEST_FIELDS } from "../compare/mapping.js";
+import { REQUEST_FIELD_NAMES, resolvePocFormat } from "../compare/mapping.js";
 import { diffRecord, isPerfectMatch, type DiffSummary } from "../compare/diff.js";
 import {
   diffResults,
@@ -26,6 +26,7 @@ interface BatchOpts {
   results?: boolean;
   includeEmpty?: boolean;
   explain?: boolean;
+  pocFormat?: string;
 }
 
 interface FieldStats {
@@ -137,10 +138,15 @@ export function registerCompareBatchCommand(program: Command): void {
       "--include-empty",
       "With --results: keep DISA OrderItems that are unresulted / empty / stray HL7 status flags. Off by default.",
     )
+    .option(
+      "--poc-format <fmt>",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+    )
     .option("--explain", "Show the lab-selection query and field list, exit without running")
     .action(async (opts: BatchOpts, cmd: Command) => {
       const { config } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
+      const pocFormat = resolvePocFormat(opts.pocFormat, config.openldrV1PocFormat);
       const limit = Number(opts.limit ?? "100");
       const offset = Number(opts.offset ?? "0");
       const where = opts.where ?? "";
@@ -157,7 +163,8 @@ export function registerCompareBatchCommand(program: Command): void {
             },
             openldr_database: config.openldrDataDatabase,
             prefix,
-            fields: REQUEST_FIELDS.map((f) => f.field),
+            poc_format: pocFormat,
+            fields: [...REQUEST_FIELD_NAMES],
           }) + "\n",
         );
         return;
@@ -181,8 +188,8 @@ export function registerCompareBatchCommand(program: Command): void {
       const labNos = await fetchLabNumbers(where, limit, offset, config.connectionString);
 
       const perField: Record<string, FieldStats> = {};
-      for (const f of REQUEST_FIELDS) {
-        perField[f.field] = { match: 0, mismatch: 0, only_disa: 0, only_v1: 0 };
+      for (const fieldName of REQUEST_FIELD_NAMES) {
+        perField[fieldName] = { match: 0, mismatch: 0, only_disa: 0, only_v1: 0 };
       }
 
       let scanned = 0;
@@ -226,7 +233,7 @@ export function registerCompareBatchCommand(program: Command): void {
           if (!foundV1) missingV1++;
 
           if (foundDisa && foundV1) {
-            const diff = diffRecord(disa, v1);
+            const diff = diffRecord(disa, v1, { pocFormat });
             labResult.summary = diff.summary;
             let labPerfect = isPerfectMatch(diff.summary);
 

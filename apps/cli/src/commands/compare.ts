@@ -5,7 +5,7 @@ import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
 import { fetchRequestByRequestId, buildRequestSql } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
-import { REQUEST_FIELDS } from "../compare/mapping.js";
+import { REQUEST_FIELD_NAMES, resolvePocFormat } from "../compare/mapping.js";
 import { diffRecord, isPerfectMatch, type DiffSummary, type FieldRow } from "../compare/diff.js";
 import { loadRuntime } from "./context.js";
 
@@ -14,6 +14,7 @@ interface CompareOpts {
   prefix?: string;
   onlyDifferences?: boolean;
   explain?: boolean;
+  pocFormat?: string;
 }
 
 interface CompareReport {
@@ -77,11 +78,16 @@ export function registerCompareCommand(program: Command): void {
       "--only-differences",
       "Hide fields whose status is `match` (mismatch / only_disa / only_v1 are kept)",
     )
+    .option(
+      "--poc-format <fmt>",
+      "How v1 stores LIMSPointOfCareDesc: facility_ward (Tanzania default) or district_facility (Mozambique). Overrides OPENLDR_V1_POC_FORMAT.",
+    )
     .option("--explain", "Show the queries that would run, exit without hitting either DB")
     .action(async (labNumberArg: string, opts: CompareOpts, cmd: Command) => {
       const { config, output } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
       const norm = normalizeLabNumber(labNumberArg, prefix);
+      const pocFormat = resolvePocFormat(opts.pocFormat, config.openldrV1PocFormat);
 
       if (opts.explain === true) {
         const plan = {
@@ -90,6 +96,7 @@ export function registerCompareCommand(program: Command): void {
           lab_number: norm.disaLabNo,
           openldr_request_id: norm.openldrRequestId,
           prefix: norm.prefix,
+          poc_format: pocFormat,
           disa: {
             steps: [
               `REGDAT4.All("WHERE [LabNo] = '${norm.disaLabNo.replace(/'/g, "''")}'", server)`,
@@ -101,7 +108,7 @@ export function registerCompareCommand(program: Command): void {
             sql: buildRequestSql(config.openldrDataDatabase).replace(/\s+/g, " ").trim(),
             params: { requestId: norm.openldrRequestId },
           },
-          fields: REQUEST_FIELDS.map((f) => f.field),
+          fields: [...REQUEST_FIELD_NAMES],
         };
         process.stdout.write(JSON.stringify(plan) + "\n");
         return;
@@ -145,7 +152,7 @@ export function registerCompareCommand(program: Command): void {
         );
       }
 
-      const diff = diffRecord(disa, v1);
+      const diff = diffRecord(disa, v1, { pocFormat });
 
       const filteredFields =
         opts.onlyDifferences === true
