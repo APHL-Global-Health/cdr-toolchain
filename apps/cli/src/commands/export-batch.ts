@@ -719,9 +719,12 @@ export function registerExportBatchCommand(program: Command): void {
       const codebook = await loadCodebook(buildServer(config.connectionString));
       await closePool();
 
-      // Skip POST config resolution entirely when dry-running so users
-      // can validate the gates without API credentials.
-      const postConfig: PostConfig = opts.dryRun === true
+      // Skip POST config resolution entirely when we won't POST anyway:
+      // --dry-run runs the gates without sending, --emit-payloads writes
+      // payloads to stdout (intended to pipe into `openldr ingest stream`)
+      // so neither needs the v2 URL + token.
+      const skipPostConfig = opts.dryRun === true || opts.emitPayloads === true;
+      const postConfig: PostConfig = skipPostConfig
         ? {
             baseUrl: "",
             path: "",
