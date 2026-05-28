@@ -46,13 +46,15 @@ async function fetchDisaSpecimen(
     // Resolve WardClinic against WARDDICT before the pool closes — the
     // dictionary lives on the same DISA instance. Misses leave the raw
     // code in place so the comparator's existing fall-through still works.
+    // Non-destructive: the resolved description goes on a side-field so
+    // v2-transform downstream still has the raw code for source_payload.
     if (recpt !== null) {
       const resolved = await wardResolver.resolve(
         recpt.Facility?.Code,
         recpt.WardClinic,
         server,
       );
-      if (resolved !== null) recpt.WardClinic = resolved;
+      if (resolved !== null) recpt.WardClinicResolved = resolved;
     }
     return recpt;
   } catch (err) {

@@ -10,6 +10,7 @@ import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { diffRecord, isPerfectMatch } from "../compare/diff.js";
 import { resolvePocFormat } from "../compare/mapping.js";
+import { WardDictResolver } from "../compare/warddict-resolver.js";
 import type { PocFormat } from "../openldr.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
@@ -129,13 +130,31 @@ function buildServer(connectionString: string): DisaServer {
   };
 }
 
-async function fetchDisaSpecimen(disaLabNo: string, connectionString: string): Promise<SpecimenRecpt | null> {
+async function fetchDisaSpecimen(
+  disaLabNo: string,
+  connectionString: string,
+  wardResolver: WardDictResolver,
+): Promise<SpecimenRecpt | null> {
   try {
     const server = buildServer(connectionString);
     const escaped = disaLabNo.replace(/'/g, "''");
     const regs = await REGDAT4.All(`WHERE [LabNo] = '${escaped}'`, server);
     if (regs.length === 0) return null;
-    return await SpecimenRecpt.Fetch(regs[0]!, server);
+    const recpt = await SpecimenRecpt.Fetch(regs[0]!, server);
+    // WARDDICT resolution before pool close. Resolver cache is shared
+    // across the batch via ctx, so each unique (LOCATION, WARD) pair
+    // only hits the DB once over the whole run. Non-destructive: raw
+    // WardClinic stays put so v2's source_payload.ward_clinic_raw is
+    // preserved alongside the resolved description.
+    if (recpt !== null) {
+      const resolved = await wardResolver.resolve(
+        recpt.Facility?.Code,
+        recpt.WardClinic,
+        server,
+      );
+      if (resolved !== null) recpt.WardClinicResolved = resolved;
+    }
+    return recpt;
   } finally {
     await closePool();
   }
@@ -313,6 +332,9 @@ interface ProcessLabContext {
   /** Sink for the NDJSON payload line. Provided by the action handler so the
    *  EPIPE-safe writeOut helper can be reused. */
   writePayload?: (line: string) => void;
+  /** Shared WARDDICT resolver — one instance per batch run so the
+   *  (LOCATION, WARD) cache amortises across thousands of labs. */
+  wardResolver: WardDictResolver;
 }
 
 /** Process one lab end-to-end: fetch -> (--check) -> build -> audit ->
@@ -333,7 +355,11 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // disalab pool registry (getPool) keeps a separate ConnectionPool per
     // connection string, so DISA and v1 reads don't race a shared global.
     const fetched = await (async () => {
-      const specimen = await fetchDisaSpecimen(norm.disaLabNo, ctx.config.connectionString);
+      const specimen = await fetchDisaSpecimen(
+        norm.disaLabNo,
+        ctx.config.connectionString,
+        ctx.wardResolver,
+      );
       if (specimen === null) {
         return { specimen: null as SpecimenRecpt | null, v1Request: null, v1Rows: [] as Awaited<ReturnType<typeof fetchLabResultsByRequestId>> };
       }
@@ -753,6 +779,11 @@ export function registerExportBatchCommand(program: Command): void {
 
       const labIds = await fetchLabNumbers(where, limit, offset, config.connectionString);
 
+      // One WARDDICT resolver per run: caches (LOCATION, WARD) → description
+      // across the entire batch, so the dictionary is queried at most once
+      // per unique pair regardless of concurrency or lab count.
+      const wardResolver = new WardDictResolver();
+
       const ctx: ProcessLabContext = {
         config,
         codebook,
@@ -767,6 +798,7 @@ export function registerExportBatchCommand(program: Command): void {
         dryRun: opts.dryRun === true,
         emitPayloads: opts.emitPayloads === true,
         writePayload: opts.emitPayloads === true ? writeOut : undefined,
+        wardResolver,
       };
 
       const tally = (r: LabResult): void => {

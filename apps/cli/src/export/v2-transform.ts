@@ -5,7 +5,6 @@ import {
   supersedePanelIterations,
   type DisaObs,
 } from "../compare/result-mapping.js";
-import { splitPointOfCare } from "../openldr.js";
 import type { AuditReport } from "../audit/types.js";
 import type { Codebook } from "./codebook.js";
 import type { SiteConfig } from "./site-config.js";
@@ -185,24 +184,6 @@ function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2Co
   return concept;
 }
 
-/** Build `requesting_facility_code` from the parsed WardClinic facility
- *  segment. DISA doesn't carry a separate code for the requesting facility
- *  in most deployments — only a name — so concept_code mirrors display_name.
- *  Returns null when DISA has no requesting-facility info. */
-function buildRequestingFacilityConcept(
-  facilityName: string | null,
-  site: SiteConfig,
-): V2ConceptCode | null {
-  if (facilityName === null) return null;
-  return {
-    system_id: site.facility_system_id,
-    concept_code: facilityName,
-    display_name: facilityName,
-    concept_class: "facility",
-    datatype: "coded",
-  };
-}
-
 // ---------- patient ---------------------------------------------------------
 
 function buildPatient(s: SpecimenRecpt, refIso: string | null, requestId: string): V2Patient {
@@ -285,7 +266,10 @@ function buildLabRequest(
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
   const facilityCode = nz(facility?.Code);
-  const wardClinicSplit = splitPointOfCare(s.WardClinic);
+  // WARDDICT-resolved description (set by WardDictResolver upstream in
+  // export* / compare* commands). undefined when the lookup missed or
+  // wasn't run — source_payload.ward is then omitted entirely.
+  const wardDescription = s.WardClinicResolved ?? null;
 
   const panel = primary === null ? undefined : codebook.panelEntry(primary.panelCode);
   const panelCode: V2ConceptCode | null = primary === null
@@ -310,7 +294,12 @@ function buildLabRequest(
       };
 
   const facilityConcept = buildFacilityConcept(facility, site);
-  const requestingFacilityConcept = buildRequestingFacilityConcept(wardClinicSplit.facilityName, site);
+  // DISA doesn't carry a separate requesting-facility code distinct from
+  // the testing lab — the previous attempt to derive one by splitting
+  // WardClinic on `~` produced ward codes mislabelled as facilities
+  // (Moz "SAAJS", etc.). Emit the same concept for both; v2 consumers
+  // can infer requesting == testing from the equality.
+  const requestingFacilityConcept = facilityConcept;
 
   const sectionCode = panel?.section ?? null;
 
@@ -335,17 +324,21 @@ function buildLabRequest(
     patient_class: null, // not surfaced on SpecimenRecpt
     section_code: sectionCode,
     result_status: null, // not surfaced on SpecimenRecpt; v1 carries via HL7ResultStatusCode
-    // requesting_facility_code = the parsed WardClinic facility segment, or
-    // null when DISA didn't capture one (don't synthesise from the lab — v2
-    // would lose the signal that requesting/testing were actually the same).
+    // requesting_facility_code mirrors testing_facility_code — see the
+    // comment where facilityConcept is reused for requestingFacilityConcept
+    // above. DISA's data model doesn't distinguish them.
     requesting_facility_code: requestingFacilityConcept,
     testing_facility_code: facilityConcept,
     requesting_doctor: nz(s.Doctor) ?? nz(s.DoctorCode),
     tested_by: nz(s.ReceivedInLabBy) ?? nz(s.TakenBy) ?? nz(s.CollectedBy),
     authorised_by: null,
     source_payload: {
+      // Raw DISA ward code, preserved even when we have a resolved name —
+      // downstream consumers may want to round-trip the original key.
       ward_clinic_raw: nz(s.WardClinic),
-      ...(wardClinicSplit.ward !== null ? { ward: wardClinicSplit.ward } : {}),
+      // Resolved human description from WARDDICT when available; absent
+      // when the (LOCATION, WARD) pair wasn't in the dictionary.
+      ...(wardDescription !== null ? { ward: wardDescription } : {}),
       test_orders: s.TestOrders.map((t) => String(t).trim()).filter((t) => t.length > 0),
     },
   };

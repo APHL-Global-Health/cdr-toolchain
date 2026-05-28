@@ -1,6 +1,17 @@
 import { Core, WARDDICT } from "disalab";
 import type { DisaServer } from "disalab";
 
+// Non-destructive companion to `SpecimenRecpt.WardClinic` — populated by
+// `WardDictResolver` upstream so downstream consumers (compare diff, v2
+// transform) can emit the raw DISA code AND the resolved description
+// independently. Phase 2 previously overwrote WardClinic, which lost the
+// raw code that v2's `source_payload.ward_clinic_raw` needs to preserve.
+declare module "disalab" {
+  interface SpecimenRecpt {
+    WardClinicResolved?: string | null;
+  }
+}
+
 /**
  * Resolves DISA `(LOCATION, WardClinic)` to the human-readable description
  * stored in WARDDICT. In Mozambique the description is only in the

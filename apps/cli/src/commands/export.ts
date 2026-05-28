@@ -10,6 +10,7 @@ import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { diffRecord, isPerfectMatch } from "../compare/diff.js";
 import { resolvePocFormat } from "../compare/mapping.js";
+import { WardDictResolver } from "../compare/warddict-resolver.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadRuntime } from "./context.js";
 import { loadCodebook } from "../export/codebook.js";
@@ -57,13 +58,31 @@ function buildServer(connectionString: string): DisaServer {
   };
 }
 
-async function fetchDisaSpecimen(disaLabNo: string, connectionString: string): Promise<SpecimenRecpt | null> {
+async function fetchDisaSpecimen(
+  disaLabNo: string,
+  connectionString: string,
+  wardResolver: WardDictResolver,
+): Promise<SpecimenRecpt | null> {
   try {
     const server = buildServer(connectionString);
     const escaped = disaLabNo.replace(/'/g, "''");
     const regs = await REGDAT4.All(`WHERE [LabNo] = '${escaped}'`, server);
     if (regs.length === 0) return null;
-    return await SpecimenRecpt.Fetch(regs[0]!, server);
+    const recpt = await SpecimenRecpt.Fetch(regs[0]!, server);
+    // Resolve WardClinic against WARDDICT before the pool closes, so
+    // v2-transform downstream can emit source_payload.ward as the
+    // human description while keeping ward_clinic_raw as the DISA code.
+    // Misses leave WardClinicResolved undefined; v2-transform falls
+    // back to omitting the field, matching today's behavior.
+    if (recpt !== null) {
+      const resolved = await wardResolver.resolve(
+        recpt.Facility?.Code,
+        recpt.WardClinic,
+        server,
+      );
+      if (resolved !== null) recpt.WardClinicResolved = resolved;
+    }
+    return recpt;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new CliError("DB_QUERY_FAILED", `DISA query failed: ${message}`);
@@ -125,7 +144,12 @@ export function registerExportCommand(program: Command): void {
         );
       }
 
-      const disa = await fetchDisaSpecimen(norm.disaLabNo, config.connectionString);
+      const wardResolver = new WardDictResolver();
+      const disa = await fetchDisaSpecimen(
+        norm.disaLabNo,
+        config.connectionString,
+        wardResolver,
+      );
       if (disa === null) {
         throw new CliError("GET_NO_ROWS", `DISA specimen not found: ${norm.disaLabNo}`, {
           lab_number: norm.disaLabNo,

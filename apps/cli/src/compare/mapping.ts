@@ -118,7 +118,12 @@ export function getRequestFields(opts: RequestFieldsOptions): FieldDef[] {
     // diff schema stays uniform across deployments while the semantics shift.
     field: "ward",
     comparator: wardComparator,
-    getDisa: (s) => s.WardClinic,
+    // Prefer the WARDDICT-resolved description (Mozambique etc.) over the
+    // raw 5-char ward code. The resolver populates WardClinicResolved
+    // upstream in compare* / export* commands; when the lookup misses
+    // the field is undefined and we fall back to the raw code, matching
+    // today's behavior for deployments without a populated WARDDICT.
+    getDisa: (s) => s.WardClinicResolved ?? s.WardClinic,
     getV1: (r) => splitPointOfCare(r.LIMSPointOfCareDesc, pocFormat).ward,
   },
   {

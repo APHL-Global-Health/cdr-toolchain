@@ -96,14 +96,16 @@ async function fetchDisaSpecimen(
     const recpt = await SpecimenRecpt.Fetch(regs[0]!, server);
     // Resolve WardClinic against WARDDICT before the pool closes. The
     // resolver caches across the batch, so each unique (LOCATION, WARD)
-    // pair only hits the DB once.
+    // pair only hits the DB once. Non-destructive: the resolved
+    // description goes on a side-field so v2-transform downstream still
+    // has the raw code for source_payload.
     if (recpt !== null) {
       const resolved = await wardResolver.resolve(
         recpt.Facility?.Code,
         recpt.WardClinic,
         server,
       );
-      if (resolved !== null) recpt.WardClinic = resolved;
+      if (resolved !== null) recpt.WardClinicResolved = resolved;
     }
     return recpt;
   } finally {
