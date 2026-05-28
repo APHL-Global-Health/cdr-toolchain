@@ -357,6 +357,68 @@ export function registerAuditBatchCommand(program: Command): void {
       };
       process.on("uncaughtException", onFatal("uncaughtException"));
       process.on("unhandledRejection", onFatal("unhandledRejection"));
+
+      // Graceful Ctrl-C: emit the partial summary, finalise the report
+      // with whatever's been scanned so far, then exit with the standard
+      // signal code (130 = SIGINT, 143 = SIGTERM). Idempotent — a second
+      // signal hard-exits in case the cleanup itself is hung. Without
+      // this, Ctrl-C kills the process before any output is written and
+      // operators lose every lab scanned so far.
+      let interrupted: NodeJS.Signals | null = null;
+      const onSignal = (signal: NodeJS.Signals) => (): void => {
+        if (interrupted !== null) {
+          process.stderr.write(
+            JSON.stringify({
+              _meta: "audit-batch-interrupted-twice",
+              signal,
+            }) + "\n",
+          );
+          process.exit(130);
+        }
+        interrupted = signal;
+        const exitCode = signal === "SIGTERM" ? 143 : 130;
+        // Run cleanup as async IIFE — the original Promise.all and SQL
+        // queries keep the event loop alive while renderReport awaits,
+        // so the async work runs to completion before process.exit.
+        void (async (): Promise<void> => {
+          try {
+            process.stderr.write(
+              JSON.stringify({
+                _meta: "audit-batch-interrupted",
+                signal,
+                scanned_so_far: scanned,
+                current_lab: currentLab,
+              }) + "\n",
+            );
+            emitMeta(makeSummary() as unknown as Record<string, unknown>);
+            if (
+              reportAggregator !== null &&
+              reportOutPath !== null &&
+              reportFormat !== null
+            ) {
+              const aggregation = reportAggregator.finalize(estimatedTotal);
+              const rendered = await renderReport(reportFormat, aggregation, {
+                title: opts.reportTitle ?? "DISA Migration Audit Report",
+                generatedAt: new Date(),
+                maxSamplesPerClass: reportMaxSamples,
+              });
+              mkdirSync(dirname(reportOutPath), { recursive: true });
+              writeFileSync(reportOutPath, rendered);
+              emitMeta({
+                _meta: "audit-report",
+                out: reportOutPath,
+                format: reportFormat,
+                interrupted: true,
+              });
+            }
+          } catch {
+            // Best effort; if cleanup throws we still want to exit.
+          }
+          process.exit(exitCode);
+        })();
+      };
+      process.on("SIGINT", onSignal("SIGINT"));
+      process.on("SIGTERM", onSignal("SIGTERM"));
       process.stdout.on("error", (err: NodeJS.ErrnoException) => {
         // EPIPE means the downstream consumer (terminal, pipe, file
         // handle) closed. Stop trying to write per-lab lines but keep
