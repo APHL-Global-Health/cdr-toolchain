@@ -32,6 +32,7 @@ import {
   TESTDATA,
   TESTDICT,
   TXT1DATA,
+  WARDDICT,
   WLSTDAT6,
   WRKADICT,
 } from "disalab";
@@ -478,6 +479,20 @@ const ENTITY_DEFS: EntityDef[] = [
     tableName: "[DisaGlobal].[dbo].[SYSTDIC5]",
     sqlColumns: ["DATESTAMP", "ID", "LABORATORY_NAME"],
     fields: ["DATESTAMP", "ID", "LABORATORY_NAME", "Prefixes"],
+  },
+  {
+    // Composite-key dictionary: (CODE1, CODE2) → (DESCRIPTION, ABBREV).
+    // CODE1 is typically a facility code (5 chars space-padded) and CODE2
+    // the ward/clinical-service code under it. CODE1 = "@@@@@" is the
+    // facility-agnostic sentinel. In Mozambique, DESCRIPTION/ABBREV are
+    // NULL on disk — the values are packed into WARDDICT_STATUS bytes.
+    alias: "ward-dict",
+    class: WARDDICT,
+    tableName: "[DisaGlobal].[dbo].[WARDDICT]",
+    sqlColumns: ["DATESTAMP", "CODE1", "CODE2", "DESCRIPTION", "ABBREV"],
+    fields: ["DATESTAMP", "CODE1", "CODE2", "DESCRIPTION", "ABBREV"],
+    notes:
+      "Composite key (CODE1, CODE2). Description/abbrev may be NULL on disk in some deployments; the values are encoded in WARDDICT_STATUS bytes.",
   },
   {
     alias: "order-dict",

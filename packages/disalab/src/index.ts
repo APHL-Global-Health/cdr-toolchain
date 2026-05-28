@@ -22,6 +22,7 @@ export { LOCNDIC4 } from "./lib/DisaGlobal/LOCNDIC4.js";
 export { PARMDICT } from "./lib/DisaGlobal/PARMDICT.js";
 export { SYSTDIC5 } from "./lib/DisaGlobal/SYSTDIC5.js";
 export { TESTDICT } from "./lib/DisaGlobal/TESTDICT.js";
+export { WARDDICT } from "./lib/DisaGlobal/WARDDICT.js";
 
 export { BREGDICT } from "./lib/DisalabDict/BREGDICT.js";
 export { DESLDIC5 } from "./lib/DisalabDict/DESLDIC5.js";
