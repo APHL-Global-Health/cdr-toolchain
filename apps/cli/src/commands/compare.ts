@@ -7,6 +7,7 @@ import { fetchRequestByRequestId, buildRequestSql } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { REQUEST_FIELD_NAMES, resolvePocFormat } from "../compare/mapping.js";
 import { diffRecord, isPerfectMatch, type DiffSummary, type FieldRow } from "../compare/diff.js";
+import { WardDictResolver } from "../compare/warddict-resolver.js";
 import { loadRuntime } from "./context.js";
 
 interface CompareOpts {
@@ -34,6 +35,7 @@ function buildServer(connectionString: string): DisaServer {
 async function fetchDisaSpecimen(
   disaLabNo: string,
   connectionString: string,
+  wardResolver: WardDictResolver,
 ): Promise<SpecimenRecpt | null> {
   try {
     const server = buildServer(connectionString);
@@ -41,6 +43,17 @@ async function fetchDisaSpecimen(
     const regs = await REGDAT4.All(`WHERE [LabNo] = '${escaped}'`, server);
     if (regs.length === 0) return null;
     const recpt = await SpecimenRecpt.Fetch(regs[0]!, server);
+    // Resolve WardClinic against WARDDICT before the pool closes — the
+    // dictionary lives on the same DISA instance. Misses leave the raw
+    // code in place so the comparator's existing fall-through still works.
+    if (recpt !== null) {
+      const resolved = await wardResolver.resolve(
+        recpt.Facility?.Code,
+        recpt.WardClinic,
+        server,
+      );
+      if (resolved !== null) recpt.WardClinic = resolved;
+    }
     return recpt;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -128,7 +141,12 @@ export function registerCompareCommand(program: Command): void {
         );
       }
 
-      const disa = await fetchDisaSpecimen(norm.disaLabNo, config.connectionString);
+      const wardResolver = new WardDictResolver();
+      const disa = await fetchDisaSpecimen(
+        norm.disaLabNo,
+        config.connectionString,
+        wardResolver,
+      );
       const v1 = await fetchRequestByRequestId(
         norm.openldrRequestId,
         openldrCs,

@@ -7,6 +7,7 @@ import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { REQUEST_FIELD_NAMES, resolvePocFormat } from "../compare/mapping.js";
 import { diffRecord, isPerfectMatch, type DiffSummary } from "../compare/diff.js";
+import { WardDictResolver } from "../compare/warddict-resolver.js";
 import {
   diffResults,
   isResultPerfectMatch,
@@ -85,13 +86,26 @@ function buildServer(connectionString: string): DisaServer {
 async function fetchDisaSpecimen(
   disaLabNo: string,
   connectionString: string,
+  wardResolver: WardDictResolver,
 ): Promise<SpecimenRecpt | null> {
   try {
     const server = buildServer(connectionString);
     const escaped = disaLabNo.replace(/'/g, "''");
     const regs = await REGDAT4.All(`WHERE [LabNo] = '${escaped}'`, server);
     if (regs.length === 0) return null;
-    return await SpecimenRecpt.Fetch(regs[0]!, server);
+    const recpt = await SpecimenRecpt.Fetch(regs[0]!, server);
+    // Resolve WardClinic against WARDDICT before the pool closes. The
+    // resolver caches across the batch, so each unique (LOCATION, WARD)
+    // pair only hits the DB once.
+    if (recpt !== null) {
+      const resolved = await wardResolver.resolve(
+        recpt.Facility?.Code,
+        recpt.WardClinic,
+        server,
+      );
+      if (resolved !== null) recpt.WardClinic = resolved;
+    }
+    return recpt;
   } finally {
     await closePool();
   }
@@ -205,6 +219,11 @@ export function registerCompareBatchCommand(program: Command): void {
       const runResults = opts.results === true;
       const includeEmpty = opts.includeEmpty === true;
 
+      // One resolver instance for the whole batch — the (CODE1, CODE2)
+      // cache amortises across every lab so we don't re-query WARDDICT
+      // for the same facility+ward pair more than once per run.
+      const wardResolver = new WardDictResolver();
+
       for (const rawLabNo of labNos) {
         const disaLabNo = rawLabNo.trim();
         const norm = normalizeLabNumber(disaLabNo, prefix);
@@ -218,7 +237,11 @@ export function registerCompareBatchCommand(program: Command): void {
         };
 
         try {
-          const disa = await fetchDisaSpecimen(disaLabNo, config.connectionString);
+          const disa = await fetchDisaSpecimen(
+            disaLabNo,
+            config.connectionString,
+            wardResolver,
+          );
           const v1 = await fetchRequestByRequestId(
             norm.openldrRequestId,
             openldrCs,

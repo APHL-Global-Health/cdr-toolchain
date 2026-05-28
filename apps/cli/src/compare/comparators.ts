@@ -53,7 +53,14 @@ export function stringCiStripV1Prefix(prefix: string): (disa: unknown, v1: unkno
  * migration when the source row lacks the separator. When DISA has a
  * ward and v1's parsed ward is empty, treat as a match (v1 data loss,
  * not a toolchain bug — v2 will emit the ward from DISA correctly).
- * Other cases fall back to case-insensitive string equality.
+ *
+ * Populated-both: substring containment, not strict equality. After
+ * WARDDICT resolution upstream, DISA's WardClinic carries the full
+ * description (e.g. "Serviço Amigo de Adolescentes") while v1's value
+ * is the same name truncated at varchar(50) across the entire
+ * LIMSPointOfCareDesc column (e.g. "Serviço Amigo de Adoles").
+ * Substring matches those; real divergences with no overlap still
+ * surface as mismatch.
  */
 export function wardComparator(disa: unknown, v1: unknown): CompareResult {
   if (isEmpty(disa) && isEmpty(v1)) return { status: "match" };
@@ -64,7 +71,7 @@ export function wardComparator(disa: unknown, v1: unknown): CompareResult {
       reason: "v1 dropped ward (no separator in LIMSPointOfCareDesc)",
     };
   }
-  return stringCi(disa, v1);
+  return stringCiLoose(disa, v1);
 }
 
 /**

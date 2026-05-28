@@ -17,8 +17,22 @@ import type { DisaServer } from "../types.js";
  * description must decode the blob; this wrapper just exposes the raw
  * columns and the blob bytes.
  */
+// Byte offsets inside WARDDICT_STATUS. Layout:
+//   [0..3]   datestamp / hash header
+//   [4..8]   CODE1 (5 bytes, space-padded for short codes)
+//   [9..13]  CODE2 (5 bytes, null-padded for short codes)
+//   [14]     description length L (u8)
+//   [15..]   description (L bytes, latin1)
+//   [15+L]   abbrev length M (u8)
+//   [16+L..] abbrev (M bytes, latin1)
+//   then a duplicate (previous-value) copy, padding, and active flags.
+// Verified against an ALBAZ+SAAJS row that decodes to
+// "Serviço Amigo de Adolescentes" / "ALBAZ/SAAJ".
+const STATUS_DESC_LEN_OFFSET = 14;
+
 export class WARDDICT {
   readonly #server: DisaServer | undefined;
+  readonly #bytes: string;
   DATESTAMP: unknown;
   CODE1: string | null;
   CODE2: string | null;
@@ -40,8 +54,56 @@ export class WARDDICT {
     this.CODE2 = code2;
     this.DESCRIPTION = description;
     this.ABBREV = abbrev;
+    // Hold the raw blob as a latin1 byte-string for later decode. Empty
+    // string when the blob is null/empty so decoded* return null cleanly.
+    this.#bytes =
+      bytes === null || bytes === undefined ? "" : Core.ConvertToBytes(bytes);
 
     Core.FixBytes(bytes);
+  }
+
+  /**
+   * Effective DESCRIPTION: returns the column when populated, otherwise
+   * decodes the length-prefixed string at byte 14 of WARDDICT_STATUS.
+   * Mozambique stores DESCRIPTION only in the blob (0/25,897 rows have the
+   * column populated), so this is the primary access path for Moz compare.
+   */
+  decodedDescription(): string | null {
+    if (this.DESCRIPTION !== null && this.DESCRIPTION.trim().length > 0) {
+      return this.DESCRIPTION;
+    }
+    if (this.#bytes.length <= STATUS_DESC_LEN_OFFSET) return null;
+    const len = this.#bytes.charCodeAt(STATUS_DESC_LEN_OFFSET);
+    if (len === 0 || this.#bytes.length < STATUS_DESC_LEN_OFFSET + 1 + len) {
+      return null;
+    }
+    const desc = this.#bytes
+      .slice(STATUS_DESC_LEN_OFFSET + 1, STATUS_DESC_LEN_OFFSET + 1 + len)
+      .trim();
+    return desc.length > 0 ? desc : null;
+  }
+
+  /**
+   * Effective ABBREV: column wins, otherwise the second length-prefixed
+   * string immediately after the description. In Moz the abbrev is the
+   * fixed format `CODE1/CODE2_first4` (e.g. "ALBAZ/SAAJ").
+   */
+  decodedAbbrev(): string | null {
+    if (this.ABBREV !== null && this.ABBREV.trim().length > 0) {
+      return this.ABBREV;
+    }
+    if (this.#bytes.length <= STATUS_DESC_LEN_OFFSET) return null;
+    const descLen = this.#bytes.charCodeAt(STATUS_DESC_LEN_OFFSET);
+    const abbrevLenOffset = STATUS_DESC_LEN_OFFSET + 1 + descLen;
+    if (this.#bytes.length <= abbrevLenOffset) return null;
+    const abbrevLen = this.#bytes.charCodeAt(abbrevLenOffset);
+    if (abbrevLen === 0 || this.#bytes.length < abbrevLenOffset + 1 + abbrevLen) {
+      return null;
+    }
+    const abbrev = this.#bytes
+      .slice(abbrevLenOffset + 1, abbrevLenOffset + 1 + abbrevLen)
+      .trim();
+    return abbrev.length > 0 ? abbrev : null;
   }
 
   static fromBytes(bytes: DisaInput): WARDDICT {
