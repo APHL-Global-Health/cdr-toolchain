@@ -29,6 +29,7 @@ interface BatchAuditOpts {
   limit?: string;
   offset?: string;
   prefix?: string;
+  concurrency?: string;
   summaryOnly?: boolean;
   onlyAnomalies?: boolean;
   explain?: boolean;
@@ -51,6 +52,7 @@ interface BatchSummary {
   per_class: Record<AnomalyClass, number>;
   top_panels: Array<{ panel_code: string; anomaly_count: number }>;
   elapsed_ms: number;
+  concurrency: number;
 }
 
 const ALL_CLASSES: AnomalyClass[] = [
@@ -200,6 +202,7 @@ export function registerAuditBatchCommand(program: Command): void {
     .option("--limit <n>", "max labs to scan", "100")
     .option("--offset <n>", "labs to skip before starting", "0")
     .option("--prefix <str>", "Override the OpenLDR labno prefix for the request_id")
+    .option("--concurrency <n>", "Number of labs in flight at once. Defaults to 1 — raise to parallelise the per-lab SQL round-trip, especially against a remote OpenLDR v1 server.", "1")
     .option("--summary-only", "Suppress per-lab output; emit only the final summary")
     .option("--only-anomalies", "Only emit labs whose audit found at least one anomaly")
     .option("--explain", "Show the lab-selection query and exit without running")
@@ -214,6 +217,13 @@ export function registerAuditBatchCommand(program: Command): void {
       const source = parseSource(opts.source);
       const { config } = loadRuntime(cmd, { requireConnection: false });
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
+      const concurrency = Math.max(1, Number(opts.concurrency ?? "1"));
+      if (!Number.isFinite(concurrency) || concurrency < 1) {
+        throw new CliError(
+          "USAGE",
+          `--concurrency must be a positive integer (got "${opts.concurrency}").`,
+        );
+      }
       const limit = Number(opts.limit ?? "100");
       const offset = Number(opts.offset ?? "0");
       const where = opts.where ?? "";
@@ -237,6 +247,7 @@ export function registerAuditBatchCommand(program: Command): void {
             source,
             lab_selection,
             prefix,
+            concurrency,
             anomaly_classes: ALL_CLASSES,
           }) + "\n",
         );
@@ -317,6 +328,7 @@ export function registerAuditBatchCommand(program: Command): void {
           per_class: perClass,
           top_panels: topPanels,
           elapsed_ms: Date.now() - start,
+          concurrency,
         };
       };
 
@@ -398,37 +410,70 @@ export function registerAuditBatchCommand(program: Command): void {
         ? await fetchDisaLabNumbers(where, limit, offset, config.connectionString)
         : await fetchOpenldrRequestIds(where, offset, limit, openldrCs!, config.openldrDataDatabase);
 
-      for (const rawId of labIds) {
-        const labId = rawId.trim();
-        currentLab = labId;
-        let report: AuditReport | null = null;
-        let errMsg: string | null = null;
+      // -------- worker pool --------
+      // Drive `concurrency` workers in parallel by handing each one the
+      // next lab from a shared cursor (mirrors export-batch's pattern).
+      // The per-lab fetch is async; everything between fetch and the
+      // next iteration is synchronous (counter updates, aggregator
+      // ingest, stdout write) so JS's cooperative scheduling keeps
+      // those sections atomic without locks. closePool() is a workspace
+      // no-op so concurrent fetches don't fight over a global pool.
+      let cursor = 0;
+      const nextLabId = (): string | null => {
+        if (cursor >= labIds.length) return null;
+        const candidate = labIds[cursor]!.trim();
+        cursor++;
+        return candidate;
+      };
 
-        try {
-          if (source === "disa") {
-            const specimen = await fetchDisaSpecimen(labId, config.connectionString);
-            if (specimen === null) {
-              errMsg = "no DISA registration found";
+      const worker = async (): Promise<void> => {
+        for (;;) {
+          const labId = nextLabId();
+          if (labId === null) return;
+          currentLab = labId;
+          let report: AuditReport | null = null;
+          let errMsg: string | null = null;
+
+          try {
+            if (source === "disa") {
+              const specimen = await fetchDisaSpecimen(labId, config.connectionString);
+              if (specimen === null) {
+                errMsg = "no DISA registration found";
+              } else {
+                report = auditFromSpecimen(specimen, prefix, codebook);
+              }
             } else {
-              report = auditFromSpecimen(specimen, prefix, codebook);
+              const result = await auditFromV1(
+                labId,
+                openldrCs!,
+                config.openldrDataDatabase,
+                codebook,
+              );
+              if (result.report === null) {
+                errMsg = "no OpenLDR v1 Requests row";
+              } else {
+                report = result.report;
+              }
             }
-          } else {
-            const result = await auditFromV1(
-              labId,
-              openldrCs!,
-              config.openldrDataDatabase,
-              codebook,
-            );
-            if (result.report === null) {
-              errMsg = "no OpenLDR v1 Requests row";
-            } else {
-              report = result.report;
-            }
+          } catch (err) {
+            errMsg = err instanceof Error ? err.message : String(err);
           }
-        } catch (err) {
-          errMsg = err instanceof Error ? err.message : String(err);
-        }
 
+          await processLabResult(labId, report, errMsg);
+        }
+      };
+
+      // Per-lab post-processing: counter updates, aggregator ingest,
+      // NDJSON write. Pulled out of the worker so both the worker loop
+      // and the closure-captured counter set stay readable. No awaits
+      // inside the synchronous sections (between the fetches above and
+      // the next iteration) so the cooperative model preserves
+      // correctness across workers.
+      const processLabResult = async (
+        labId: string,
+        report: AuditReport | null,
+        errMsg: string | null,
+      ): Promise<void> => {
         scanned++;
 
         if (report !== null) {
@@ -481,7 +526,11 @@ export function registerAuditBatchCommand(program: Command): void {
         }
 
         if (scanned % HEARTBEAT_EVERY === 0) writeHeartbeat();
-      }
+      };
+
+      const workers: Promise<void>[] = [];
+      for (let i = 0; i < concurrency; i++) workers.push(worker());
+      await Promise.all(workers);
 
       emitMeta(makeSummary() as unknown as Record<string, unknown>);
 
