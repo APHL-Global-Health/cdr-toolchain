@@ -10,11 +10,11 @@ export interface DocConfig {
   forms: ReadonlyMap<string, string>;
 }
 
-export const EMPTY_DOC_CONFIG: DocConfig = {
-  panels: new Set(),
-  params: new Set(),
-  forms: new Map(),
-};
+export const EMPTY_DOC_CONFIG: DocConfig = Object.freeze({
+  panels: new Set<string>(),
+  params: new Set<string>(),
+  forms: new Map<string, string>(),
+});
 
 export interface ObsLike { panelCode: string; paramCode: string; }
 

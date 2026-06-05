@@ -29,6 +29,11 @@ test("a plain test observation is not documentation", () => {
   assert.equal(isDocumentationObs({ panelCode: "HIVVL", paramCode: "HIVVC" }, cb, docConfig), false);
 });
 
+test("splitObservations handles an empty input", () => {
+  const cb = stubCodebook();
+  assert.deepEqual(splitObservations([], cb, EMPTY_DOC_CONFIG), { test: [], documentation: [] });
+});
+
 test("splitObservations partitions test vs documentation", () => {
   const cb = stubCodebook();
   const obs = [
