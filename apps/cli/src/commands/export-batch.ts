@@ -337,18 +337,18 @@ async function resolvePostConfig(opts: ExportBatchOpts, config: import("../confi
   if (formsDataFeedId === undefined) {
     const projectName = opts.projectName ?? config.openldrProjectName;
     const useCaseName = opts.useCaseName ?? config.openldrUseCaseName;
-    const formsFeedName = opts.formsDataFeedName ?? config.openldrFormsDataFeedName;
+    const formsDataFeedName = opts.formsDataFeedName ?? config.openldrFormsDataFeedName;
     if (
       projectName !== undefined && projectName.length > 0 &&
       useCaseName !== undefined && useCaseName.length > 0 &&
-      formsFeedName !== undefined && formsFeedName.length > 0
+      formsDataFeedName !== undefined && formsDataFeedName.length > 0
     ) {
       formsDataFeedId = await resolveDataFeedId({
         baseUrl,
         token: initialToken,
         projectName,
         useCaseName,
-        dataFeedName: formsFeedName,
+        dataFeedName: formsDataFeedName,
       });
     }
   }
@@ -655,14 +655,31 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
         result.duration_ms = Date.now() - start;
         return result;
       }
-      const formsPost = await postLabRequest(formPayload, {
-        baseUrl: ctx.postConfig.baseUrl,
-        token,
-        path: ctx.postConfig.path,
-        extraHeaders: { "X-DataFeed-Id": ctx.postConfig.formsDataFeedId },
-      });
-      result.forms_http_status = formsPost.status;
-      result.routing = post !== null ? "split" : "form";
+      try {
+        const formsPost = await postLabRequest(formPayload, {
+          baseUrl: ctx.postConfig.baseUrl,
+          token,
+          path: ctx.postConfig.path,
+          extraHeaders: { "X-DataFeed-Id": ctx.postConfig.formsDataFeedId },
+        });
+        result.forms_http_status = formsPost.status;
+        result.routing = post !== null ? "split" : "form";
+        // Fix 1: for documentation-only records the lab leg was skipped
+        // (post === null), so the "posted"/"deduplicated" assignment above
+        // never ran. Set the success status here so the tally counts this
+        // record as posted rather than leaving it at the initial "errored".
+        // For split records the lab leg already set the status — leave it.
+        if (post === null) {
+          result.status = "posted";
+        }
+      } catch (err) {
+        result.status = "errored";
+        result.error_code = err instanceof CliError ? err.code : "UNKNOWN";
+        result.error_message = `forms leg: ${err instanceof Error ? err.message : String(err)}`;
+        result.routing = post !== null ? "split" : "form";
+        result.duration_ms = Date.now() - start;
+        return result;
+      }
     } else {
       result.routing = "lab";
     }
