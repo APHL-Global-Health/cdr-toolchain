@@ -50,14 +50,14 @@ function disaToIso(s: string | null | undefined): string | null {
 }
 
 /** True if the OrderItem.Type byte indicates a numeric slot (1=Real, 2=Int). */
-function isNumericTypeChar(typeChar: string): boolean {
+export function isNumericTypeChar(typeChar: string): boolean {
   if (typeChar.length === 0) return false;
   const c = typeChar.charCodeAt(0);
   return c === 1 || c === 2;
 }
 
 /** True if the OrderItem.Type byte indicates a coded slot (0/3/4/11/12). */
-function isCodedTypeChar(typeChar: string): boolean {
+export function isCodedTypeChar(typeChar: string): boolean {
   if (typeChar.length === 0) return false;
   const c = typeChar.charCodeAt(0);
   return c === 0 || c === 3 || c === 4 || c === 11 || c === 12;

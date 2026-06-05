@@ -2,7 +2,7 @@ import type { SpecimenRecpt } from "disalab";
 import { flattenDisa, supersedePanelIterations } from "../compare/result-mapping.js";
 import type { Codebook } from "./codebook.js";
 import type { SiteConfig } from "./site-config.js";
-import { buildFacilityConcept, buildPatient } from "./v2-transform.js";
+import { buildFacilityConcept, buildPatient, isCodedTypeChar, isNumericTypeChar } from "./v2-transform.js";
 import { splitObservations, type DocConfig } from "./non-test.js";
 import type { FormResponse, FormSubmissionPayload } from "./forms-types.js";
 
@@ -29,11 +29,11 @@ export function buildFormResponse(
   cb: Codebook,
   systemId: string,
 ): FormResponse {
-  const c = o.type.length > 0 ? o.type.charCodeAt(0) : -1;
-  const isNumeric = c === 1 || c === 2;
-  const isCoded = c === 0 || c === 3 || c === 4 || c === 11 || c === 12;
-  const valueType: FormResponse["value_type"] = isNumeric ? "numeric" : isCoded ? "coded" : "text";
+  const valueType: FormResponse["value_type"] =
+    isNumericTypeChar(o.type) ? "numeric" : isCodedTypeChar(o.type) ? "coded" : "text";
   const desc = cb.paramEntry(o.paramCode)?.description ?? null;
+  // concept_code always uses datatype:"coded" (matches paramConcept in v2-transform.ts);
+  // coded_value/text_value carry valueStr (display string) because these are questionnaire values, not code-keyed lookups.
   return {
     concept_code: {
       system_id: systemId,
@@ -113,6 +113,8 @@ export function toFormSubmission(specimen: SpecimenRecpt, opts: ToFormOpts): For
   };
 }
 
+// Same conversion as disaToIso() in v2-transform.ts; kept local because that
+// one is unexported and depends on v2-transform's private nz() helper.
 /** DISA "MM/DD/YYYY[ HH:MM[:SS]]" -> ISO-ish string; pass through otherwise. */
 function nzIso(s: unknown): string | null {
   if (s === null || s === undefined) return null;
