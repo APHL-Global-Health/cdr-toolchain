@@ -52,6 +52,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms); });
 }
 
+/**
+ * Pull a human-readable reason out of a v2 4xx response body so the
+ * API_REJECTED message says WHY, not just "HTTP 400". v2 bodies are usually
+ * `{ error, message? }`; validation failures may use `{ errors: [...] }`; a
+ * proxy may hand back a plain string. Returns "" when nothing useful is found.
+ */
+function extractRejectionReason(body: unknown): string {
+  if (typeof body === "string") return body.trim().replace(/\s+/g, " ").slice(0, 300);
+  if (body === null || typeof body !== "object") return "";
+  const b = body as Record<string, unknown>;
+  const scalar = [b.error, b.message, b.detail]
+    .filter((v): v is string => typeof v === "string" && v.length > 0)
+    .join(": ");
+  if (scalar.length > 0) return scalar.replace(/\s+/g, " ").slice(0, 300);
+  if (Array.isArray(b.errors)) {
+    const joined = b.errors
+      .map((e) => (typeof e === "string" ? e : (e !== null && typeof e === "object" ? (e as Record<string, unknown>).message : undefined)))
+      .filter((s): s is string => typeof s === "string" && s.length > 0)
+      .join("; ");
+    if (joined.length > 0) return joined.replace(/\s+/g, " ").slice(0, 300);
+  }
+  return "";
+}
+
+/**
+ * Build the API_REJECTED message: base + server reason + an actionable hint
+ * for the common-but-opaque "missing X-DataFeed-Id" case (caused by blank
+ * OPENLDR_*_NAME env vars, which silently skip feed discovery upstream).
+ */
+function rejectionMessage(status: number, body: unknown): string {
+  const base = `OpenLDR v2 rejected the payload (HTTP ${status})`;
+  const reason = extractRejectionReason(body);
+  const haystack = `${reason} ${typeof body === "string" ? body : JSON.stringify(body ?? "")}`;
+  const hint = /datafeed-?id/i.test(haystack)
+    ? ' — no X-DataFeed-Id was sent; set OPENLDR_PROJECT_NAME, OPENLDR_USE_CASE_NAME and OPENLDR_DATA_FEED_NAME in .env (all "Built-in" on the default deployment), or pass --data-feed-id'
+    : "";
+  return reason.length > 0 ? `${base}: ${reason}${hint}` : `${base}${hint}`;
+}
+
 /** Backoff schedule per PRD §9: 1s, 2s, 4s, 8s, 16s, 32s, 60s (capped). */
 function backoffMs(attempt: number): number {
   const base = 1000 * 2 ** (attempt - 1);
@@ -108,9 +147,11 @@ export async function postLabRequest(payload: unknown, opts: PostOptions): Promi
       }
 
       // 4xx (other) — payload rejection. Don't retry; surface to caller.
+      // The message carries the server's own reason (+ a config hint for the
+      // opaque missing-X-DataFeed-Id case) so the caller isn't left guessing.
       if (res.status >= 400 && res.status < 500) {
         const body = await readJsonBody(res);
-        throw new CliError("API_REJECTED", `OpenLDR v2 rejected the payload (HTTP ${res.status})`, {
+        throw new CliError("API_REJECTED", rejectionMessage(res.status, body), {
           url,
           status: res.status,
           body,

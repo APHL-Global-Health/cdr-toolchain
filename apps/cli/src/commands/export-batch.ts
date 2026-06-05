@@ -297,6 +297,18 @@ async function resolvePostConfig(opts: ExportBatchOpts, config: import("../confi
     }
   }
 
+  // Fail fast: every v2 POST requires an X-DataFeed-Id. If none was resolved
+  // (no --data-feed-id / OPENLDR_DATA_FEED_ID, and the discovery names are
+  // blank so discovery was skipped), the entire batch would be rejected
+  // lab-by-lab with HTTP 400. Surface it once, up front. This path only runs
+  // for real POSTs — --dry-run / --emit-payloads skip resolvePostConfig.
+  if (dataFeedSource === "none") {
+    throw new CliError(
+      "API_CONFIG_MISSING",
+      'OpenLDR v2 requires an X-DataFeed-Id, but none is configured. Set OPENLDR_PROJECT_NAME, OPENLDR_USE_CASE_NAME and OPENLDR_DATA_FEED_NAME in .env (all "Built-in" on the default deployment) to enable feed discovery, or pass --data-feed-id / set OPENLDR_DATA_FEED_ID.',
+    );
+  }
+
   if (opts.force === true) {
     path = path + (path.includes("?") ? "&" : "?") + "force=true";
   }

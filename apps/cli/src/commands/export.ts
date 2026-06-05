@@ -398,8 +398,8 @@ export function registerExportCommand(program: Command): void {
         }
 
         // X-DataFeed-Id resolution: explicit ID wins, else discover from
-        // (project, useCase, dataFeed) names. Skipped silently if no
-        // discovery config is present — some deployments may not require it.
+        // (project, useCase, dataFeed) names. If neither is available the
+        // source stays "none" and the POST is blocked below (v2 mandates it).
         let dataFeedId: string | undefined = opts.dataFeedId ?? config.openldrDataFeedId;
         let dataFeedSource = dataFeedId !== undefined ? "explicit" : "none";
         if (dataFeedId === undefined) {
@@ -450,6 +450,17 @@ export function registerExportCommand(program: Command): void {
             request_id: targetType === "v2" ? (payload as { lab_request: { request_id: string } }).lab_request.request_id : null,
           }, null, 2) + "\n");
           return;
+        }
+
+        // Fail fast: v2 requires an X-DataFeed-Id. Reaching the wire without
+        // one guarantees an HTTP 400, so stop here with an actionable message
+        // rather than letting the API reject it opaquely. (--dry-run-post above
+        // is intentionally exempt — it never hits the wire.)
+        if (dataFeedSource === "none") {
+          throw new CliError(
+            "API_CONFIG_MISSING",
+            'OpenLDR v2 requires an X-DataFeed-Id, but none is configured. Set OPENLDR_PROJECT_NAME, OPENLDR_USE_CASE_NAME and OPENLDR_DATA_FEED_NAME in .env (all "Built-in" on the default deployment) to enable feed discovery, or pass --data-feed-id / set OPENLDR_DATA_FEED_ID.',
+          );
         }
 
         const result = await postLabRequest(payload, { baseUrl, token, path, extraHeaders });
