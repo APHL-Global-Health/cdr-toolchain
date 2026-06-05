@@ -16,6 +16,9 @@ import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
 import { DEFAULT_SITE } from "../export/site-config.js";
 import { toV2 } from "../export/v2-transform.js";
+import { toFormSubmission } from "../export/forms-transform.js";
+import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
+import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
@@ -45,6 +48,8 @@ interface ExportBatchOpts {
   projectName?: string;
   useCaseName?: string;
   dataFeedName?: string;
+  country?: string;
+  formsDataFeedName?: string;
   insecureTls?: boolean;
   force?: boolean;
   track?: boolean;
@@ -76,6 +81,13 @@ interface LabResult {
   duration_ms: number;
   audit_max_severity?: Severity | null;
   anomaly_count?: number;
+  /** Which feed(s) this record was routed to: "lab" (test only — no
+   *  documentation obs), "form" (documentation-only — no lab leg posted), or
+   *  "split" (both legs posted). Undefined for non-POST paths
+   *  (dry-run / emit-payloads / quarantine / not_found). */
+  routing?: "lab" | "form" | "split";
+  /** HTTP status of the forms-leg POST, when a forms submission was sent. */
+  forms_http_status?: number;
   quarantine_path?: string;
   reason?: string;
   error_code?: string;
@@ -119,6 +131,10 @@ interface BatchSummary {
   check_failed: number;
   not_found: number;
   errored: number;
+  /** Labs whose forms (non-test) leg POSTed with a 2xx status. */
+  forms_posted: number;
+  /** Labs routed to BOTH feeds (lab leg + forms leg). */
+  split: number;
   elapsed_ms: number;
   avg_ms_per_lab: number | null;
   concurrency: number;
@@ -219,6 +235,10 @@ interface PostConfig {
   tokenSource: "flag" | "keycloak" | "env";
   dataFeedId: string | undefined;
   dataFeedSource: "explicit" | "discovered" | "none";
+  /** X-DataFeed-Id for the forms (non-test) feed. Undefined when no forms feed
+   *  is configured/discoverable — guarded at POST time (a run with no
+   *  documentation records needs no forms feed). */
+  formsDataFeedId: string | undefined;
   force: boolean;
   track: boolean;
   trackTimeoutMs: number | undefined;
@@ -309,6 +329,30 @@ async function resolvePostConfig(opts: ExportBatchOpts, config: import("../confi
     );
   }
 
+  // Resolve the forms (non-test) feed id the same way as the lab feed. Unlike
+  // the lab feed we do NOT fail fast: a run whose labs carry no documentation
+  // observations never POSTs a forms leg, so a missing forms feed is fine.
+  // Guarded at POST time in processOneLab instead.
+  let formsDataFeedId: string | undefined = config.openldrFormsDataFeedId;
+  if (formsDataFeedId === undefined) {
+    const projectName = opts.projectName ?? config.openldrProjectName;
+    const useCaseName = opts.useCaseName ?? config.openldrUseCaseName;
+    const formsFeedName = opts.formsDataFeedName ?? config.openldrFormsDataFeedName;
+    if (
+      projectName !== undefined && projectName.length > 0 &&
+      useCaseName !== undefined && useCaseName.length > 0 &&
+      formsFeedName !== undefined && formsFeedName.length > 0
+    ) {
+      formsDataFeedId = await resolveDataFeedId({
+        baseUrl,
+        token: initialToken,
+        projectName,
+        useCaseName,
+        dataFeedName: formsFeedName,
+      });
+    }
+  }
+
   if (opts.force === true) {
     path = path + (path.includes("?") ? "&" : "?") + "force=true";
   }
@@ -320,6 +364,7 @@ async function resolvePostConfig(opts: ExportBatchOpts, config: import("../confi
     tokenSource,
     dataFeedId,
     dataFeedSource,
+    formsDataFeedId,
     force: opts.force === true,
     track: opts.track === true,
     trackTimeoutMs: opts.trackTimeout !== undefined && opts.trackTimeout.length > 0 ? Number(opts.trackTimeout) : undefined,
@@ -330,6 +375,10 @@ async function resolvePostConfig(opts: ExportBatchOpts, config: import("../confi
 interface ProcessLabContext {
   config: import("../config.js").LoadedConfig;
   codebook: Codebook;
+  /** Country documentation classifiers (panels/params/forms). Drives the
+   *  documentation-vs-test split: which observations are excluded from the lab
+   *  payload and routed to the forms feed. */
+  docConfig: DocConfig;
   prefix: string;
   postConfig: PostConfig;
   doCheck: boolean;
@@ -455,7 +504,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
 
     // -------- audit + quarantine --------
     const auditReport: AuditReport | null = ctx.doQuarantine
-      ? auditFromSpecimen(specimen, ctx.prefix, ctx.codebook)
+      ? auditFromSpecimen(specimen, ctx.prefix, ctx.codebook, ctx.docConfig.panels)
       : null;
     if (auditReport !== null) {
       result.audit_max_severity = auditReport.max_severity;
@@ -471,6 +520,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
           site: DEFAULT_SITE,
           codebook: ctx.codebook,
           auditReport,
+          excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
         });
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(
@@ -501,6 +551,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       site: DEFAULT_SITE,
       codebook: ctx.codebook,
       auditReport,
+      excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
     });
 
     // -------- emit payloads (stdin to `openldr ingest stream`) --------
@@ -525,55 +576,95 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // stale Keycloak token (default lifetime 5 min). Resolver is cached
     // — this is essentially free until the 30s-before-expiry boundary.
     const token = await ctx.postConfig.getToken();
-    const extraHeaders: Record<string, string> = {};
-    if (ctx.postConfig.dataFeedId !== undefined) {
-      extraHeaders["X-DataFeed-Id"] = ctx.postConfig.dataFeedId;
-    }
-    const post = await postLabRequest(payload, {
-      baseUrl: ctx.postConfig.baseUrl,
-      token,
-      path: ctx.postConfig.path,
-      extraHeaders,
-    });
-    result.http_status = post.status;
-    const body = post.body as { messageId?: string; deduplicated?: boolean } | undefined;
-    if (body?.messageId !== undefined) result.message_id = body.messageId;
-    if (body?.deduplicated === true) {
-      result.status = "deduplicated";
-    } else {
-      result.status = "posted";
+
+    // ---- lab leg ----
+    // Only POST the lab leg when the lab payload actually carries something.
+    // After documentation observations are excluded, a documentation-only
+    // record has empty lab_results AND a null panel_code — v2 storage would
+    // reject it, and it belongs on the forms feed, not the lab feed.
+    let post: Awaited<ReturnType<typeof postLabRequest>> | null = null;
+    if (payload.lab_results.length > 0 || payload.lab_request.panel_code !== null) {
+      const extraHeaders: Record<string, string> = {};
+      if (ctx.postConfig.dataFeedId !== undefined) {
+        extraHeaders["X-DataFeed-Id"] = ctx.postConfig.dataFeedId;
+      }
+      post = await postLabRequest(payload, {
+        baseUrl: ctx.postConfig.baseUrl,
+        token,
+        path: ctx.postConfig.path,
+        extraHeaders,
+      });
+      result.http_status = post.status;
+      const body = post.body as { messageId?: string; deduplicated?: boolean } | undefined;
+      if (body?.messageId !== undefined) result.message_id = body.messageId;
+      if (body?.deduplicated === true) {
+        result.status = "deduplicated";
+      } else {
+        result.status = "posted";
+      }
+
+      // -------- track (optional) --------
+      if (ctx.postConfig.track && body?.messageId !== undefined) {
+        // Refetch the token in case the POST ate the rest of the lifetime
+        // window — track polling can run for tens of seconds.
+        const trackToken = await ctx.postConfig.getToken();
+        const tr = await trackRun({
+          baseUrl: ctx.postConfig.baseUrl,
+          token: trackToken,
+          messageId: body.messageId,
+          ...(ctx.postConfig.trackTimeoutMs !== undefined && Number.isFinite(ctx.postConfig.trackTimeoutMs)
+            ? { timeoutMs: ctx.postConfig.trackTimeoutMs } : {}),
+          ...(ctx.postConfig.trackIntervalMs !== undefined && Number.isFinite(ctx.postConfig.trackIntervalMs)
+            ? { intervalMs: ctx.postConfig.trackIntervalMs } : {}),
+        });
+        const run = tr.run;
+        result.tracking_status = run.currentStatus;
+        result.pipeline_stage = run.currentStage;
+        if (run.currentStatus.toLowerCase() !== "completed") {
+          result.status = "errored";
+          // Surface the pipeline's own error stage / code / message so the
+          // user knows WHICH plugin rejected the payload — generic
+          // "pipeline run did not complete" wastes their time.
+          result.pipeline_error_stage = run.errorStage;
+          result.pipeline_error_code = run.errorCode;
+          result.pipeline_error_message = run.errorMessage;
+          result.error_code = "API_REJECTED";
+          const stage = run.errorStage ?? run.currentStage ?? "unknown";
+          const why = run.errorMessage ?? run.errorCode ?? `currentStatus=${run.currentStatus}`;
+          result.error_message = `pipeline failed at stage "${stage}": ${why}`;
+        }
+      }
     }
 
-    // -------- track (optional) --------
-    if (ctx.postConfig.track && body?.messageId !== undefined) {
-      // Refetch the token in case the POST ate the rest of the lifetime
-      // window — track polling can run for tens of seconds.
-      const trackToken = await ctx.postConfig.getToken();
-      const tr = await trackRun({
-        baseUrl: ctx.postConfig.baseUrl,
-        token: trackToken,
-        messageId: body.messageId,
-        ...(ctx.postConfig.trackTimeoutMs !== undefined && Number.isFinite(ctx.postConfig.trackTimeoutMs)
-          ? { timeoutMs: ctx.postConfig.trackTimeoutMs } : {}),
-        ...(ctx.postConfig.trackIntervalMs !== undefined && Number.isFinite(ctx.postConfig.trackIntervalMs)
-          ? { intervalMs: ctx.postConfig.trackIntervalMs } : {}),
-      });
-      const run = tr.run;
-      result.tracking_status = run.currentStatus;
-      result.pipeline_stage = run.currentStage;
-      if (run.currentStatus.toLowerCase() !== "completed") {
+    // ---- forms leg ----
+    // Build a forms submission from the documentation observations. Null when
+    // the record carries none. When the lab leg also posted this is a "split"
+    // record; the form references the lab request id via related_request_id.
+    const formPayload = toFormSubmission(specimen, {
+      prefix: ctx.prefix,
+      site: DEFAULT_SITE,
+      codebook: ctx.codebook,
+      docConfig: ctx.docConfig,
+      relatedRequestId: post !== null ? norm.openldrRequestId : null,
+    });
+    if (formPayload !== null) {
+      if (ctx.postConfig.formsDataFeedId === undefined) {
         result.status = "errored";
-        // Surface the pipeline's own error stage / code / message so the
-        // user knows WHICH plugin rejected the payload — generic
-        // "pipeline run did not complete" wastes their time.
-        result.pipeline_error_stage = run.errorStage;
-        result.pipeline_error_code = run.errorCode;
-        result.pipeline_error_message = run.errorMessage;
-        result.error_code = "API_REJECTED";
-        const stage = run.errorStage ?? run.currentStage ?? "unknown";
-        const why = run.errorMessage ?? run.errorCode ?? `currentStatus=${run.currentStatus}`;
-        result.error_message = `pipeline failed at stage "${stage}": ${why}`;
+        result.error_code = "API_CONFIG_MISSING";
+        result.error_message = 'Record has documentation observations but no forms feed is configured. Set OPENLDR_FORMS_DATA_FEED_NAME (and OPENLDR_COUNTRY / config) or --forms-data-feed-name.';
+        result.duration_ms = Date.now() - start;
+        return result;
       }
+      const formsPost = await postLabRequest(formPayload, {
+        baseUrl: ctx.postConfig.baseUrl,
+        token,
+        path: ctx.postConfig.path,
+        extraHeaders: { "X-DataFeed-Id": ctx.postConfig.formsDataFeedId },
+      });
+      result.forms_http_status = formsPost.status;
+      result.routing = post !== null ? "split" : "form";
+    } else {
+      result.routing = "lab";
     }
 
     result.duration_ms = Date.now() - start;
@@ -615,6 +706,8 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--project-name <name>", "OpenLDR project for X-DataFeed-Id discovery")
     .option("--use-case-name <name>", "OpenLDR use case for X-DataFeed-Id discovery")
     .option("--data-feed-name <name>", "OpenLDR data feed for X-DataFeed-Id discovery")
+    .option("--country <name>", "Country key selecting config/<country>.yaml documentation classifiers (overrides OPENLDR_COUNTRY)")
+    .option("--forms-data-feed-name <name>", "OpenLDR data feed name for the forms (non-test) feed")
     .option("--insecure-tls", "Skip TLS cert verification (self-signed local dev only)")
     .option("--force", "Append `?force=true` so v2 re-processes already-ingested payloads")
     .option("--track", "Per lab, poll /api/v1/runs/{messageId} until terminal")
@@ -697,6 +790,8 @@ export function registerExportBatchCommand(program: Command): void {
       let checkFailed = 0;
       let notFound = 0;
       let errored = 0;
+      let formsPosted = 0;
+      let split = 0;
       let currentLab: string | null = null;
 
       const makeSummary = (): BatchSummary => {
@@ -706,6 +801,7 @@ export function registerExportBatchCommand(program: Command): void {
           labs_attempted: attempted,
           posted, deduplicated, quarantined, check_failed: checkFailed,
           not_found: notFound, errored,
+          forms_posted: formsPosted, split,
           elapsed_ms: elapsed,
           avg_ms_per_lab: attempted > 0 ? Math.round(elapsed / attempted) : null,
           concurrency,
@@ -757,6 +853,11 @@ export function registerExportBatchCommand(program: Command): void {
       const codebook = await loadCodebook(buildServer(config.connectionString));
       await closePool();
 
+      // Country documentation classifiers, loaded once. Drives the
+      // documentation-vs-test split for every lab: which observations are
+      // excluded from the lab payload and routed to the forms feed instead.
+      const docConfig = loadCountryDocConfig(opts.country ?? config.country);
+
       // Skip POST config resolution entirely when we won't POST anyway:
       // --dry-run runs the gates without sending, --emit-payloads writes
       // payloads to stdout (intended to pipe into `openldr ingest stream`)
@@ -770,6 +871,7 @@ export function registerExportBatchCommand(program: Command): void {
             tokenSource: "env",
             dataFeedId: undefined,
             dataFeedSource: "none",
+            formsDataFeedId: undefined,
             force: false,
             track: false,
             trackTimeoutMs: undefined,
@@ -799,6 +901,7 @@ export function registerExportBatchCommand(program: Command): void {
       const ctx: ProcessLabContext = {
         config,
         codebook,
+        docConfig,
         prefix,
         postConfig,
         doCheck,
@@ -823,6 +926,10 @@ export function registerExportBatchCommand(program: Command): void {
           case "errored": errored++; break;
           case "emitted": posted++; break;
         }
+        if (r.forms_http_status !== undefined && r.forms_http_status >= 200 && r.forms_http_status < 300) {
+          formsPosted++;
+        }
+        if (r.routing === "split") split++;
         if (opts.summaryOnly !== true) {
           // In --emit-payloads mode the payload itself goes to stdout (via
           // ctx.writePayload). Route the per-lab journal to stderr so the
