@@ -1,0 +1,9 @@
+# Tanzania deployment — documentation (non-test) classifiers.
+documentation:
+  panels:
+    - VLID
+    - EIDID
+  params: []
+  forms:
+    VLID: hiv_vl_documentation
+    EIDID: eid_documentation

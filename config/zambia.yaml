@@ -1,0 +1,8 @@
+# Zambia deployment — documentation (non-test) classifiers.
+# Codes that capture ART/VL questionnaire data rather than instrument results.
+documentation:
+  panels:
+    - VIRAL
+  params: []
+  forms:
+    VIRAL: hiv_vl_documentation
