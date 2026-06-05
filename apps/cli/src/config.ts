@@ -41,6 +41,12 @@ export interface LoadedConfig {
   openldrDataFeedName?: string;
   /** Pre-resolved X-DataFeed-Id (skips discovery if set). */
   openldrDataFeedId?: string;
+  /** Data feed name for the v2 forms (non-test) feed; resolved like the lab feed. */
+  openldrFormsDataFeedName?: string;
+  /** Pre-resolved forms X-DataFeed-Id (skips forms discovery if set). */
+  openldrFormsDataFeedId?: string;
+  /** Country key selecting config/<country>.yaml documentation classifiers. */
+  country?: string;
   /** When true, disables TLS cert verification for v2 + Keycloak fetches.
    *  Only for self-signed local dev. Implemented by setting
    *  NODE_TLS_REJECT_UNAUTHORIZED=0 — process-wide for the CLI invocation. */
@@ -67,6 +73,9 @@ export interface ConfigOverrides {
   openldrUseCaseName?: string;
   openldrDataFeedName?: string;
   openldrDataFeedId?: string;
+  openldrFormsDataFeedName?: string;
+  openldrFormsDataFeedId?: string;
+  country?: string;
   openldrV2InsecureTls?: boolean;
 }
 
@@ -89,6 +98,9 @@ const EnvSchema = z.object({
   OPENLDR_USE_CASE_NAME: z.string().min(1).optional(),
   OPENLDR_DATA_FEED_NAME: z.string().min(1).optional(),
   OPENLDR_DATA_FEED_ID: z.string().min(1).optional(),
+  OPENLDR_FORMS_DATA_FEED_NAME: z.string().min(1).optional(),
+  OPENLDR_FORMS_DATA_FEED_ID: z.string().min(1).optional(),
+  OPENLDR_COUNTRY: z.string().min(1).optional(),
   OPENLDR_V2_INSECURE_TLS: z.string().optional(),
 });
 
@@ -190,6 +202,9 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     openldrUseCaseName: overrides.openldrUseCaseName ?? env.data.OPENLDR_USE_CASE_NAME,
     openldrDataFeedName: overrides.openldrDataFeedName ?? env.data.OPENLDR_DATA_FEED_NAME,
     openldrDataFeedId: overrides.openldrDataFeedId ?? env.data.OPENLDR_DATA_FEED_ID,
+    openldrFormsDataFeedName: overrides.openldrFormsDataFeedName ?? env.data.OPENLDR_FORMS_DATA_FEED_NAME,
+    openldrFormsDataFeedId: overrides.openldrFormsDataFeedId ?? env.data.OPENLDR_FORMS_DATA_FEED_ID,
+    country: overrides.country ?? env.data.OPENLDR_COUNTRY,
     openldrV2InsecureTls: overrides.openldrV2InsecureTls ?? parseBool(env.data.OPENLDR_V2_INSECURE_TLS),
   };
 }
