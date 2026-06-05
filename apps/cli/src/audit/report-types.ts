@@ -119,6 +119,11 @@ export const CLASS_DESCRIPTIONS: Record<AnomalyClass, { title: string; rule: str
     rule: "DISA record has ordered panels but zero observations across the entire lab — the clinical payload is empty. v2 storage rejects these (CANONICAL_STORAGE_VALIDATION_FAILED) because panel_code and lab_results are both null/empty. Raise severity to quarantine so empty records are not POSTed.",
     severity: "error",
   },
+  record_rejected: {
+    title: "Record rejected",
+    rule: "DISA record has ordered panels but no observations because the sample was rejected (specimen Condition recorded — e.g. \"Unsuitable for testing\" — or RJREA/RJREM rejection metadata present). Empty by design, not a data-quality error. Migrated as a rejected request: result_status='X' and panel_code sourced from the ordered panel so v2 accepts it. Info severity so it is not quarantined.",
+    severity: "info",
+  },
   panel_iterations_superseded: {
     title: "Panel iterations superseded",
     rule: "DISA stored multiple TESTINDEX iterations of the same panel (preliminary + final, or repeat-tech verification). v1's historical migration kept only the final iteration; the v2 export mirrors that choice, so observations from earlier iterations were dropped. Anomaly records what was dropped so reviewers can see panel reruns explicitly.",

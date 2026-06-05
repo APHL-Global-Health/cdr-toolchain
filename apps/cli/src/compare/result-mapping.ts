@@ -618,6 +618,66 @@ export function flattenDisa(s: SpecimenRecpt, opts: FlattenDisaOpts = {}): DisaO
   return out;
 }
 
+/** A DISA specimen's rejection state. `rejected` is true when the sample was
+ *  refused before/instead of testing; `reason` carries the raw reason text
+ *  (presence-only — no code→description mapping is applied). */
+export interface DisaRejection {
+  rejected: boolean;
+  reason: string | null;
+}
+
+/**
+ * Detect whether a DISA specimen receipt represents a rejected request.
+ *
+ * A request counts as rejected when EITHER:
+ *  - the specimen carries a recorded `Condition` (e.g. "Unsuitable for
+ *    testing", "Clotted") — DISA's request-level specimen-condition field; or
+ *  - any panel holds `RJREA` (rejection reason) / `RJREM` (rejection memo)
+ *    metadata. These are stripped from the normal observation stream (see
+ *    `flattenDisa`), so we scan the raw stream — `includeEmpty` keeps them —
+ *    rather than re-deriving the order layout here.
+ *
+ * Rejected requests legitimately produce no observations (the sample was
+ * never tested), so downstream code treats an empty observation set on a
+ * rejected request as expected rather than a clinically-empty error.
+ *
+ * `reason` is the raw reason text for annotation (Condition, else the RJREM
+ * memo, else the RJREA reason).
+ */
+export function detectDisaRejection(s: SpecimenRecpt): DisaRejection {
+  const trim = (v: unknown): string | null => {
+    if (v === null || v === undefined) return null;
+    const t = (typeof v === "string" ? v : String(v)).trim();
+    return t.length > 0 ? t : null;
+  };
+  const condition = trim(s.Condition);
+  // RJREA is the coded reject REASON ("Unsuitable for testing", "No test
+  // requested", …) — the meaningful signal. RJREM is a free-text remark that
+  // is frequently padding ("F"), so it is only a fallback for the reason
+  // text. Collect distinct values across panels so a multi-panel rejection
+  // lists each reason rather than arbitrarily picking one.
+  const reasons = new Set<string>();
+  const memos = new Set<string>();
+  for (const o of flattenDisa(s, { includeEmpty: true })) {
+    if (o.paramCode === "RJREA") {
+      const v = trim(o.valueStr);
+      if (v !== null) reasons.add(v);
+    } else if (o.paramCode === "RJREM") {
+      const v = trim(o.valueStr);
+      if (v !== null) memos.add(v);
+    }
+  }
+  const rejected = condition !== null || reasons.size > 0 || memos.size > 0;
+  const reason =
+    condition ??
+    (reasons.size > 0
+      ? [...reasons].join("; ")
+      : memos.size > 0
+        ? [...memos].join("; ")
+        : null);
+  return { rejected, reason };
+}
+
 /**
  * True when a v1 LabResults row carries no actual observation value — all
  * three result-bearing columns (rpt_result, coded_value, SIValue) are empty

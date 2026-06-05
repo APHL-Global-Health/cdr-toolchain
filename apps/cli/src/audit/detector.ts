@@ -1,5 +1,6 @@
 import type { SpecimenRecpt } from "disalab";
 import {
+  detectDisaRejection,
   flattenDisa,
   supersedePanelIterations,
   type DisaObs,
@@ -47,6 +48,13 @@ export interface AuditInputs {
   receivedAtRaw: string | null;
   /** DISA SEX field — "M" / "F" / blank when unknown. */
   sex: string | null;
+  /** True when the source marks this request as rejected (DISA: specimen
+   *  Condition recorded or RJREA/RJREM present; v1: HL7ResultStatusCode='X').
+   *  A rejected request legitimately carries no observations. */
+  rejected: boolean;
+  /** Raw rejection reason/condition text for annotation; null when not
+   *  rejected or no reason was captured. */
+  rejectionReason: string | null;
 }
 
 const MICROSCOPY_PANEL_RE = /microscop|w\.?b\.?c|r\.?b\.?c/i;
@@ -333,17 +341,34 @@ function detectOrphanPanels(input: AuditInputs, cb: Codebook): Anomaly[] {
 function detectEmptyRecord(input: AuditInputs, cb: Codebook): Anomaly[] {
   if (input.observations.length > 0) return [];
   if (input.orderedPanels.length === 0) return [];
+  const orderedPanels = input.orderedPanels.map((p) => ({
+    panel_code: p,
+    panel_description: describePanel(cb, p),
+  }));
+  // A rejected request (unsuitable specimen, etc.) is empty by design — the
+  // sample was never tested. Surface it as info so it migrates as a rejected
+  // request (result_status set, panel_code sourced from the order in the v2
+  // transform) instead of quarantining as a clinically-empty error.
+  if (input.rejected) {
+    const reason = input.rejectionReason;
+    return [
+      {
+        class: "record_rejected",
+        severity: "info",
+        message: `Record has ${input.orderedPanels.length} ordered panel(s) and no observations because the sample was rejected${reason !== null ? ` (${reason})` : ""} — expected for rejected requests.`,
+        details: {
+          ordered_panels: orderedPanels,
+          rejection_reason: reason,
+        },
+      },
+    ];
+  }
   return [
     {
       class: "record_has_no_observations",
       severity: "error",
       message: `Record has ${input.orderedPanels.length} ordered panel(s) but no observations — clinically empty.`,
-      details: {
-        ordered_panels: input.orderedPanels.map((p) => ({
-          panel_code: p,
-          panel_description: describePanel(cb, p),
-        })),
-      },
+      details: { ordered_panels: orderedPanels },
     },
   ];
 }
@@ -502,6 +527,7 @@ export function auditFromSpecimen(
   const orderedPanels = collectOrderedPanels(specimen);
   const labNumber = nullIfEmpty(specimen.LabNumber) ?? "";
   const specimenCode = nullIfEmpty(specimen.Specimen);
+  const rejection = detectDisaRejection(specimen);
   const input: AuditInputs = {
     labNumber,
     requestId: prefix + labNumber,
@@ -514,6 +540,8 @@ export function auditFromSpecimen(
     collectedAtRaw: nullIfEmpty(specimen.CollectedDateTime),
     receivedAtRaw: nullIfEmpty(specimen.ReceivedInLabDateTime),
     sex: nullIfEmpty(specimen.Sex),
+    rejected: rejection.rejected,
+    rejectionReason: rejection.reason,
   };
   const anomalies = detectAnomalies(input, cb);
   return {

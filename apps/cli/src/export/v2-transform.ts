@@ -1,9 +1,11 @@
 import type { Facility, SpecimenRecpt } from "disalab";
 import {
+  detectDisaRejection,
   flattenDisa,
   parseNumber,
   supersedePanelIterations,
   type DisaObs,
+  type DisaRejection,
 } from "../compare/result-mapping.js";
 import type { AuditReport } from "../audit/types.js";
 import type { Codebook } from "./codebook.js";
@@ -262,6 +264,7 @@ function buildLabRequest(
   prefix: string,
   site: SiteConfig,
   codebook: Codebook,
+  rejection: DisaRejection,
 ): V2LabRequest {
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
@@ -271,12 +274,23 @@ function buildLabRequest(
   // wasn't run — source_payload.ward is then omitted entirely.
   const wardDescription = s.WardClinicResolved ?? null;
 
-  const panel = primary === null ? undefined : codebook.panelEntry(primary.panelCode);
-  const panelCode: V2ConceptCode | null = primary === null
+  // Primary panel normally comes from the resulted observations. A rejected
+  // request has no observations (sample never tested), so primary is null —
+  // but it still names what was ordered. Source panel_code from the first
+  // ordered panel in that case: v2 storage rejects a request whose panel_code
+  // is null AND lab_results is empty, so a rejected request would otherwise
+  // fail to migrate.
+  const orderedFallback =
+    primary === null && rejection.rejected
+      ? s.TestOrders.map((t) => String(t).trim()).find((t) => t.length > 0) ?? null
+      : null;
+  const panelSourceCode: string | null = primary?.panelCode ?? orderedFallback;
+  const panel = panelSourceCode === null ? undefined : codebook.panelEntry(panelSourceCode);
+  const panelCode: V2ConceptCode | null = panelSourceCode === null
     ? null
     : {
         system_id: site.panel_system_id,
-        concept_code: primary.panelCode,
+        concept_code: panelSourceCode,
         display_name: panel?.description ?? null,
         concept_class: "panel",
         datatype: "coded",
@@ -323,7 +337,11 @@ function buildLabRequest(
     sex: nz(s.Sex),
     patient_class: null, // not surfaced on SpecimenRecpt
     section_code: sectionCode,
-    result_status: null, // not surfaced on SpecimenRecpt; v1 carries via HL7ResultStatusCode
+    // DISA doesn't surface a per-request status on SpecimenRecpt (v1 carries
+    // it via HL7ResultStatusCode). Synthesise "X" (rejected) when the
+    // specimen was refused — mirrors v1's rejected-request convention so v2
+    // can treat the empty lab_results as expected rather than incomplete.
+    result_status: rejection.rejected ? "X" : null,
     // requesting_facility_code mirrors testing_facility_code — see the
     // comment where facilityConcept is reused for requestingFacilityConcept
     // above. DISA's data model doesn't distinguish them.
@@ -625,7 +643,8 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const obs = supersedePanelIterations(flattenDisa(specimen)).kept;
   const groups = groupByPanel(obs);
   const primary = selectPrimaryPanel(groups, opts.codebook);
-  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook);
+  const rejection = detectDisaRejection(specimen);
+  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook, rejection);
   const patient = buildPatient(specimen, labRequest.received_at ?? labRequest.collected_datetime ?? labRequest.taken_datetime, labRequest.request_id);
   // Order matters: isolates first so lab_results can attach isolate_index
   // and AST tests can resolve the nearest-isolate linkage.

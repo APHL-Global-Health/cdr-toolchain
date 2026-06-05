@@ -110,6 +110,11 @@ export async function auditFromV1(
     collectedAtRaw: isoFromDate(head.SpecimenDateTime),
     receivedAtRaw: isoFromDate(head.ReceivedDateTime),
     sex: head.HL7SexCode,
+    // v1 marks rejected requests with HL7ResultStatusCode='X' (results cannot
+    // be obtained — sample rejected). Such requests carry no LabResults by
+    // design, so an empty observation set is expected, not an error.
+    rejected: (head.HL7ResultStatusCode ?? "").trim().toUpperCase() === "X",
+    rejectionReason: null,
   };
 
   const anomalies = detectAnomalies(input, cb);
