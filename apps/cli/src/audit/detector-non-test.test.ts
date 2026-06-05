@@ -24,6 +24,7 @@ test("specimen_missing suppressed when only documentation panels are ordered", (
   const anomalies = detectAnomalies(input, cb);
   assert.equal(anomalies.some((a) => a.class === "specimen_missing"), false);
   assert.equal(anomalies.some((a) => a.class === "routed_as_form"), true);
+  assert.equal(anomalies.filter((a) => a.class === "routed_as_form").length, 1);
 });
 
 test("specimen_missing still fires when a real test panel lacks a specimen", () => {
@@ -49,4 +50,16 @@ test("documentation-only record with no observations emits a single routed_as_fo
   assert.equal(routed.length, 1);
   assert.equal(anomalies.some((a) => a.class === "specimen_missing"), false);
   assert.equal(anomalies.some((a) => a.class === "record_has_no_observations"), false);
+});
+
+test("documentation panel with no observations is not flagged as orphan", () => {
+  const cb = stubCodebook({ panels: { VIRAL: "VIRAL" } });
+  const input = baseInput({
+    orderedPanels: ["VIRAL"],
+    observations: [],
+    documentationPanels: new Set(["VIRAL"]),
+  });
+  const anomalies = detectAnomalies(input, cb);
+  assert.equal(anomalies.some((a) => a.class === "orphan_ordered_panel"), false);
+  assert.equal(anomalies.filter((a) => a.class === "routed_as_form").length, 1);
 });

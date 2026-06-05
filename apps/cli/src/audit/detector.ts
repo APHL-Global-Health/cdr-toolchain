@@ -333,6 +333,9 @@ function detectOrphanPanels(input: AuditInputs, cb: Codebook): Anomaly[] {
 
   const out: Anomaly[] = [];
   for (const panelCode of input.orderedPanels) {
+    // Documentation panels legitimately carry no test observations and are
+    // surfaced via routed_as_form; don't also flag them as orphan defects.
+    if (input.documentationPanels.has(panelCode)) continue;
     if (resultedPanels.has(panelCode)) continue;
     out.push({
       class: "orphan_ordered_panel",
