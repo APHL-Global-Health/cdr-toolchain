@@ -139,4 +139,9 @@ export const CLASS_DESCRIPTIONS: Record<AnomalyClass, { title: string; rule: str
     rule: "Numeric value contains units inline (e.g. \"5 mg/dL\") even though PARMDICT supplies them separately.",
     severity: "info",
   },
+  routed_as_form: {
+    title: "Routed as form (documentation panel)",
+    rule: "All ordered panels for this record are classified as documentation panels (e.g. questionnaire / ART adherence). No specimen is required — the record routes to the forms feed instead of the lab results feed.",
+    severity: "info",
+  },
 };

@@ -55,6 +55,10 @@ export interface AuditInputs {
   /** Raw rejection reason/condition text for annotation; null when not
    *  rejected or no reason was captured. */
   rejectionReason: string | null;
+  /** Panel codes classified as documentation for this deployment. Ordered
+   *  panels in this set are excluded from the specimen requirement and routed
+   *  to the forms feed instead. Empty by default (heuristic-only behaviour). */
+  documentationPanels: ReadonlySet<string>;
 }
 
 const MICROSCOPY_PANEL_RE = /microscop|w\.?b\.?c|r\.?b\.?c/i;
@@ -80,26 +84,36 @@ function detectPanelSpecimenMismatch(input: AuditInputs, cb: Codebook): Anomaly[
   const specimenIsMissing =
     input.specimenCode === null || input.specimenCode.length === 0 || specimenDesc.length === 0;
 
-  // Specimen-missing fires UNCONDITIONALLY for any lab with at least one
-  // ordered panel — v2's storage stage requires specimen_concept_id, and
-  // our mapper can't generate one from a null specimen_code, so storage
-  // always rejects regardless of which panel was ordered. We don't gate
-  // this on the panel description tokenising to a known kind because
-  // panels like CD4 / FBC / HIVVL imply a specimen kind clinically but
-  // not lexically.
-  if (specimenIsMissing && input.orderedPanels.length > 0) {
-    const firstPanel = input.orderedPanels[0]!;
+  // Real (non-documentation) ordered panels are the ones that genuinely
+  // require a specimen. Documentation panels route to the forms feed instead.
+  const realPanels = input.orderedPanels.filter((p) => !input.documentationPanels.has(p));
+  const docPanels = input.orderedPanels.filter((p) => input.documentationPanels.has(p));
+
+  if (specimenIsMissing && realPanels.length > 0) {
+    const firstPanel = realPanels[0]!;
     const firstPanelDesc = describePanel(cb, firstPanel);
     out.push({
       class: "specimen_missing",
       severity: "error",
-      message: `Lab has ${input.orderedPanels.length} ordered panel(s) but no specimen recorded. v2 storage will reject — fix the source data before re-attempting.`,
+      message: `Lab has ${realPanels.length} ordered test panel(s) but no specimen recorded. v2 storage will reject — fix the source data before re-attempting.`,
       panel_code: firstPanel,
       details: {
-        ordered_panels: input.orderedPanels,
+        ordered_panels: realPanels,
         first_panel_description: firstPanelDesc,
         specimen_code: input.specimenCode,
       },
+    });
+  }
+
+  // Documentation panels with no specimen are expected — surface for visibility,
+  // not as a defect.
+  if (docPanels.length > 0) {
+    out.push({
+      class: "routed_as_form",
+      severity: "info",
+      message: `${docPanels.length} documentation panel(s) routed to the forms feed (no specimen required).`,
+      panel_code: docPanels[0]!,
+      details: { documentation_panels: docPanels },
     });
   }
 
@@ -341,6 +355,18 @@ function detectOrphanPanels(input: AuditInputs, cb: Codebook): Anomaly[] {
 function detectEmptyRecord(input: AuditInputs, cb: Codebook): Anomaly[] {
   if (input.observations.length > 0) return [];
   if (input.orderedPanels.length === 0) return [];
+  // If every ordered panel is documentation, the record is a form submission,
+  // not a clinically-empty lab — don't flag it as an error. (When real panels
+  // remain, fall through to the existing rejected/empty logic below.)
+  const realOrdered = input.orderedPanels.filter((p) => !input.documentationPanels.has(p));
+  if (realOrdered.length === 0) {
+    return [{
+      class: "routed_as_form",
+      severity: "info",
+      message: `Record has ${input.orderedPanels.length} documentation panel(s) and no test observations — routed to the forms feed.`,
+      details: { documentation_panels: input.orderedPanels },
+    }];
+  }
   const orderedPanels = input.orderedPanels.map((p) => ({
     panel_code: p,
     panel_description: describePanel(cb, p),
@@ -516,6 +542,7 @@ export function auditFromSpecimen(
   specimen: SpecimenRecpt,
   prefix: string,
   cb: Codebook,
+  documentationPanels: ReadonlySet<string> = new Set(),
 ): AuditReport {
   const start = Date.now();
   // Run the audit against the same observation set that gets posted to v2 —
@@ -542,6 +569,7 @@ export function auditFromSpecimen(
     sex: nullIfEmpty(specimen.Sex),
     rejected: rejection.rejected,
     rejectionReason: rejection.reason,
+    documentationPanels,
   };
   const anomalies = detectAnomalies(input, cb);
   return {

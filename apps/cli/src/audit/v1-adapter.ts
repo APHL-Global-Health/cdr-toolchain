@@ -115,6 +115,7 @@ export async function auditFromV1(
     // design, so an empty observation set is expected, not an error.
     rejected: (head.HL7ResultStatusCode ?? "").trim().toUpperCase() === "X",
     rejectionReason: null,
+    documentationPanels: new Set(),
   };
 
   const anomalies = detectAnomalies(input, cb);

@@ -15,7 +15,8 @@ export type AnomalyClass =
   | "result_contains_control_chars"
   | "dob_after_specimen_date"
   | "dob_future_dated"
-  | "sex_code_invalid";
+  | "sex_code_invalid"
+  | "routed_as_form";
 
 export type Severity = "info" | "warn" | "error";
 
