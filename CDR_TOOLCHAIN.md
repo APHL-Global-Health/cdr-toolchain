@@ -482,7 +482,12 @@ KEYCLOAK_REALM=openldr-realm
 KEYCLOAK_CLIENT_ID=openldr-client
 KEYCLOAK_CLIENT_SECRET=<client-secret>
 
-# 3. X-DataFeed-Id — the v2 API requires this header to pick which schema /
+# 3. Country key — selects config/<country>.yaml documentation classifiers.
+#    Controls which DISA panels/params are non-test "documentation" routed to
+#    the forms feed. Never hardcode panel/param codes — add them to the YAML.
+OPENLDR_COUNTRY=zambia
+
+# 4. X-DataFeed-Id — the v2 API requires this header to pick which schema /
 #    mapper / storage / outpost plugins apply. The CLI resolves it by name:
 #    /projects → /use-cases → /feeds. Cached for the run.
 OPENLDR_PROJECT_NAME=Built-in
@@ -490,6 +495,11 @@ OPENLDR_USE_CASE_NAME=Built-in
 OPENLDR_DATA_FEED_NAME=Built-in
 # OR skip discovery and pin the UUID directly:
 # OPENLDR_DATA_FEED_ID=00000000-0000-0000-0001-000000000003
+
+# 5. Forms feed — data feed for the v2 forms (non-test) feed. Resolved the
+#    same way as OPENLDR_DATA_FEED_NAME. Required only when a run produces
+#    documentation records to POST.
+OPENLDR_FORMS_DATA_FEED_NAME=Built-in-Forms
 ```
 
 If the v2 instance has a self-signed cert (typical for local dev), also set:
@@ -986,6 +996,8 @@ All env vars live in `apps/cli/.env` (or override via global flags). See `apps/c
 | `OPENLDR_USE_CASE_NAME` | only for X-DataFeed-Id discovery | `export --post` | OpenLDR use case name. Resolved against `/api/v1/projects/{projectId}/use-cases`. |
 | `OPENLDR_DATA_FEED_NAME` | only for X-DataFeed-Id discovery | `export --post` | OpenLDR data feed name. Resolved against `/api/v1/projects/use-cases/{useCaseId}/feeds`. |
 | `OPENLDR_DATA_FEED_ID` | optional | `export --post` | Pre-resolved data feed UUID. Skips the discovery chain when set. |
+| `OPENLDR_COUNTRY` | only for documentation routing | `export --post` / `export-batch` | Country key selecting `config/<country>.yaml` documentation classifiers (e.g. `zambia`, `tanzania`). Controls which DISA panels/params are treated as non-test "documentation" and routed to the forms feed instead of quarantined. Documentation panel/param codes live under the `documentation:` key in the country YAML — never hardcode them. |
+| `OPENLDR_FORMS_DATA_FEED_NAME` | only for documentation routing | `export --post` / `export-batch` | Data feed name for the v2 forms (non-test) feed. Resolved the same way as `OPENLDR_DATA_FEED_NAME` (project → use-case → feeds). Required only when a run produces documentation records to POST. |
 
 **Connection-string secret hygiene:** `cdr config show` redacts passwords (`pwd=***` and `://user:***@host`). Logs follow the same convention.
 
