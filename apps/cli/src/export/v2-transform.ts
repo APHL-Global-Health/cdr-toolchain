@@ -170,7 +170,7 @@ function facilityProperties(f: Facility): Record<string, unknown> | undefined {
  *  The originating lab uses the code as a human handle anyway; this also
  *  surfaces the unresolved code clearly so it's easy to spot in v2 for
  *  LOCNDIC4 backfill. */
-function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2ConceptCode | null {
+export function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2ConceptCode | null {
   if (facility === null) return null;
   const code = nz(facility.Code);
   if (code === null) return null;
@@ -188,7 +188,7 @@ function buildFacilityConcept(facility: Facility | null, site: SiteConfig): V2Co
 
 // ---------- patient ---------------------------------------------------------
 
-function buildPatient(s: SpecimenRecpt, refIso: string | null, requestId: string): V2Patient {
+export function buildPatient(s: SpecimenRecpt, refIso: string | null, requestId: string): V2Patient {
   const dob = dobToIso(s.DobAge);
   return {
     // DISA has no native patient GUID — use the request_id so the value is
