@@ -616,6 +616,10 @@ export interface ToV2Opts {
    *  non-empty, an annotated `data_quality` block is added to the payload.
    *  Pass `null` (or omit) to suppress the annotation entirely. */
   auditReport?: AuditReport | null;
+  /** When set, observations matching this predicate are dropped before
+   *  building lab_results / isolates / panel selection — used to route
+   *  documentation observations to the forms feed instead. */
+  excludeObs?: (o: DisaObs) => boolean;
 }
 
 function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
@@ -640,7 +644,8 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // reruns of the same panel — v1 dropped them, so v2 mirrors that to keep
   // a single canonical observation per (panelCode, paramCode). The audit
   // surfaces the dropped iterations via `panel_iterations_superseded`.
-  const obs = supersedePanelIterations(flattenDisa(specimen)).kept;
+  const keptAll = supersedePanelIterations(flattenDisa(specimen)).kept;
+  const obs = opts.excludeObs ? keptAll.filter((o) => !opts.excludeObs!(o)) : keptAll;
   const groups = groupByPanel(obs);
   const primary = selectPrimaryPanel(groups, opts.codebook);
   const rejection = detectDisaRejection(specimen);
