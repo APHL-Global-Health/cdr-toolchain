@@ -356,17 +356,13 @@ function detectEmptyRecord(input: AuditInputs, cb: Codebook): Anomaly[] {
   if (input.observations.length > 0) return [];
   if (input.orderedPanels.length === 0) return [];
   // If every ordered panel is documentation, the record is a form submission,
-  // not a clinically-empty lab — don't flag it as an error. (When real panels
-  // remain, fall through to the existing rejected/empty logic below.)
+  // not a clinically-empty lab — suppress the empty-record error. The
+  // routed_as_form visibility anomaly is already emitted by
+  // detectPanelSpecimenMismatch (which fires for any documentation panel), so
+  // we do NOT emit it again here. (When real panels remain, fall through to
+  // the existing rejected/empty logic below.)
   const realOrdered = input.orderedPanels.filter((p) => !input.documentationPanels.has(p));
-  if (realOrdered.length === 0) {
-    return [{
-      class: "routed_as_form",
-      severity: "info",
-      message: `Record has ${input.orderedPanels.length} documentation panel(s) and no test observations — routed to the forms feed.`,
-      details: { documentation_panels: input.orderedPanels },
-    }];
-  }
+  if (realOrdered.length === 0) return [];
   const orderedPanels = input.orderedPanels.map((p) => ({
     panel_code: p,
     panel_description: describePanel(cb, p),
