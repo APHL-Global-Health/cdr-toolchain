@@ -265,6 +265,7 @@ function buildLabRequest(
   site: SiteConfig,
   codebook: Codebook,
   rejection: DisaRejection,
+  specimenAnomalous: boolean,
 ): V2LabRequest {
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
@@ -300,7 +301,12 @@ function buildLabRequest(
   const specimenCode: V2ConceptCode | null = specimenTrimmed === null
     ? null
     : {
-        system_id: site.specimen_system_id,
+        // When the audit corroborated a panel/specimen mismatch (a DISA
+        // single-specimen-per-request collision), tag the provenance namespace
+        // so the recorded-but-incomplete specimen is queryable in v2. The
+        // concept_code and display_name stay exactly as recorded — we never
+        // invent a specimen we don't have.
+        system_id: specimenAnomalous ? site.specimen_anomaly_system_id : site.specimen_system_id,
         concept_code: specimenTrimmed,
         display_name: codebook.specimenEntry(specimenTrimmed)?.description ?? null,
         concept_class: "specimen",
@@ -639,6 +645,18 @@ function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
   };
 }
 
+/** True when the audit raised a corroborated (warn-level)
+ *  `panel_specimen_mismatch` — the migrating case where the recorded specimen
+ *  is kept but known not to apply to every ordered panel. Drives the
+ *  specimen-anomaly provenance namespace. Error-level (uncorroborated)
+ *  mismatches quarantine and never reach the emit path, so they're excluded. */
+function hasCorroboratedSpecimenMismatch(report?: AuditReport | null): boolean {
+  if (!report) return false;
+  return report.anomalies.some(
+    (a) => a.class === "panel_specimen_mismatch" && a.severity === "warn",
+  );
+}
+
 export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // DISA's preliminary panel runs (lower TESTINDEX) are superseded by later
   // reruns of the same panel — v1 dropped them, so v2 mirrors that to keep
@@ -649,7 +667,8 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const groups = groupByPanel(obs);
   const primary = selectPrimaryPanel(groups, opts.codebook);
   const rejection = detectDisaRejection(specimen);
-  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook, rejection);
+  const specimenAnomalous = hasCorroboratedSpecimenMismatch(opts.auditReport);
+  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous);
   const patient = buildPatient(specimen, labRequest.received_at ?? labRequest.collected_datetime ?? labRequest.taken_datetime, labRequest.request_id);
   // Order matters: isolates first so lab_results can attach isolate_index
   // and AST tests can resolve the nearest-isolate linkage.

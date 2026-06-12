@@ -121,6 +121,19 @@ function detectPanelSpecimenMismatch(input: AuditInputs, cb: Codebook): Anomaly[
   // the missing-specimen case above.
   if (specimenIsMissing) return out;
 
+  // Resulted-observation count per panel. A mismatch on a panel that actually
+  // produced observations is corroborated evidence the test was performed —
+  // DISA records only one specimen per request, so a mixed-specimen order
+  // (e.g. blood + CSF panels) inherits a single recorded specimen and the CSF
+  // panels read as mismatched even though they ran on CSF. We can't recover the
+  // unrecorded specimen, so we keep the recorded one untouched and demote the
+  // mismatch to a warning. A mismatch on a panel with NO observations has no
+  // such evidence and stays an error (quarantine).
+  const obsCountByPanel = new Map<string, number>();
+  for (const o of input.observations) {
+    obsCountByPanel.set(o.panelCode, (obsCountByPanel.get(o.panelCode) ?? 0) + 1);
+  }
+
   for (const panelCode of input.orderedPanels) {
     const panelDesc = describePanel(cb, panelCode);
     const panelKinds = extractKinds(panelDesc);
@@ -143,10 +156,14 @@ function detectPanelSpecimenMismatch(input: AuditInputs, cb: Codebook): Anomaly[
     }
 
     if (!kindsCompatible(panelKinds, specimenKinds)) {
+      const observationCount = obsCountByPanel.get(panelCode) ?? 0;
+      const corroborated = observationCount > 0;
       out.push({
         class: "panel_specimen_mismatch",
-        severity: "error",
-        message: `Panel "${panelDesc}" implies ${[...panelKinds].join("/")}, but specimen "${specimenDesc}" is ${[...specimenKinds].join("/")}.`,
+        severity: corroborated ? "warn" : "error",
+        message: corroborated
+          ? `Panel "${panelDesc}" implies ${[...panelKinds].join("/")} but the recorded specimen "${specimenDesc}" is ${[...specimenKinds].join("/")}; the panel has ${observationCount} resulted observation(s), so the test was performed — likely DISA's single-specimen-per-request limitation. Migrating with the recorded specimen.`
+          : `Panel "${panelDesc}" implies ${[...panelKinds].join("/")}, but specimen "${specimenDesc}" is ${[...specimenKinds].join("/")}.`,
         panel_code: panelCode,
         details: {
           panel_description: panelDesc,
@@ -154,6 +171,8 @@ function detectPanelSpecimenMismatch(input: AuditInputs, cb: Codebook): Anomaly[
           specimen_code: input.specimenCode,
           specimen_description: specimenDesc,
           specimen_kinds: [...specimenKinds],
+          corroborated,
+          observation_count: observationCount,
         },
       });
     }
