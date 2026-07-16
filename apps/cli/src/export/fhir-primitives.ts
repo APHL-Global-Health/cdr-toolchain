@@ -9,28 +9,48 @@ export function fhirId(raw: string | null | undefined): string | undefined {
     .trim()
     .replace(/[^A-Za-z0-9.\-]/g, "-")  // forbidden char -> hyphen
     .replace(/-{2,}/g, "-")            // collapse runs
-    .replace(/^-+|-+$/g, "")           // no leading/trailing separator
-    .slice(0, 64);
+    .slice(0, 64)                      // truncate BEFORE stripping separators...
+    .replace(/^-+|-+$/g, "");          // ...so a cut mid-string can't leave one
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
-/** CE DATETIME_RE requires a zone when a time is present. Returns undefined
- *  for anything unparseable rather than emitting an invalid value. */
-export function fhirDateTime(raw: string | null | undefined): string | undefined {
+/** A FHIR timezone offset: "Z", or "+HH:MM" / "-HH:MM". */
+const TZ_RE = /^(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * CE DATETIME_RE requires a zone when a time is present, but upstream
+ * `disaToIso` (v2-transform.ts:36-50) deliberately emits unzoned local time:
+ * DISA stores local wall-clock and the destination owns tz interpretation
+ * (PRD §5.1). So the offset is a REQUIRED argument — assuming UTC would shift
+ * Moz/Zambia (UTC+2) timestamps 2h earlier with no error.
+ *
+ * Unrecognised input yields undefined rather than a guess: `disaToIso` passes
+ * unrecognised values through raw, and `new Date("07/20/2024")` would silently
+ * apply US month/day ordering. A wrong clinical timestamp is worse than none.
+ *
+ * @param tzOffset e.g. "+02:00", "-05:00", "Z". Throws if malformed.
+ */
+export function fhirDateTime(
+  raw: string | null | undefined,
+  tzOffset: string,
+): string | undefined {
+  if (!TZ_RE.test(tzOffset)) {
+    throw new Error(
+      `fhirDateTime: malformed timezone offset ${JSON.stringify(tzOffset)} — expected "Z" or "+HH:MM"/"-HH:MM"`,
+    );
+  }
   if (raw === null || raw === undefined) return undefined;
   const s = raw.trim();
   if (s.length === 0) return undefined;
-  // Date-only is valid FHIR as-is.
+  // Date-only is valid FHIR as-is; no zone applies.
   if (/^\d{4}(-\d{2}(-\d{2})?)?$/.test(s)) return s;
-  // Already zoned.
+  // Already zoned — leave it alone. v1-transform.ts:20 emits fractional seconds.
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/.test(s)) return s;
-  // Unzoned local datetime -> assume UTC. DISA stores wall-clock with no zone.
+  // Unzoned local wall-clock -> stamp it with the deployment's offset.
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
-    return `${s.replace(" ", "T").replace(/\.\d+$/, "")}Z`;
+    return `${s.replace(" ", "T")}${tzOffset}`;
   }
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return undefined;
-  return d.toISOString().replace(/\.\d{3}Z$/, "Z");
+  return undefined;
 }
 
 /** CE fhirString is z.string().min(1) — omit rather than emit "". */
