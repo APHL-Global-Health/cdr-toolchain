@@ -1,0 +1,2590 @@
+[
+  {
+    "code": "",
+    "description": "Microbiology Organisms"
+  },
+  {
+    "code": "2X",
+    "description": "@2x1 @2x2"
+  },
+  {
+    "code": "ABSID",
+    "description": "Absidia species"
+  },
+  {
+    "code": "ACHRO",
+    "description": "Achromobacter species"
+  },
+  {
+    "code": "ACIAN",
+    "description": "Acinetobacter anitratus"
+  },
+  {
+    "code": "ACIBA",
+    "description": "Acinetobacter baumanii"
+  },
+  {
+    "code": "ACICA",
+    "description": "Acinetobacter calcoaceticus"
+  },
+  {
+    "code": "ACIFE",
+    "description": "Acidaminococcus fermentans"
+  },
+  {
+    "code": "ACIHA",
+    "description": "Acinetobacter haemolyticus"
+  },
+  {
+    "code": "ACIJU",
+    "description": "Acinetobacter junii"
+  },
+  {
+    "code": "ACILW",
+    "description": "Acinetobacter lwoffii"
+  },
+  {
+    "code": "ACINE",
+    "description": "Acinetobacter species"
+  },
+  {
+    "code": "ACREM",
+    "description": "Acremonium species"
+  },
+  {
+    "code": "ACTIB",
+    "description": "Actinobacillus species"
+  },
+  {
+    "code": "ACTIN",
+    "description": "Actinomyces species"
+  },
+  {
+    "code": "ACTIS",
+    "description": "Actinomyces israelii"
+  },
+  {
+    "code": "ACTMA",
+    "description": "Actinomadura madurae"
+  },
+  {
+    "code": "ACTNA",
+    "description": "Actinomyces naeslundii"
+  },
+  {
+    "code": "ACTOD",
+    "description": "Actinomyces odontolyticus"
+  },
+  {
+    "code": "ACTPE",
+    "description": "Actinomadura pelletieri"
+  },
+  {
+    "code": "AERCA",
+    "description": "Aeromonas caviae"
+  },
+  {
+    "code": "AERHY",
+    "description": "Aeromonas hydrophila"
+  },
+  {
+    "code": "AERLI",
+    "description": "Aeromonas liquefaciens"
+  },
+  {
+    "code": "AEROC",
+    "description": "Aerococcus species"
+  },
+  {
+    "code": "AEROM",
+    "description": "Aeromonas species"
+  },
+  {
+    "code": "AERSA",
+    "description": "Aeromonas salmonicida"
+  },
+  {
+    "code": "AERSO",
+    "description": "Aeromonas sobria"
+  },
+  {
+    "code": "AGGRA",
+    "description": "Agrobacterium radiobacter"
+  },
+  {
+    "code": "AGROB",
+    "description": "Agrobacter species"
+  },
+  {
+    "code": "AHS",
+    "description": "a-Haemolytic streptococcus"
+  },
+  {
+    "code": "ALCAL",
+    "description": "Alcaligenes species"
+  },
+  {
+    "code": "ALCBR",
+    "description": "Alcaligenes bronchoseptica"
+  },
+  {
+    "code": "ALCDI",
+    "description": "Alcaligenes dispar"
+  },
+  {
+    "code": "ALCFA",
+    "description": "Alcaligenes faecalis"
+  },
+  {
+    "code": "ALCOD",
+    "description": "Alcaligenes odorans"
+  },
+  {
+    "code": "ALCXY",
+    "description": "Alcaligenes xylosoxidans"
+  },
+  {
+    "code": "ALTER",
+    "description": "Alternaria species"
+  },
+  {
+    "code": "ANDIP",
+    "description": "Anaerobic Diphtheroid"
+  },
+  {
+    "code": "ANGNB",
+    "description": "Anaerobic gram @-ve bacillus"
+  },
+  {
+    "code": "ANGNC",
+    "description": "Anaerobic gram negative coccus"
+  },
+  {
+    "code": "ANGPB",
+    "description": "Anaerobic gram @+ve bacillus"
+  },
+  {
+    "code": "ANGPC",
+    "description": "Anaerobic gram positive coccus"
+  },
+  {
+    "code": "ANI",
+    "description": "Aerobic organisms not isolated"
+  },
+  {
+    "code": "ANNI",
+    "description": "Anaerobic organisms @nisol"
+  },
+  {
+    "code": "ANO2-",
+    "description": "Anaerobic organisms @nisol"
+  },
+  {
+    "code": "ANO2+",
+    "description": "Anaerobic organisms isolated"
+  },
+  {
+    "code": "ARACH",
+    "description": "Arachnia species"
+  },
+  {
+    "code": "ARIZO",
+    "description": "Arizona"
+  },
+  {
+    "code": "ASPCL",
+    "description": "Aspergillus clavatus"
+  },
+  {
+    "code": "ASPER",
+    "description": "Aspergillus species"
+  },
+  {
+    "code": "ASPFL",
+    "description": "Aspergillus flavus"
+  },
+  {
+    "code": "ASPFU",
+    "description": "Aspergillus fumigatus"
+  },
+  {
+    "code": "ASPGL",
+    "description": "Aspergillus glaucus"
+  },
+  {
+    "code": "ASPND",
+    "description": "Aspergillus nidulans"
+  },
+  {
+    "code": "ASPNI",
+    "description": "Aspergillus niger"
+  },
+  {
+    "code": "ASPTE",
+    "description": "Aspergillus terreus"
+  },
+  {
+    "code": "AURPU",
+    "description": "Aureobasidium pullulans"
+  },
+  {
+    "code": "BACAL",
+    "description": "Bacillus alvei"
+  },
+  {
+    "code": "BACAN",
+    "description": "Bacillus anthracis"
+  },
+  {
+    "code": "BACAS",
+    "description": "Bacteroides asaccharolyticus"
+  },
+  {
+    "code": "BACBA",
+    "description": "Bacillus badis"
+  },
+  {
+    "code": "BACBI",
+    "description": "Bacteroides bivius"
+  },
+  {
+    "code": "BACBR",
+    "description": "Bacillus brevis"
+  },
+  {
+    "code": "BACCE",
+    "description": "Bacillus cereus"
+  },
+  {
+    "code": "BACCG",
+    "description": "Bacillus coagulans"
+  },
+  {
+    "code": "BACCI",
+    "description": "Bacillus circulans"
+  },
+  {
+    "code": "BACCO",
+    "description": "Bacteroides corrodens"
+  },
+  {
+    "code": "BACDI",
+    "description": "Bacteroides disiens"
+  },
+  {
+    "code": "BACDS",
+    "description": "Bacteroides distasonis"
+  },
+  {
+    "code": "BACFR",
+    "description": "Bacteroides fragilis"
+  },
+  {
+    "code": "BACIL",
+    "description": "Bacillus species"
+  },
+  {
+    "code": "BACIN",
+    "description": "Bacteroides intermedius"
+  },
+  {
+    "code": "BACLE",
+    "description": "Bacillus lentis"
+  },
+  {
+    "code": "BACME",
+    "description": "Bacteroides melaninogenicus"
+  },
+  {
+    "code": "BACOR",
+    "description": "Bacteroides oralis"
+  },
+  {
+    "code": "BACOV",
+    "description": "Bacteroides ovatus"
+  },
+  {
+    "code": "BACRU",
+    "description": "Bacteroides ruminocola"
+  },
+  {
+    "code": "BACSA",
+    "description": "Bacillus sahaericus"
+  },
+  {
+    "code": "BACSP",
+    "description": "Bacteroides splanchnius"
+  },
+  {
+    "code": "BACSU",
+    "description": "Bacillus subtilis"
+  },
+  {
+    "code": "BACTE",
+    "description": "Bacteroides species"
+  },
+  {
+    "code": "BACTH",
+    "description": "Bacteroides thetaiotaomicron"
+  },
+  {
+    "code": "BACUR",
+    "description": "Bacteroides ureolyticus"
+  },
+  {
+    "code": "BACVU",
+    "description": "Bacteroides vulgatus"
+  },
+  {
+    "code": "BASID",
+    "description": "Basidiobolus species"
+  },
+  {
+    "code": "BC1",
+    "description": "Aerobic culture - Negative"
+  },
+  {
+    "code": "BC2",
+    "description": "Aerobic culture - positive"
+  },
+  {
+    "code": "BC3",
+    "description": "Anaerobic cult - negative"
+  },
+  {
+    "code": "BC4",
+    "description": "Anaerobic cult - positive"
+  },
+  {
+    "code": "BCC1",
+    "description": "@staep and @bacil may reflect"
+  },
+  {
+    "code": "BCCOM",
+    "description": "@bcc1 @bcc2 @bcc3 @bcc4"
+  },
+  {
+    "code": "BEABA",
+    "description": "Beauveria bassiana"
+  },
+  {
+    "code": "BHABD",
+    "description": "á-Strep not group A,B or D"
+  },
+  {
+    "code": "BHS",
+    "description": "á-haemolytic Streptococcus"
+  },
+  {
+    "code": "BHS-",
+    "description": "@strpy @nisol"
+  },
+  {
+    "code": "BHSA",
+    "description": "á-haemolytic Strept Group A"
+  },
+  {
+    "code": "BHSB",
+    "description": "á-haemolytic Strep. group B"
+  },
+  {
+    "code": "BHSC",
+    "description": "á-haemolytic Strep Group C"
+  },
+  {
+    "code": "BHSF",
+    "description": "á-haemolytic Strep Group F"
+  },
+  {
+    "code": "BHSG",
+    "description": "á-haemolytic Strep Group G"
+  },
+  {
+    "code": "BHSNA",
+    "description": "á-Haemolytic Strep NOT Group A"
+  },
+  {
+    "code": "BHSND",
+    "description": "Group D non enterococcus"
+  },
+  {
+    "code": "BIFID",
+    "description": "Bifidobacterium species"
+  },
+  {
+    "code": "BIPOL",
+    "description": "Bipolaris species"
+  },
+  {
+    "code": "BL-",
+    "description": "á-Lactamase Negative"
+  },
+  {
+    "code": "BL+",
+    "description": "á-Lactamase positive"
+  },
+  {
+    "code": "BLADE",
+    "description": "Blastomyces dermatitidis"
+  },
+  {
+    "code": "BORBR",
+    "description": "Bordetella bronchoseptica"
+  },
+  {
+    "code": "BORDE",
+    "description": "Bordetella species"
+  },
+  {
+    "code": "BORPA",
+    "description": "Bordatella parapertussis"
+  },
+  {
+    "code": "BORPE",
+    "description": "Bordetella pertussis"
+  },
+  {
+    "code": "BRACA",
+    "description": "Branhamella catarrhalis"
+  },
+  {
+    "code": "BRANH",
+    "description": "Branhamella species"
+  },
+  {
+    "code": "BREVI",
+    "description": "Brevibacterium species"
+  },
+  {
+    "code": "BRUAB",
+    "description": "Brucella abortus"
+  },
+  {
+    "code": "BRUCE",
+    "description": "Brucella species"
+  },
+  {
+    "code": "BRUME",
+    "description": "Brucella melitensis"
+  },
+  {
+    "code": "CAMCO",
+    "description": "Campylobacter coli"
+  },
+  {
+    "code": "CAMFE",
+    "description": "Campylobacter fetus"
+  },
+  {
+    "code": "CAMHY",
+    "description": "Campylobacter hyointestinalis"
+  },
+  {
+    "code": "CAMIN",
+    "description": "Campylobacter intestinalis"
+  },
+  {
+    "code": "CAMJE",
+    "description": "Campylobacter jejuni"
+  },
+  {
+    "code": "CAMLA",
+    "description": "Campylobacter laridis"
+  },
+  {
+    "code": "CAMP-",
+    "description": "Campylobacter @nisol"
+  },
+  {
+    "code": "CAMPY",
+    "description": "Campylobacter species"
+  },
+  {
+    "code": "CAMUP",
+    "description": "Campylobacter upsaliensis"
+  },
+  {
+    "code": "CANAL",
+    "description": "Candida albicans"
+  },
+  {
+    "code": "CANDI",
+    "description": "Candida species"
+  },
+  {
+    "code": "CANFA",
+    "description": "Candida famata"
+  },
+  {
+    "code": "CANGL",
+    "description": "Candida glabrata"
+  },
+  {
+    "code": "CANGU",
+    "description": "Candida guilliermondi"
+  },
+  {
+    "code": "CANHU",
+    "description": "Candida humicola"
+  },
+  {
+    "code": "CANIN",
+    "description": "Candida inconspicua"
+  },
+  {
+    "code": "CANKE",
+    "description": "Candida kefyr"
+  },
+  {
+    "code": "CANKR",
+    "description": "Candida krusei"
+  },
+  {
+    "code": "CANLI",
+    "description": "Candida lipolytica"
+  },
+  {
+    "code": "CANLU",
+    "description": "Candida lusitaniae"
+  },
+  {
+    "code": "CANPA",
+    "description": "Candida parapsilosis"
+  },
+  {
+    "code": "CANPS",
+    "description": "Candida pseudotropicalis"
+  },
+  {
+    "code": "CANSP",
+    "description": "Candida sphaerica"
+  },
+  {
+    "code": "CANST",
+    "description": "Candida stellatoidea"
+  },
+  {
+    "code": "CANTR",
+    "description": "Candida tropicalis"
+  },
+  {
+    "code": "CANZE",
+    "description": "Candida zeylanoides"
+  },
+  {
+    "code": "CAPNO",
+    "description": "Capnocytophaga species"
+  },
+  {
+    "code": "CARDI",
+    "description": "Cardiobacterium species"
+  },
+  {
+    "code": "CARHO",
+    "description": "Cardiobacterium hominis"
+  },
+  {
+    "code": "CDIP-",
+    "description": "@cordi @nisol"
+  },
+  {
+    "code": "CHAET",
+    "description": "Chaetomium species"
+  },
+  {
+    "code": "CHO-",
+    "description": "Cholera was not isolated"
+  },
+  {
+    "code": "CHO+",
+    "description": "Vibrio isolated"
+  },
+  {
+    "code": "CHRLU",
+    "description": "Chryseomonas luteola"
+  },
+  {
+    "code": "CHROM",
+    "description": "Chromobacter species"
+  },
+  {
+    "code": "CHRVI",
+    "description": "Chromobacterium violaceum"
+  },
+  {
+    "code": "CHRYS",
+    "description": "Chrysosporium species"
+  },
+  {
+    "code": "CITDI",
+    "description": "Citrobacter diversus"
+  },
+  {
+    "code": "CITFR",
+    "description": "Citrobacter freundii"
+  },
+  {
+    "code": "CITKO",
+    "description": "Citrobacter koserii"
+  },
+  {
+    "code": "CITRO",
+    "description": "Citrobacter species"
+  },
+  {
+    "code": "CLACA",
+    "description": "Cladosporium carrionii"
+  },
+  {
+    "code": "CLADO",
+    "description": "Cladosporium species"
+  },
+  {
+    "code": "CLOBI",
+    "description": "Clostridium bifermentans"
+  },
+  {
+    "code": "CLOBU",
+    "description": "Clostridium butyricum"
+  },
+  {
+    "code": "CLOCA",
+    "description": "Clostridium carnis"
+  },
+  {
+    "code": "CLODI",
+    "description": "Clostridium difficile"
+  },
+  {
+    "code": "CLOIN",
+    "description": "Clostridium innocuum"
+  },
+  {
+    "code": "CLOOE",
+    "description": "Clostridium oedamatiens"
+  },
+  {
+    "code": "CLOPA",
+    "description": "Clostridium paraperfringens"
+  },
+  {
+    "code": "CLOPE",
+    "description": "Clostridium perfringens"
+  },
+  {
+    "code": "CLOPU",
+    "description": "Clostridium putrefaciens"
+  },
+  {
+    "code": "CLORA",
+    "description": "Clostridium ramosum"
+  },
+  {
+    "code": "CLOSE",
+    "description": "Clostridium septicum"
+  },
+  {
+    "code": "CLOSO",
+    "description": "Clostridium sordellii"
+  },
+  {
+    "code": "CLOSP",
+    "description": "Clostridium sporogenes"
+  },
+  {
+    "code": "CLOST",
+    "description": "Clostridium species"
+  },
+  {
+    "code": "CLOSU",
+    "description": "Clostridium subterminale"
+  },
+  {
+    "code": "CLOTE",
+    "description": "Clostridium tetani"
+  },
+  {
+    "code": "CNS",
+    "description": "Coagulase Neg Staphylococcus"
+  },
+  {
+    "code": "COCIM",
+    "description": "Coccidioides immitis"
+  },
+  {
+    "code": "COLIF",
+    "description": "Coliform"
+  },
+  {
+    "code": "COMTE",
+    "description": "Comomonas testosteroni"
+  },
+  {
+    "code": "CONFU",
+    "description": "Contaminating fungi only"
+  },
+  {
+    "code": "CONID",
+    "description": "Conidiobolus species"
+  },
+  {
+    "code": "COR",
+    "description": "Corynebacterium"
+  },
+  {
+    "code": "CORAN",
+    "description": "Corynebacterium Grp ANF"
+  },
+  {
+    "code": "CORAQ",
+    "description": "Corynebacterium aquaticum"
+  },
+  {
+    "code": "CORBO",
+    "description": "Corynebacterium bovis"
+  },
+  {
+    "code": "CORDI",
+    "description": "Corynebacterium diphtheriae"
+  },
+  {
+    "code": "CORG2",
+    "description": "Corynebacterium Grp 2"
+  },
+  {
+    "code": "CORHA",
+    "description": "Corynebacterium haemolyticum"
+  },
+  {
+    "code": "CORHO",
+    "description": "Corynebacterium hoffmanii"
+  },
+  {
+    "code": "CORJK",
+    "description": "Corynebacterium JK"
+  },
+  {
+    "code": "CORMI",
+    "description": "Corynebacterium minutissimum"
+  },
+  {
+    "code": "CORPD",
+    "description": "@cor pseudodiphtheriticum"
+  },
+  {
+    "code": "CORPS",
+    "description": "@cor pseudotuberculosis"
+  },
+  {
+    "code": "CORPY",
+    "description": "Corynebacterium pyogenes"
+  },
+  {
+    "code": "CORST",
+    "description": "Corynebacterium striatum"
+  },
+  {
+    "code": "CORUL",
+    "description": "Corynebacterium ulcerans"
+  },
+  {
+    "code": "CORXE",
+    "description": "Corynebacterium xerosis"
+  },
+  {
+    "code": "CORYB",
+    "description": "Coryneform bacteria"
+  },
+  {
+    "code": "CORYN",
+    "description": "Corynebacterium species"
+  },
+  {
+    "code": "CORZE",
+    "description": "Corynebacterium zeylanoides"
+  },
+  {
+    "code": "CRYAL",
+    "description": "Cryptococcus albidis"
+  },
+  {
+    "code": "CRYLA",
+    "description": "Cryptococcus laurentii"
+  },
+  {
+    "code": "CRYNE",
+    "description": "Cryptococcus neoformans"
+  },
+  {
+    "code": "CRYPT",
+    "description": "Cryptococcus species"
+  },
+  {
+    "code": "CURVU",
+    "description": "Curvularia species"
+  },
+  {
+    "code": "D1",
+    "description": "Organisms isolated of doubtful"
+  },
+  {
+    "code": "D2",
+    "description": "significance"
+  },
+  {
+    "code": "DBT",
+    "description": "@dbt1 @dbt2 @dbt3"
+  },
+  {
+    "code": "DBT1",
+    "description": "Organisms were isolated which"
+  },
+  {
+    "code": "DBT2",
+    "description": "are of doubtful significance."
+  },
+  {
+    "code": "DBT3",
+    "description": "@pr if clinically indicated."
+  },
+  {
+    "code": "DIP-",
+    "description": "@cordi @nisol"
+  },
+  {
+    "code": "DIP+",
+    "description": "@cordi @isol"
+  },
+  {
+    "code": "DIPHT",
+    "description": "Diphtheroids"
+  },
+  {
+    "code": "DOUBT",
+    "description": "@d1 @d2"
+  },
+  {
+    "code": "DRECH",
+    "description": "Drechslera species"
+  },
+  {
+    "code": "ECHGR",
+    "description": "Echinococcus granulosus"
+  },
+  {
+    "code": "ECHIN",
+    "description": "Echinococcus species"
+  },
+  {
+    "code": "EDWAR",
+    "description": "Edwardsiella species"
+  },
+  {
+    "code": "EDWTA",
+    "description": "Edwardsiella tarda"
+  },
+  {
+    "code": "EEC",
+    "description": "Enteropathogenic E coli"
+  },
+  {
+    "code": "EEC-",
+    "description": "@EEC @NISOL"
+  },
+  {
+    "code": "EECA",
+    "description": "@eec (Pool A)"
+  },
+  {
+    "code": "EECB",
+    "description": "@eec (Pool B)"
+  },
+  {
+    "code": "EECC",
+    "description": "@eec (Pool C)"
+  },
+  {
+    "code": "EECH",
+    "description": "E.coli 0157:H7"
+  },
+  {
+    "code": "EHESC",
+    "description": "Enterohaemorrhagic @escco"
+  },
+  {
+    "code": "EIKCO",
+    "description": "Eikonella corrodens"
+  },
+  {
+    "code": "EIKEN",
+    "description": "Eikenella species"
+  },
+  {
+    "code": "ELTOR",
+    "description": "el tor"
+  },
+  {
+    "code": "ENTAE",
+    "description": "Enterobacter aerogenes"
+  },
+  {
+    "code": "ENTAG",
+    "description": "Enterobacter agglomerans"
+  },
+  {
+    "code": "ENTAM",
+    "description": "Enterobacter amnigenus"
+  },
+  {
+    "code": "ENTBO",
+    "description": "Enterococcus bovis"
+  },
+  {
+    "code": "ENTCL",
+    "description": "Enterobacter cloacae"
+  },
+  {
+    "code": "ENTEC",
+    "description": "Enterococcus species"
+  },
+  {
+    "code": "ENTER",
+    "description": "Enterobacter species"
+  },
+  {
+    "code": "ENTFA",
+    "description": "Enterococcus faecalis"
+  },
+  {
+    "code": "ENTFE",
+    "description": "Enterococcus faecium"
+  },
+  {
+    "code": "ENTGE",
+    "description": "Enterobacter gergoviae"
+  },
+  {
+    "code": "ENTIN",
+    "description": "Enterobacter intermedium"
+  },
+  {
+    "code": "ENTSA",
+    "description": "Enterobacter sakazakii"
+  },
+  {
+    "code": "ENTTA",
+    "description": "Enterobacter taylorae"
+  },
+  {
+    "code": "EPICO",
+    "description": "Epicoccum species"
+  },
+  {
+    "code": "EPIFL",
+    "description": "Epidermophyton floccosum"
+  },
+  {
+    "code": "ERWIN",
+    "description": "Erwinia species"
+  },
+  {
+    "code": "ERYSE",
+    "description": "Erysipelothrix species"
+  },
+  {
+    "code": "ESCAD",
+    "description": "Escherichia adecarboxylata"
+  },
+  {
+    "code": "ESCCO",
+    "description": "Escherichia coli"
+  },
+  {
+    "code": "ESCH7",
+    "description": "Escherichia coli 0H157:H7"
+  },
+  {
+    "code": "ESCHE",
+    "description": "Escherichia hermanii"
+  },
+  {
+    "code": "ESCPL",
+    "description": "Escherichia plymithica"
+  },
+  {
+    "code": "ESCVU",
+    "description": "Escherichia vulneris"
+  },
+  {
+    "code": "EUBAC",
+    "description": "Eubacterium species"
+  },
+  {
+    "code": "EUBLE",
+    "description": "Eubacterium lentum"
+  },
+  {
+    "code": "EUBLI",
+    "description": "Eubacterium limosum"
+  },
+  {
+    "code": "EXOJE",
+    "description": "Exophiala jeanselmei"
+  },
+  {
+    "code": "EXOPH",
+    "description": "Exophiala species"
+  },
+  {
+    "code": "FLABR",
+    "description": "Flavobacterium breve"
+  },
+  {
+    "code": "FLAIN",
+    "description": "Flavobacterium indologenes"
+  },
+  {
+    "code": "FLAME",
+    "description": "Flavobacterium meningosepticum"
+  },
+  {
+    "code": "FLAOR",
+    "description": "Flavimonas oryzihabitans"
+  },
+  {
+    "code": "FLAVO",
+    "description": "Flavobacterium species"
+  },
+  {
+    "code": "FONPE",
+    "description": "Fonseca pedrosi"
+  },
+  {
+    "code": "FONSE",
+    "description": "Fonseca species"
+  },
+  {
+    "code": "FUNGI",
+    "description": "Fungal elements"
+  },
+  {
+    "code": "FUSAR",
+    "description": "Fusarium species"
+  },
+  {
+    "code": "FUSMO",
+    "description": "Fusobacterium mortiferum"
+  },
+  {
+    "code": "FUSNE",
+    "description": "Fusobacterium necroforum"
+  },
+  {
+    "code": "FUSNU",
+    "description": "Fusobacterium nucleatum"
+  },
+  {
+    "code": "FUSOB",
+    "description": "Fusobacterium species"
+  },
+  {
+    "code": "FUSVA",
+    "description": "Fusobacterium varium"
+  },
+  {
+    "code": "GAFAN",
+    "description": "Gaffkya anaerobius"
+  },
+  {
+    "code": "GARVA",
+    "description": "Gardnerella vaginalis"
+  },
+  {
+    "code": "GC-",
+    "description": "@neigo @nisol"
+  },
+  {
+    "code": "GC+",
+    "description": "@neigo @isol"
+  },
+  {
+    "code": "GEMEL",
+    "description": "Gemella species"
+  },
+  {
+    "code": "GEOCA",
+    "description": "Geotrichum candidum"
+  },
+  {
+    "code": "GEOTR",
+    "description": "Geotrichum species"
+  },
+  {
+    "code": "GLIOC",
+    "description": "Gliocladium species"
+  },
+  {
+    "code": "GNB",
+    "description": "Gram negative bacilli"
+  },
+  {
+    "code": "GNC",
+    "description": "Gram negative cocci"
+  },
+  {
+    "code": "GNDC",
+    "description": "Gram negative diplococci"
+  },
+  {
+    "code": "GPB",
+    "description": "Gram positive bacilli"
+  },
+  {
+    "code": "GPC",
+    "description": "Gram positive cocci"
+  },
+  {
+    "code": "GPDC",
+    "description": "Gram positive diplococci"
+  },
+  {
+    "code": "GR0",
+    "description": "(very scanty growth)"
+  },
+  {
+    "code": "GR1",
+    "description": "(Light growth)"
+  },
+  {
+    "code": "GR2",
+    "description": "(moderate growth)"
+  },
+  {
+    "code": "GR3",
+    "description": "(abundant growth)"
+  },
+  {
+    "code": "GRW7",
+    "description": "Nogrowth after 7days Icubation"
+  },
+  {
+    "code": "HAEAE",
+    "description": "Haemophilus aegypticus"
+  },
+  {
+    "code": "HAEAP",
+    "description": "Haemophilus aphrophilus"
+  },
+  {
+    "code": "HAEDU",
+    "description": "Haemophilus ducreyi"
+  },
+  {
+    "code": "HAEHA",
+    "description": "Haemophilus haemolyticus"
+  },
+  {
+    "code": "HAEIN",
+    "description": "Haemophilus influenzae"
+  },
+  {
+    "code": "HAEMO",
+    "description": "Haemophilus species"
+  },
+  {
+    "code": "HAEPA",
+    "description": "Haemophilus parainfluenzae"
+  },
+  {
+    "code": "HAFNI",
+    "description": "Hafnia species"
+  },
+  {
+    "code": "HANAN",
+    "description": "Hansenula anomala"
+  },
+  {
+    "code": "HELMI",
+    "description": "Helminthosporium species"
+  },
+  {
+    "code": "HELP-",
+    "description": "@helpy @nisol"
+  },
+  {
+    "code": "HELP+",
+    "description": "@helpy @isol"
+  },
+  {
+    "code": "HELPY",
+    "description": "Helicobacter pylori"
+  },
+  {
+    "code": "HENTO",
+    "description": "Hendersonula toruloida"
+  },
+  {
+    "code": "HISCA",
+    "description": "Histoplasma capsulata"
+  },
+  {
+    "code": "HUMIC",
+    "description": "Humicola species"
+  },
+  {
+    "code": "ID",
+    "description": "Identification to follow"
+  },
+  {
+    "code": "INABA",
+    "description": "serotype Inaba"
+  },
+  {
+    "code": "INAD",
+    "description": "Specimen inadequate. @rep"
+  },
+  {
+    "code": "INTR",
+    "description": "intracellulare"
+  },
+  {
+    "code": "ISOL",
+    "description": "WAS isolated"
+  },
+  {
+    "code": "KINDE",
+    "description": "Kingella denitrificans"
+  },
+  {
+    "code": "KINKI",
+    "description": "Kingella kingae"
+  },
+  {
+    "code": "KLE47",
+    "description": "Klebsiella Grp 47"
+  },
+  {
+    "code": "KLEAE",
+    "description": "Klebsiella aerogenes"
+  },
+  {
+    "code": "KLEBS",
+    "description": "Klebsiella species"
+  },
+  {
+    "code": "KLEOX",
+    "description": "Klebsiella oxytoca"
+  },
+  {
+    "code": "KLEOZ",
+    "description": "Klebsiella ozaenae"
+  },
+  {
+    "code": "KLEPN",
+    "description": "Klebsiella pneumoniae"
+  },
+  {
+    "code": "KLERH",
+    "description": "Klebsiella rhinoscleromatis"
+  },
+  {
+    "code": "KLUYV",
+    "description": "Kluyvera species"
+  },
+  {
+    "code": "LACTO",
+    "description": "Lactobacillus species"
+  },
+  {
+    "code": "LEAK",
+    "description": "Specimen leaked in transit"
+  },
+  {
+    "code": "LEGIO",
+    "description": "Legionella species"
+  },
+  {
+    "code": "LEGPN",
+    "description": "Legionella pneumophilia"
+  },
+  {
+    "code": "LEUCO",
+    "description": "Leuconostoc species"
+  },
+  {
+    "code": "LFC",
+    "description": "LFC"
+  },
+  {
+    "code": "LISDA",
+    "description": "Listonella damsela"
+  },
+  {
+    "code": "LISMO",
+    "description": "Listeria monocytogenes"
+  },
+  {
+    "code": "LISTE",
+    "description": "Listeria species"
+  },
+  {
+    "code": "MADGR",
+    "description": "Madurella grisea"
+  },
+  {
+    "code": "MADMY",
+    "description": "Madurella mycetomatus"
+  },
+  {
+    "code": "MALFU",
+    "description": "Malassezia furfur"
+  },
+  {
+    "code": "MCOLI",
+    "description": "Mixed coliforms"
+  },
+  {
+    "code": "MICAU",
+    "description": "Microsporum audounii"
+  },
+  {
+    "code": "MICCA",
+    "description": "Microsporum canis"
+  },
+  {
+    "code": "MICCO",
+    "description": "Microsporum cookei"
+  },
+  {
+    "code": "MICEQ",
+    "description": "Microsporum equinum"
+  },
+  {
+    "code": "MICFU",
+    "description": "Microsporum fulvum"
+  },
+  {
+    "code": "MICGA",
+    "description": "Microsporum gallinae"
+  },
+  {
+    "code": "MICGY",
+    "description": "Microsporum gypseum"
+  },
+  {
+    "code": "MICNA",
+    "description": "Microsporum nanum"
+  },
+  {
+    "code": "MICPE",
+    "description": "Microsporum persicolor"
+  },
+  {
+    "code": "MICRO",
+    "description": "Micrococcus species"
+  },
+  {
+    "code": "MICST",
+    "description": "Microaerophilic streptococcus"
+  },
+  {
+    "code": "MIX",
+    "description": "@mix1 @mix2 @dbt3"
+  },
+  {
+    "code": "MIX1",
+    "description": "Mixed bacteria - Repeat"
+  },
+  {
+    "code": "MIX2",
+    "description": "contamination."
+  },
+  {
+    "code": "MNC",
+    "description": "Mononuclear Cells"
+  },
+  {
+    "code": "MONIL",
+    "description": "Monilia species"
+  },
+  {
+    "code": "MORAX",
+    "description": "Moraxella species"
+  },
+  {
+    "code": "MORCA",
+    "description": "Moraxella catarrhalis"
+  },
+  {
+    "code": "MORLA",
+    "description": "Moraxella lacunata"
+  },
+  {
+    "code": "MORLI",
+    "description": "Moraxella liquefaciens"
+  },
+  {
+    "code": "MORMO",
+    "description": "Morganella morganii"
+  },
+  {
+    "code": "MORNO",
+    "description": "Moraxella nonliquefaciens"
+  },
+  {
+    "code": "MORPH",
+    "description": "Moraxella phenylpyruvica"
+  },
+  {
+    "code": "MORUR",
+    "description": "Moraxella urethralis"
+  },
+  {
+    "code": "MRSA",
+    "description": "Methicillin Resistant @STAAU"
+  },
+  {
+    "code": "MRSA-",
+    "description": "@mrsa @nisol"
+  },
+  {
+    "code": "MRSA+",
+    "description": "@mrsa @isol"
+  },
+  {
+    "code": "MRSE",
+    "description": "Methicillin Resistant @STAEP"
+  },
+  {
+    "code": "MRSI",
+    "description": "MRSA Isolated"
+  },
+  {
+    "code": "MUCOR",
+    "description": "Mucor species"
+  },
+  {
+    "code": "MYCAI",
+    "description": "@mycav @intr"
+  },
+  {
+    "code": "MYCAS",
+    "description": "Mycobacterium asiaticum"
+  },
+  {
+    "code": "MYCAV",
+    "description": "Mycobacterium avium"
+  },
+  {
+    "code": "MYCCH",
+    "description": "Mycobacterium chelonei"
+  },
+  {
+    "code": "MYCFL",
+    "description": "Mycobacterium flavescens"
+  },
+  {
+    "code": "MYCGA",
+    "description": "Mycobacterium gastri"
+  },
+  {
+    "code": "MYCGO",
+    "description": "Mycobacterium gordonae"
+  },
+  {
+    "code": "MYCHO",
+    "description": "Mycoplasma hominis"
+  },
+  {
+    "code": "MYCIN",
+    "description": "Mycobacterium intracellulare"
+  },
+  {
+    "code": "MYCKA",
+    "description": "Mycobacterium kansasii"
+  },
+  {
+    "code": "MYCMA",
+    "description": "Mycobacterium malmoense"
+  },
+  {
+    "code": "MYCOB",
+    "description": "Mycobacterium species"
+  },
+  {
+    "code": "MYCOP",
+    "description": "Mycoplasma species"
+  },
+  {
+    "code": "MYCPN",
+    "description": "Mycoplasma pneumoniae"
+  },
+  {
+    "code": "MYCSC",
+    "description": "Mycobacterium scrofulaceum"
+  },
+  {
+    "code": "MYCSH",
+    "description": "Mycobacterium shimoidea"
+  },
+  {
+    "code": "MYCST",
+    "description": "Mycelia sterilia"
+  },
+  {
+    "code": "MYCSZ",
+    "description": "Mycobacterium szulgai"
+  },
+  {
+    "code": "MYCTB",
+    "description": "Mycobacterium tuberculosis"
+  },
+  {
+    "code": "MYCTE",
+    "description": "Mycobacterium terrae"
+  },
+  {
+    "code": "MYCTR",
+    "description": "Mycobacterium triviale"
+  },
+  {
+    "code": "MYCTU",
+    "description": "Mycobacterium tuberculosis"
+  },
+  {
+    "code": "MYCUL",
+    "description": "Mycobacterium ulcerans"
+  },
+  {
+    "code": "MYCXE",
+    "description": "Mycobacterium xenopii"
+  },
+  {
+    "code": "NBG",
+    "description": "No bacterial growth"
+  },
+  {
+    "code": "NBG7",
+    "description": "NBG after 7days Incubation"
+  },
+  {
+    "code": "NEICE",
+    "description": "Neisseria cineria"
+  },
+  {
+    "code": "NEIFL",
+    "description": "Neisseria flavescens"
+  },
+  {
+    "code": "NEIGO",
+    "description": "Neisseria gonorrhoeae"
+  },
+  {
+    "code": "NEILA",
+    "description": "Neisseria lactamica"
+  },
+  {
+    "code": "NEIME",
+    "description": "Neisseria meningitidis"
+  },
+  {
+    "code": "NEIMU",
+    "description": "Neisseria mucosa"
+  },
+  {
+    "code": "NEIPH",
+    "description": "Neisseria pharyngis"
+  },
+  {
+    "code": "NEISI",
+    "description": "Neisseria sicca"
+  },
+  {
+    "code": "NEISS",
+    "description": "Neisseria species"
+  },
+  {
+    "code": "NEISU",
+    "description": "Neisseria subflava"
+  },
+  {
+    "code": "NF",
+    "description": "Normal flora isolated"
+  },
+  {
+    "code": "NFG",
+    "description": "No fungal growth"
+  },
+  {
+    "code": "NFGNB",
+    "description": "Non fermentative @gnb"
+  },
+  {
+    "code": "NG",
+    "description": "No growth"
+  },
+  {
+    "code": "NG48",
+    "description": "No growth after 48 hours"
+  },
+  {
+    "code": "NGD",
+    "description": "not group D"
+  },
+  {
+    "code": "NHS",
+    "description": "Non-haemolytic Streptococcus"
+  },
+  {
+    "code": "NIGRO",
+    "description": "Nigrospora species"
+  },
+  {
+    "code": "NISOL",
+    "description": "NOT isolated"
+  },
+  {
+    "code": "NLFC",
+    "description": "NLFC"
+  },
+  {
+    "code": "NMRS",
+    "description": "No MRSA Isolated"
+  },
+  {
+    "code": "NOCAR",
+    "description": "Nocardia species"
+  },
+  {
+    "code": "NOCAS",
+    "description": "Nocardia asteroides"
+  },
+  {
+    "code": "NOCBR",
+    "description": "Nocardia brasiliensis"
+  },
+  {
+    "code": "NOCCA",
+    "description": "Nocardia caviae"
+  },
+  {
+    "code": "NOCTR",
+    "description": "Nocardia transvalensis"
+  },
+  {
+    "code": "NORM",
+    "description": "@npi @nf"
+  },
+  {
+    "code": "NOS",
+    "description": "Nothing of significance"
+  },
+  {
+    "code": "NOTE",
+    "description": "Notifiable disease"
+  },
+  {
+    "code": "NP",
+    "description": "No pathogens isolated"
+  },
+  {
+    "code": "NPB",
+    "description": "No pathogenic bacteria"
+  },
+  {
+    "code": "NSB",
+    "description": "No Signf. bact. growth Repeat"
+  },
+  {
+    "code": "NSSI",
+    "description": "No Salmonella or Shigella spec"
+  },
+  {
+    "code": "OLIUR",
+    "description": "Oligella urethralis"
+  },
+  {
+    "code": "PAECI",
+    "description": "Paecilomyces species"
+  },
+  {
+    "code": "PASHE",
+    "description": "Pasteurella haemolyticum"
+  },
+  {
+    "code": "PASMU",
+    "description": "Pasteurella multicida"
+  },
+  {
+    "code": "PASTE",
+    "description": "Pasteurella species"
+  },
+  {
+    "code": "PENIC",
+    "description": "Penicillium species"
+  },
+  {
+    "code": "PEPAN",
+    "description": "Peptostreptococcus anaerobius"
+  },
+  {
+    "code": "PEPAS",
+    "description": "@pepst asaccharolyticus"
+  },
+  {
+    "code": "PEPMA",
+    "description": "Peptostreptococcus magnus"
+  },
+  {
+    "code": "PEPMI",
+    "description": "Peptostreptococcus micros"
+  },
+  {
+    "code": "PEPNI",
+    "description": "Peptococcus niger"
+  },
+  {
+    "code": "PEPPR",
+    "description": "Peptostreptococcus prevotii"
+  },
+  {
+    "code": "PEPST",
+    "description": "Peptostreptococcus"
+  },
+  {
+    "code": "PEPTC",
+    "description": "Peptococcus species"
+  },
+  {
+    "code": "PEPTO",
+    "description": "Peptostreptococcus species"
+  },
+  {
+    "code": "PETBO",
+    "description": "Petriellidium boydii"
+  },
+  {
+    "code": "PHIAL",
+    "description": "Phialophora species"
+  },
+  {
+    "code": "PHIRI",
+    "description": "Phialophora richardsiae"
+  },
+  {
+    "code": "PHIVE",
+    "description": "Phialophora verrucosa"
+  },
+  {
+    "code": "PHOMA",
+    "description": "Phoma species"
+  },
+  {
+    "code": "PICET",
+    "description": "Pichia etchellsii"
+  },
+  {
+    "code": "PIEHO",
+    "description": "Piedraia hortae"
+  },
+  {
+    "code": "PLESH",
+    "description": "Plesiomonas shigelloides"
+  },
+  {
+    "code": "PLESI",
+    "description": "Plesiomonas species"
+  },
+  {
+    "code": "PO",
+    "description": "(predominant organism)"
+  },
+  {
+    "code": "POS",
+    "description": "Positive"
+  },
+  {
+    "code": "PROAC",
+    "description": "Propionebacterium acne"
+  },
+  {
+    "code": "PROAL",
+    "description": "Providencia alkalifaciens"
+  },
+  {
+    "code": "PROMI",
+    "description": "Proteus mirabilis"
+  },
+  {
+    "code": "PROMO",
+    "description": "Proteus morganii"
+  },
+  {
+    "code": "PROPE",
+    "description": "Proteus penneri"
+  },
+  {
+    "code": "PROPI",
+    "description": "Propionebacterium species"
+  },
+  {
+    "code": "PRORE",
+    "description": "Providencia rettgeri"
+  },
+  {
+    "code": "PROST",
+    "description": "Providencia stuartii"
+  },
+  {
+    "code": "PROTE",
+    "description": "Proteus species"
+  },
+  {
+    "code": "PROTO",
+    "description": "Prototheca species"
+  },
+  {
+    "code": "PROVI",
+    "description": "Providencia species"
+  },
+  {
+    "code": "PROVU",
+    "description": "Proteus vulgaris"
+  },
+  {
+    "code": "PSAE-",
+    "description": "@pseae @nisol"
+  },
+  {
+    "code": "PSAE+",
+    "description": "@pseae @isol"
+  },
+  {
+    "code": "PSEAE",
+    "description": "Pseudomonas aeruginosa"
+  },
+  {
+    "code": "PSEAL",
+    "description": "Pseudomonas alkaligenes"
+  },
+  {
+    "code": "PSEAU",
+    "description": "Pseudomonas aureofaciens"
+  },
+  {
+    "code": "PSEBO",
+    "description": "Pseudoallescheria boydii"
+  },
+  {
+    "code": "PSECE",
+    "description": "Pseudomonas cepacia"
+  },
+  {
+    "code": "PSECH",
+    "description": "Pseudomonas chlororaphis"
+  },
+  {
+    "code": "PSEDI",
+    "description": "Pseudomonas diminuta"
+  },
+  {
+    "code": "PSEFL",
+    "description": "Pseudomonas fluorescens"
+  },
+  {
+    "code": "PSEMA",
+    "description": "Pseudomonas maltophilia"
+  },
+  {
+    "code": "PSEME",
+    "description": "Pseudomonas mesophilica"
+  },
+  {
+    "code": "PSEPA",
+    "description": "Pseudomonas paucimobilis"
+  },
+  {
+    "code": "PSEPF",
+    "description": "Pseudomonas putrefaciens"
+  },
+  {
+    "code": "PSEPI",
+    "description": "Pseudomonas picketii"
+  },
+  {
+    "code": "PSEPM",
+    "description": "Pseudomonas pseudomallei"
+  },
+  {
+    "code": "PSEPS",
+    "description": "Pseudomonas pseudoalkaligenes"
+  },
+  {
+    "code": "PSEPT",
+    "description": "Pseudomonas putida"
+  },
+  {
+    "code": "PSEPU",
+    "description": "Pseudomonas putida"
+  },
+  {
+    "code": "PSERU",
+    "description": "Pseudomonas rubrum"
+  },
+  {
+    "code": "PSEST",
+    "description": "Pseudomonas stutzerii"
+  },
+  {
+    "code": "PSEUD",
+    "description": "Pseudomonas species"
+  },
+  {
+    "code": "PSEVE",
+    "description": "Pseudomonas versicularis"
+  },
+  {
+    "code": "PSEXA",
+    "description": "Pseudomonas xanthochromia"
+  },
+  {
+    "code": "PUF",
+    "description": "Peri-urethral flora"
+  },
+  {
+    "code": "PURE",
+    "description": "(pure growth)"
+  },
+  {
+    "code": "RAHAQ",
+    "description": "Rahnella aquatilis"
+  },
+  {
+    "code": "RCLOX",
+    "description": "Resistant to Cloxacillin"
+  },
+  {
+    "code": "REP",
+    "description": "Please repeat."
+  },
+  {
+    "code": "RES",
+    "description": "reserve"
+  },
+  {
+    "code": "RHINO",
+    "description": "Rhinocladiella species"
+  },
+  {
+    "code": "RHIZM",
+    "description": "Rhizomucor species"
+  },
+  {
+    "code": "RHIZO",
+    "description": "Rhizopus species"
+  },
+  {
+    "code": "RHODO",
+    "description": "Rhodococcus species"
+  },
+  {
+    "code": "RHODT",
+    "description": "Rhodotorula species"
+  },
+  {
+    "code": "RHOEQ",
+    "description": "Rhodococcus equi"
+  },
+  {
+    "code": "RHOGL",
+    "description": "Rhodotorula glutinins"
+  },
+  {
+    "code": "RHOPI",
+    "description": "Rhodotorula pilimanae"
+  },
+  {
+    "code": "RHORU",
+    "description": "Rhodotorula rubra"
+  },
+  {
+    "code": "RMET",
+    "description": "Resistant to Metronidazole"
+  },
+  {
+    "code": "RMNC",
+    "description": "Reactive Mononuclear Cells"
+  },
+  {
+    "code": "RPEN",
+    "description": "Resistant to Penicillin"
+  },
+  {
+    "code": "SACCE",
+    "description": "Saccharomyces cerevisiae"
+  },
+  {
+    "code": "SACKL",
+    "description": "Saccharomyces kluverii"
+  },
+  {
+    "code": "SAL-",
+    "description": "@salmo @nisol"
+  },
+  {
+    "code": "SAL1",
+    "description": "Salmonella isolated. NOT"
+  },
+  {
+    "code": "SALAR",
+    "description": "Salmonella arizona"
+  },
+  {
+    "code": "SALBL",
+    "description": "Salmonella blockley"
+  },
+  {
+    "code": "SALC1",
+    "description": "Salmonella group C1"
+  },
+  {
+    "code": "SALC2",
+    "description": "Salmonella group C2"
+  },
+  {
+    "code": "SALC3",
+    "description": "Salmonella group C3"
+  },
+  {
+    "code": "SALE1",
+    "description": "Salmonella group E1"
+  },
+  {
+    "code": "SALGA",
+    "description": "Salmonella group A"
+  },
+  {
+    "code": "SALGB",
+    "description": "Salmonella group B"
+  },
+  {
+    "code": "SALGD",
+    "description": "Salmonella group D"
+  },
+  {
+    "code": "SALGK",
+    "description": "Salmonella group K"
+  },
+  {
+    "code": "SALM",
+    "description": "@sal1 @salty"
+  },
+  {
+    "code": "SALMO",
+    "description": "Salmonella species"
+  },
+  {
+    "code": "SALPA",
+    "description": "Salmonella paratyphi A"
+  },
+  {
+    "code": "SALTM",
+    "description": "Salmonella typhi-murium"
+  },
+  {
+    "code": "SALTY",
+    "description": "Salmonella typhi"
+  },
+  {
+    "code": "SCLOX",
+    "description": "Susceptible Cloxacillin"
+  },
+  {
+    "code": "SCOBR",
+    "description": "Scopulariopsis brevicaulis"
+  },
+  {
+    "code": "SCOPU",
+    "description": "Scopulariopsis species"
+  },
+  {
+    "code": "SCYTA",
+    "description": "Scytalidium species"
+  },
+  {
+    "code": "SEPED",
+    "description": "Sepedonium species"
+  },
+  {
+    "code": "SERFI",
+    "description": "Serratia ficania"
+  },
+  {
+    "code": "SERFO",
+    "description": "Serratia fonticola"
+  },
+  {
+    "code": "SERLI",
+    "description": "Serratia liquefaciens"
+  },
+  {
+    "code": "SERMA",
+    "description": "Serratia marcescens"
+  },
+  {
+    "code": "SEROD",
+    "description": "Serratia odorifera"
+  },
+  {
+    "code": "SERPL",
+    "description": "Serratia plymuthica"
+  },
+  {
+    "code": "SERRA",
+    "description": "Serratia species"
+  },
+  {
+    "code": "SERRU",
+    "description": "Serratia rubideae"
+  },
+  {
+    "code": "SHIBO",
+    "description": "Shigella boydii"
+  },
+  {
+    "code": "SHIDY",
+    "description": "Shigella dysenteriae"
+  },
+  {
+    "code": "SHIF1",
+    "description": "Shigella flexneri type 1"
+  },
+  {
+    "code": "SHIF2",
+    "description": "Shigella flexneri type 2"
+  },
+  {
+    "code": "SHIF3",
+    "description": "Shigella flexneri type 3"
+  },
+  {
+    "code": "SHIF4",
+    "description": "Shigella flexneri type 4"
+  },
+  {
+    "code": "SHIF5",
+    "description": "Shigella flexneri type 5"
+  },
+  {
+    "code": "SHIF6",
+    "description": "Shigella flexneri type 6"
+  },
+  {
+    "code": "SHIFL",
+    "description": "Shigella flexneri"
+  },
+  {
+    "code": "SHIFX",
+    "description": "Shigella flexneri type X"
+  },
+  {
+    "code": "SHIFY",
+    "description": "Shigella flexneri type Y"
+  },
+  {
+    "code": "SHIG-",
+    "description": "@shige @nisol"
+  },
+  {
+    "code": "SHIGE",
+    "description": "Shigella species"
+  },
+  {
+    "code": "SHISO",
+    "description": "Shigella sonnei"
+  },
+  {
+    "code": "SMET",
+    "description": "Susceptible to Metronidazole"
+  },
+  {
+    "code": "SPEN",
+    "description": "Susceptible to Penicillin"
+  },
+  {
+    "code": "SPORO",
+    "description": "Sporobolomyces species"
+  },
+  {
+    "code": "SPOSC",
+    "description": "Sporothrix schenckii"
+  },
+  {
+    "code": "SS-",
+    "description": "Salmonella and Shigella @nisol"
+  },
+  {
+    "code": "STAAU",
+    "description": "Staphylococcus aureus"
+  },
+  {
+    "code": "STAEP",
+    "description": "Staphylococcus epidermidis"
+  },
+  {
+    "code": "STAHA",
+    "description": "Staphylococcus haemolyticus"
+  },
+  {
+    "code": "STALU",
+    "description": "Staphylococcus lugdenensis"
+  },
+  {
+    "code": "STAPH",
+    "description": "Staphylococcus species"
+  },
+  {
+    "code": "STASA",
+    "description": "Staphylococcus saprophyticus"
+  },
+  {
+    "code": "STAU-",
+    "description": "@staau @nisol"
+  },
+  {
+    "code": "STAU+",
+    "description": "@staau @isol"
+  },
+  {
+    "code": "STEMP",
+    "description": "Stemphylium species"
+  },
+  {
+    "code": "STEP-",
+    "description": "@staep @nisol"
+  },
+  {
+    "code": "STEP+",
+    "description": "@staep @isol"
+  },
+  {
+    "code": "STRAG",
+    "description": "Streptococcus agalactiae"
+  },
+  {
+    "code": "STRAN",
+    "description": "Streptococcus anginosis"
+  },
+  {
+    "code": "STRBO",
+    "description": "Streptococcus bovis"
+  },
+  {
+    "code": "STRDY",
+    "description": "Streptococcus dysgalactiae"
+  },
+  {
+    "code": "STREB",
+    "description": "Streptobacillus species"
+  },
+  {
+    "code": "STREM",
+    "description": "Streptomyces species"
+  },
+  {
+    "code": "STREP",
+    "description": "Streptococcus species"
+  },
+  {
+    "code": "STREQ",
+    "description": "Streptococcus equisimilis"
+  },
+  {
+    "code": "STRFA",
+    "description": "Streptococcus faecalis"
+  },
+  {
+    "code": "STRFE",
+    "description": "Streptococcus faecium"
+  },
+  {
+    "code": "STRGA",
+    "description": "Streptococcus Group A"
+  },
+  {
+    "code": "STRGB",
+    "description": "Streptococcus Group B"
+  },
+  {
+    "code": "STRGC",
+    "description": "Streptococcus Group C"
+  },
+  {
+    "code": "STRGD",
+    "description": "Streptococcus Group D"
+  },
+  {
+    "code": "STRGF",
+    "description": "Streptococcus Group F"
+  },
+  {
+    "code": "STRGG",
+    "description": "Streptococcus Group G"
+  },
+  {
+    "code": "STRMI",
+    "description": "Streptococcus milleri"
+  },
+  {
+    "code": "STRML",
+    "description": "Streptococcus milleri"
+  },
+  {
+    "code": "STRMS",
+    "description": "Streptococcus mitis"
+  },
+  {
+    "code": "STRMT",
+    "description": "Streptococcus mitior"
+  },
+  {
+    "code": "STRMU",
+    "description": "Streptococcus mutans"
+  },
+  {
+    "code": "STRMY",
+    "description": "Streptomyces species"
+  },
+  {
+    "code": "STRPN",
+    "description": "Streptococcus pneumoniae"
+  },
+  {
+    "code": "STRPY",
+    "description": "Streptococcus pyogenes"
+  },
+  {
+    "code": "STRSA",
+    "description": "Streptococcus sanguis"
+  },
+  {
+    "code": "STRSL",
+    "description": "Streptococcus salivarius"
+  },
+  {
+    "code": "STRSO",
+    "description": "Streptomyces somaliensis"
+  },
+  {
+    "code": "STRVI",
+    "description": "Streptococcus viridans"
+  },
+  {
+    "code": "SUB",
+    "description": "(on sub-culture only)"
+  },
+  {
+    "code": "SYNCE",
+    "description": "Syncephelastrum species"
+  },
+  {
+    "code": "TF",
+    "description": "Report to follow"
+  },
+  {
+    "code": "TORCA",
+    "description": "Torulopsis candida"
+  },
+  {
+    "code": "TORGL",
+    "description": "Torulopsis glabrata"
+  },
+  {
+    "code": "TORIN",
+    "description": "Torulopsis inconspicua"
+  },
+  {
+    "code": "TRIBE",
+    "description": "Trichosporan beigelli"
+  },
+  {
+    "code": "TRICH",
+    "description": "Trichosporan species"
+  },
+  {
+    "code": "TRICO",
+    "description": "Tricothecium species"
+  },
+  {
+    "code": "TRICU",
+    "description": "Trichophyton cutaneum"
+  },
+  {
+    "code": "TRIEQ",
+    "description": "Trichophyton equinum"
+  },
+  {
+    "code": "TRIME",
+    "description": "Trichophyton mentagrophytes"
+  },
+  {
+    "code": "TRIPU",
+    "description": "Trichosporan pululans"
+  },
+  {
+    "code": "TRIRU",
+    "description": "Trichophyton rubrum"
+  },
+  {
+    "code": "TRISC",
+    "description": "Trichophyton schoenleinii"
+  },
+  {
+    "code": "TRISO",
+    "description": "Trichophyton soudanense"
+  },
+  {
+    "code": "TRITO",
+    "description": "Trichophyton tonsurans"
+  },
+  {
+    "code": "TRIVE",
+    "description": "Trichophyton verrucosum"
+  },
+  {
+    "code": "TRIVI",
+    "description": "Trichophyton violaceum"
+  },
+  {
+    "code": "TRIVR",
+    "description": "Trichoderma viride"
+  },
+  {
+    "code": "TRIYA",
+    "description": "Trichophyton yaoundii"
+  },
+  {
+    "code": "TWR",
+    "description": "Please treat results with"
+  },
+  {
+    "code": "TYP1",
+    "description": "Salmonella isolated-possibly"
+  },
+  {
+    "code": "TYPH-",
+    "description": "Salmonella typhi NOT isolated"
+  },
+  {
+    "code": "TYPH+",
+    "description": "@typ1 @salty"
+  },
+  {
+    "code": "ULOCL",
+    "description": "Ulocladium species"
+  },
+  {
+    "code": "UREUR",
+    "description": "Ureaplasma urealyticum"
+  },
+  {
+    "code": "USTIL",
+    "description": "Ustilago species"
+  },
+  {
+    "code": "VC013",
+    "description": "Vibrio cholera 0139"
+  },
+  {
+    "code": "VEIAL",
+    "description": "Veillonella alcalescens"
+  },
+  {
+    "code": "VEILL",
+    "description": "Veillonella species"
+  },
+  {
+    "code": "VEIPA",
+    "description": "Veillonella parvula"
+  },
+  {
+    "code": "VERTI",
+    "description": "Verticillium species"
+  },
+  {
+    "code": "VIBAG",
+    "description": "Vibrio aglinolyticus"
+  },
+  {
+    "code": "VIBCH",
+    "description": "Vibrio cholera"
+  },
+  {
+    "code": "VIBCI",
+    "description": "Vibrio cholera 01 Inaba"
+  },
+  {
+    "code": "VIBCO",
+    "description": "Vibrio cholera 01 Ogawa"
+  },
+  {
+    "code": "VIBME",
+    "description": "Vibrio metchnikovii"
+  },
+  {
+    "code": "VIBNA",
+    "description": "@vibch - non agglutinable"
+  },
+  {
+    "code": "VIBPA",
+    "description": "Vibrio parahaemolyticus"
+  },
+  {
+    "code": "VIBRI",
+    "description": "Vibrio species"
+  },
+  {
+    "code": "VICHI",
+    "description": "Vibrio cholera 01 Hikojima"
+  },
+  {
+    "code": "WANDE",
+    "description": "Wangiella dermatitidis"
+  },
+  {
+    "code": "WEEVI",
+    "description": "Weeksella virosa"
+  },
+  {
+    "code": "XANMA",
+    "description": "Xanthomonas maltophilia"
+  },
+  {
+    "code": "XYLBA",
+    "description": "Xylohyphae bantiana"
+  },
+  {
+    "code": "YEREN",
+    "description": "Yersinia enterocolitica"
+  },
+  {
+    "code": "YERPE",
+    "description": "Yersinia pestis"
+  },
+  {
+    "code": "YERPS",
+    "description": "Yersinia pseudotuberculosis"
+  },
+  {
+    "code": "YERSI",
+    "description": "Yersinia species"
+  },
+  {
+    "code": "YNCA",
+    "description": "Yeast not Candida albicans"
+  },
+  {
+    "code": "ZYGOS",
+    "description": "Zygosaccharomyces"
+  }
+]
