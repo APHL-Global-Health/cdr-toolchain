@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toFhir } from "./fhir-transform.js";
-import type { V2Payload, V2LabResult } from "./types.js";
+import type { V2Payload, V2LabResult, V2Isolate, V2SusceptibilityTest } from "./types.js";
 
 const TZ = { tzOffset: "+02:00" };
 
@@ -316,4 +316,133 @@ test("Observation ids are unique across many results", () => {
 test("no DiagnosticReport.result key when there are no results", () => {
   const dr = findOne(toFhir(basePayload(), TZ), "DiagnosticReport");
   assert.equal("result" in dr, false);
+});
+
+function isolate(over: Partial<V2Isolate> = {}): V2Isolate {
+  return {
+    isolate_index: 1, source_test_code: "CULT",
+    organism_code: {
+      concept_code: "ECO", display_name: "Escherichia coli",
+      concept_class: "organism", datatype: "coded",
+    },
+    organism_type: "bacteria", isolate_number: "1", serotype: null,
+    patient_age_days: null, patient_sex: "F", ward: null, ward_type: null,
+    origin: null, beta_lactamase: null, esbl: null, carbapenemase: null,
+    mrsa_screen: null, inducible_clinda: null, custom_fields: null,
+    raw_result: {}, ...over,
+  };
+}
+
+function ast(over: Partial<V2SusceptibilityTest> = {}): V2SusceptibilityTest {
+  return {
+    isolate_index: 1, source_test_code: "SENS",
+    antibiotic_code: {
+      concept_code: "AMP", display_name: "Ampicillin",
+      concept_class: "antibiotic", datatype: "coded",
+    },
+    test_method: "DISK", disk_potency: null, result_raw: "R",
+    result_numeric: null, susceptibility_value: "R", quantitative_value: null,
+    guideline: "CLSI", guideline_version: null, raw_result: {}, ...over,
+  };
+}
+
+const findIsolate = (out: unknown[]) =>
+  out.find((r: any) => r.resourceType === "Observation" && r.valueCodeableConcept?.coding?.[0]?.code === "ECO") as any;
+const findAbx = (out: unknown[], code = "AMP") =>
+  out.find((r: any) => r.resourceType === "Observation" && r.code?.coding?.[0]?.code === code) as any;
+
+test("an isolate becomes an Observation linked from the report", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()] }), TZ);
+  const iso = findIsolate(out);
+  assert.ok(iso, "expected an isolate Observation carrying the organism code");
+  assert.equal(iso.status, "final");
+  assert.ok(iso.code, "CE requires Observation.code");
+  const dr = findOne(out, "DiagnosticReport");
+  assert.equal(dr.result.some((r: any) => r.reference === `Observation/${iso.id}`), true);
+});
+
+test("AST hangs off its isolate via hasMember", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()], susceptibility_tests: [ast()] }), TZ);
+  const iso = findIsolate(out);
+  const abx = findAbx(out);
+  assert.ok(abx, "expected an AST Observation for the antibiotic");
+  assert.equal(iso.hasMember.some((m: any) => m.reference === `Observation/${abx.id}`), true);
+  // S/I/R lands as interpretation — inverts hl7-fhir.schema.js:528-553.
+  assert.equal(abx.interpretation[0].coding[0].code, "R");
+});
+
+test("ASTs are NOT indexed directly by the report — they hang off the isolate", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()], susceptibility_tests: [ast()] }), TZ);
+  const dr = findOne(out, "DiagnosticReport");
+  const abx = findAbx(out);
+  assert.equal(dr.result.some((r: any) => r.reference === `Observation/${abx.id}`), false);
+});
+
+test("AST with no matching isolate_index is still emitted, not silently dropped", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()], susceptibility_tests: [ast({ isolate_index: 99 })] }), TZ);
+  assert.ok(findAbx(out), "an orphan AST must not vanish from the payload");
+});
+
+test("a null isolate_index AST is still emitted", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()], susceptibility_tests: [ast({ isolate_index: null })] }), TZ);
+  assert.ok(findAbx(out), "an unlinked AST must not vanish");
+});
+
+test("MIC test_method carries the quantitative value", () => {
+  const out = toFhir(basePayload({
+    isolates: [isolate()],
+    susceptibility_tests: [ast({ test_method: "MIC", result_numeric: 0.5, quantitative_value: "<=0.5" })],
+  }), TZ);
+  const abx = findAbx(out);
+  assert.equal(abx.component[0].valueQuantity.value, 0.5);
+  assert.equal(abx.method.text, "MIC");
+});
+
+test("multiple isolates each get their own ASTs", () => {
+  const out = toFhir(basePayload({
+    isolates: [isolate(), isolate({ isolate_index: 2, organism_code: {
+      concept_code: "SAU", display_name: "Staphylococcus aureus",
+      concept_class: "organism", datatype: "coded" } })],
+    susceptibility_tests: [ast(), ast({ isolate_index: 2, antibiotic_code: {
+      concept_code: "OXA", display_name: "Oxacillin",
+      concept_class: "antibiotic", datatype: "coded" } })],
+  }), TZ);
+  const iso1 = findIsolate(out);
+  const iso2 = out.find((r: any) => r.valueCodeableConcept?.coding?.[0]?.code === "SAU") as any;
+  const amp = findAbx(out, "AMP");
+  const oxa = findAbx(out, "OXA");
+  assert.equal(iso1.hasMember.length, 1);
+  assert.equal(iso2.hasMember.length, 1);
+  assert.equal(iso1.hasMember[0].reference, `Observation/${amp.id}`);
+  assert.equal(iso2.hasMember[0].reference, `Observation/${oxa.id}`);
+});
+
+test("one isolate with several ASTs collects them all", () => {
+  const out = toFhir(basePayload({
+    isolates: [isolate()],
+    susceptibility_tests: [ast(), ast({ antibiotic_code: {
+      concept_code: "GEN", display_name: "Gentamicin",
+      concept_class: "antibiotic", datatype: "coded" } })],
+  }), TZ);
+  assert.equal(findIsolate(out).hasMember.length, 2);
+});
+
+test("all Observation ids are unique across results, isolates and ASTs", () => {
+  const out = toFhir(basePayload({
+    lab_results: [], isolates: [isolate()], susceptibility_tests: [ast()],
+  }), TZ);
+  // Keyed by resourceType/id, not bare id: a Patient and a DiagnosticReport
+  // sharing a literal id string is valid FHIR (references are always
+  // ResourceType/id) — basePayload's default patient_guid === request_id
+  // means Patient/ServiceRequest/DiagnosticReport already share one id, so a
+  // bare-id check would false-positive on that pre-existing, correct overlap.
+  const ids = out
+    .filter((r: any) => r.id !== undefined)
+    .map((r: any) => `${r.resourceType}/${r.id}`);
+  assert.equal(new Set(ids).size, ids.length, "duplicate ids would collide on persist");
+});
+
+test("an isolate with no ASTs has no hasMember key", () => {
+  const out = toFhir(basePayload({ isolates: [isolate()] }), TZ);
+  assert.equal("hasMember" in findIsolate(out), false);
 });

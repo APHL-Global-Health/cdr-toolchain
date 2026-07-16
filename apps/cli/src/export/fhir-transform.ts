@@ -6,7 +6,9 @@
 //   Patient <- hl7-fhir.schema.js:913-926
 //   ServiceRequest/Specimen/DiagnosticReport <- hl7-fhir.schema.js:927-956
 //   result_status <-> DiagnosticReport.status <- hl7-fhir.schema.js:300-314
-import type { V2Payload, V2Patient, V2ConceptCode, V2LabRequest, V2LabResult } from "./types.js";
+import type {
+  V2Payload, V2Patient, V2ConceptCode, V2LabRequest, V2LabResult, V2Isolate, V2SusceptibilityTest,
+} from "./types.js";
 import { fhirId, fhirDateTime, fhirText } from "./fhir-primitives.js";
 
 export type FhirResource = Record<string, unknown>;
@@ -219,6 +221,54 @@ function observationResource(
   });
 }
 
+const SIR_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation";
+
+/** Susceptibility (AST) Observation. toV2 gives isolates directly with a
+ *  source_test_code, so there is no separate culture wrapper to synthesise —
+ *  this is the leaf of a 2-tier isolate -> AST tree (hl7-fhir.schema.js:496-518
+ *  is 3-tier: culture -> isolate -> AST). */
+function astResource(
+  s: V2SusceptibilityTest, patientRef: string, rootId: string, index: number,
+): FhirResource {
+  const component =
+    s.result_numeric !== null
+      ? [{
+          code: { text: s.test_method === "MIC" ? "MIC" : "Zone diameter" },
+          valueQuantity: compact({ value: s.result_numeric }),
+        }]
+      : undefined;
+
+  return compact({
+    resourceType: "Observation",
+    id: fhirId(`${rootId}-ast-${index}`),
+    status: "final",  // CE-required
+    code: toCodeableConcept(s.antibiotic_code) ?? UNKNOWN_CODE,
+    subject: { reference: patientRef },
+    // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
+    ...(s.susceptibility_value !== null
+      ? { interpretation: [{ coding: [{ system: SIR_SYSTEM, code: s.susceptibility_value }] }] }
+      : {}),
+    ...(fhirText(s.result_raw) !== undefined ? { valueString: fhirText(s.result_raw) } : {}),
+    ...(s.test_method !== null ? { method: { text: s.test_method } } : {}),
+    ...(component !== undefined ? { component } : {}),
+    ...(fhirText(s.guideline) !== undefined ? { note: [{ text: fhirText(s.guideline) }] } : {}),
+  });
+}
+
+/** Isolate Observation — the culture-level organism finding. */
+function isolateResource(
+  iso: V2Isolate, patientRef: string, rootId: string,
+): FhirResource {
+  return compact({
+    resourceType: "Observation",
+    id: fhirId(`${rootId}-iso-${iso.isolate_index}`),
+    status: "final",  // CE-required
+    code: { text: fhirText(iso.source_test_code) ?? "Isolate" },
+    subject: { reference: patientRef },
+    valueCodeableConcept: toCodeableConcept(iso.organism_code) ?? UNKNOWN_CODE,
+  });
+}
+
 export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] {
   const rootId = fhirId(payload.lab_request.request_id);
   if (rootId === undefined) {
@@ -234,16 +284,36 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   const observations = payload.lab_results.map((r, i) =>
     observationResource(r, patientRef, rootId, i + 1, opts),
   );
+  const isolates = payload.isolates.map((iso) => isolateResource(iso, patientRef, rootId));
+  const asts = payload.susceptibility_tests.map((s, i) =>
+    astResource(s, patientRef, rootId, i + 1),
+  );
+
+  // Hang each AST off its isolate. An AST whose isolate_index matches nothing
+  // (including null, which fhirId renders as the literal "null") is still
+  // emitted — unlinked, never silently dropped.
+  payload.susceptibility_tests.forEach((s, i) => {
+    const host = isolates.find((r) => r.id === fhirId(`${rootId}-iso-${s.isolate_index}`));
+    if (host === undefined) return;
+    const members = (host.hasMember as { reference: string }[] | undefined) ?? [];
+    members.push({ reference: `Observation/${asts[i]!.id as string}` });
+    host.hasMember = members;
+  });
 
   const out = [
     patientResource(payload.patient, patientId, opts),
     ...requestResources(payload.lab_request, patientRef, rootId, opts),
     ...observations,
+    ...isolates,
+    ...asts,
   ];
 
   const dr = out.find((res) => res.resourceType === "DiagnosticReport");
-  if (dr !== undefined && observations.length > 0) {
-    dr.result = observations.map((o) => ({ reference: `Observation/${o.id as string}` }));
+  // The report indexes lab-result Observations and isolates, but NOT ASTs —
+  // those are reachable via their isolate's hasMember (2-tier tree).
+  const indexed = [...observations, ...isolates];
+  if (dr !== undefined && indexed.length > 0) {
+    dr.result = indexed.map((o) => ({ reference: `Observation/${o.id as string}` }));
   }
   return out;
 }
