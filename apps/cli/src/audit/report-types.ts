@@ -56,8 +56,8 @@ export interface ReportOpts {
 export const CLASS_DESCRIPTIONS: Record<AnomalyClass, { title: string; rule: string; severity: Severity }> = {
   panel_specimen_mismatch: {
     title: "Panel / specimen mismatch",
-    rule: "Panel description implies one specimen kind (e.g. urine, blood, CSF) but the request's specimen description implies a different kind. Caused by registration data-entry errors at lab intake.",
-    severity: "error",
+    rule: "Panel description implies one specimen kind (e.g. urine, blood, CSF) but the request's specimen description implies a different kind. Severity is conditional: when the mismatched panel produced resulted observations, the test was genuinely performed under DISA's single-specimen-per-request limitation (a mixed-specimen order inherits one recorded specimen) — demoted to warn and migrated with the recorded specimen tagged via the DEFAULT_SPEC_ANOMALY namespace. When the panel produced no observations there is no such evidence, so it stays error and quarantines.",
+    severity: "warn",
   },
   dob_after_specimen_date: {
     title: "DOB after specimen date",
