@@ -76,3 +76,28 @@ test("classification is exhaustive and total", () => {
   const valid = new Set<OrganismCategory>(["bacteria", "fungus", "parasite", "none"]);
   for (const r of rows) assert.ok(valid.has(classify(r.description)), `${r.code} = ${r.description}`);
 });
+
+test("every 'No ...' description is a negative finding, not a pathogen", () => {
+  // Measured against real v1 data: NP alone occurs 321 times. Previously these
+  // classified as `bacteria` — a negative culture reported to GLASS as a pathogen.
+  for (const code of ["NBG", "NFG", "NG", "NG48", "NMRS", "NP", "NPB", "NSB", "NSSI"]) {
+    assert.equal(categoryOf(code), "none", `${code} = ${byCode.get(code)}`);
+  }
+});
+
+test("a leading 'No' needs a word boundary — Nocardia is a bacterium", () => {
+  // The rule is ^no\b, not ^no. Without the boundary every Nocardia species
+  // would silently become a negative culture.
+  assert.equal(classify("Nocardia species"), "bacteria");
+  assert.equal(classify("Nocardia asteroides"), "bacteria");
+});
+
+test("real pathogen-ID values from live v1 classify correctly", () => {
+  // Straight from OpenLDRData.dbo.LabResults where LIMSObservationCode='ORGS'.
+  assert.equal(classify("Vibrio cholera 01 Ogawa"), "bacteria");
+  assert.equal(classify("Shigella flexneri"), "bacteria");
+  assert.equal(classify("Salmonella typhi"), "bacteria");
+  assert.equal(classify("Neisseria gonorrhoeae"), "bacteria");
+  assert.equal(classify("Gram Negative"), "bacteria");   // coded GN — used in v1, absent from the fixture
+  assert.equal(classify("No pathogens isolated"), "none");
+});
