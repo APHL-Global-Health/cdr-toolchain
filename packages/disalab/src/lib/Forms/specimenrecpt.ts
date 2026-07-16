@@ -65,13 +65,6 @@ export class SpecimenRecpt {
   TestOrders: unknown[] = [];
   TestResults: TESTDATA[] = [];
 
-  /** AUDTDATA rows for this lab, retained from Fetch. DISA's per-request
-   *  status/authorisation lives in this audit trail (WS100 register,
-   *  WL101 results-in, WA500 authorised), not in a REGDAT4 status byte.
-   *  Fetch already reads these for the WS203 name override; keeping them
-   *  costs nothing and spares callers a second query per lab. */
-  AuditRows: AUDTDATA[] = [];
-
   constructor(labno: string, server?: DisaServer) {
     this.#server = server;
     this.LabNumber = labno;
@@ -93,7 +86,6 @@ export class SpecimenRecpt {
       const rtknidx5 = await RTKNIDX5.All(`WHERE [INVOICENO] = '${labnoEsc}'`, server);
 
       const r = new SpecimenRecpt(labno, server);
-      r.AuditRows = audtdata ?? [];
 
       r.InnerLabNumber = regdat4.InnerLabNumber;
       r.ReferenceNumber = regdat4.ReferenceNumber;

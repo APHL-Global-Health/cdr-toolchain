@@ -1,4 +1,4 @@
-import type { AUDTDATA, Facility, SpecimenRecpt } from "disalab";
+import type { Facility, SpecimenRecpt } from "disalab";
 import {
   detectDisaRejection,
   flattenDisa,
@@ -8,9 +8,7 @@ import {
   type DisaRejection,
 } from "../compare/result-mapping.js";
 import type { AuditReport } from "../audit/types.js";
-import { extractAuditFacts, type AuditFacts } from "./audit-facts.js";
 import type { Codebook } from "./codebook.js";
-import { collectOrderedPanels } from "./panels.js";
 import type { SiteConfig } from "./site-config.js";
 import type {
   V2ConceptCode,
@@ -260,69 +258,6 @@ function selectPrimaryPanel(groups: PanelGroup[], codebook: Codebook): PanelGrou
 
 // ---------- lab_request ----------------------------------------------------
 
-/**
- * HL7 table 0123 result-status derivation from DISA's AUDTDATA audit trail.
- * Precedence X > I > A > R > F — a cancelled order is always "X" even if
- * some of its panels were authorised before the rejection was recorded.
- *
- *   X — order cancelled (rejection.rejected, already detected elsewhere)
- *   I — no ordered panel has a WL101 (nothing resulted yet)
- *   A — some but not all ordered panels have a WL101
- *   R — all ordered panels resulted, but not all have a WA500 (verified)
- *   F — every ordered panel has a WA500 (final)
- *
- * When there are no ordered panels at all we have no basis to assert any
- * of the above, so this returns null (unknown) rather than guessing.
- */
-export function deriveResultStatus(
-  orderedPanels: string[],
-  facts: AuditFacts,
-  rejected: boolean,
-): string | null {
-  if (rejected) return "X";
-  if (orderedPanels.length === 0) return null;
-
-  let resultedCount = 0;
-  let authorisedCount = 0;
-  for (const panelCode of orderedPanels) {
-    const slot = facts.perPanel.get(panelCode.toUpperCase());
-    if (slot !== undefined && slot.analysisAt !== null) resultedCount += 1;
-    if (slot !== undefined && slot.authorisedAt !== null) authorisedCount += 1;
-  }
-
-  if (resultedCount === 0) return "I";
-  if (resultedCount < orderedPanels.length) return "A";
-  if (authorisedCount < orderedPanels.length) return "R";
-  return "F";
-}
-
-/** Earliest WL101 ("results insert") across every panel that has one — the
- *  request as a whole is "analysed" once its first panel gets results in. */
-function earliestAnalysisAt(facts: AuditFacts): string | null {
-  let best: string | null = null;
-  for (const slot of facts.perPanel.values()) {
-    if (slot.analysisAt === null) continue;
-    if (best === null || slot.analysisAt < best) best = slot.analysisAt;
-  }
-  return best;
-}
-
-/** Latest WA500 ("print/review") across every panel that has one, plus the
- *  user on that specific event — the request is authorised when its LAST
- *  panel finishes review, not its first. */
-function latestAuthorised(facts: AuditFacts): { at: string | null; by: string } {
-  let bestAt: string | null = null;
-  let bestBy = "";
-  for (const slot of facts.perPanel.values()) {
-    if (slot.authorisedAt === null) continue;
-    if (bestAt === null || slot.authorisedAt > bestAt) {
-      bestAt = slot.authorisedAt;
-      bestBy = slot.authorisedBy;
-    }
-  }
-  return { at: bestAt, by: bestBy };
-}
-
 function buildLabRequest(
   s: SpecimenRecpt,
   primary: PanelGroup | null,
@@ -330,8 +265,6 @@ function buildLabRequest(
   site: SiteConfig,
   codebook: Codebook,
   rejection: DisaRejection,
-  audit: AuditFacts,
-  orderedPanels: string[],
 ): V2LabRequest {
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
@@ -384,16 +317,6 @@ function buildLabRequest(
 
   const sectionCode = panel?.section ?? null;
 
-  // DISA doesn't expose analysis_at/authorised_at/authorised_by/result_status
-  // directly on SpecimenRecpt — they live in the AUDTDATA audit trail
-  // (WL101 = results inserted, WA500 = authorised/reviewed), per panel.
-  // analysis_at is the EARLIEST WL101 across panels (first results in);
-  // authorised_at is the LATEST WA500 across panels (the request is only
-  // authorised once its last panel has been), with authorised_by the user
-  // on that specific event.
-  const analysisAt = earliestAnalysisAt(audit);
-  const authorised = latestAuthorised(audit);
-
   return {
     request_id: requestId,
     facility_code: facilityConcept,
@@ -403,8 +326,8 @@ function buildLabRequest(
     collected_datetime: disaToIso(s.CollectedDateTime),
     received_at: disaToIso(s.ReceivedInLabDateTime) ?? disaToIso(s.RegisteredDateTime),
     registered_at: disaToIso(s.RegisteredDateTime),
-    analysis_at: analysisAt,
-    authorised_at: authorised.at,
+    analysis_at: null,   // disalab doesn't expose analysis_at on SpecimenRecpt
+    authorised_at: null, // ditto authorised_at
     clinical_info: nz(s.ClinicalDiagnosisText) ?? nz(s.ClinicalDiagnosis),
     icd10_codes: nz(s.ICD10),
     therapy: nz(s.TherapyText) ?? nz(s.Therapy),
@@ -414,12 +337,11 @@ function buildLabRequest(
     sex: nz(s.Sex),
     patient_class: null, // not surfaced on SpecimenRecpt
     section_code: sectionCode,
-    // Derived from the AUDTDATA audit trail — see deriveResultStatus above
-    // for the HL7 table 0123 precedence (X > I > A > R > F). Rejection
-    // ("X") still takes priority, mirroring v1's rejected-request
-    // convention so v2 can treat the empty lab_results as expected rather
-    // than incomplete.
-    result_status: deriveResultStatus(orderedPanels, audit, rejection.rejected),
+    // DISA doesn't surface a per-request status on SpecimenRecpt (v1 carries
+    // it via HL7ResultStatusCode). Synthesise "X" (rejected) when the
+    // specimen was refused — mirrors v1's rejected-request convention so v2
+    // can treat the empty lab_results as expected rather than incomplete.
+    result_status: rejection.rejected ? "X" : null,
     // requesting_facility_code mirrors testing_facility_code — see the
     // comment where facilityConcept is reused for requestingFacilityConcept
     // above. DISA's data model doesn't distinguish them.
@@ -427,7 +349,7 @@ function buildLabRequest(
     testing_facility_code: facilityConcept,
     requesting_doctor: nz(s.Doctor) ?? nz(s.DoctorCode),
     tested_by: nz(s.ReceivedInLabBy) ?? nz(s.TakenBy) ?? nz(s.CollectedBy),
-    authorised_by: nz(authorised.by),
+    authorised_by: null,
     source_payload: {
       // Raw DISA ward code, preserved even when we have a resolved name —
       // downstream consumers may want to round-trip the original key.
@@ -698,11 +620,6 @@ export interface ToV2Opts {
    *  building lab_results / isolates / panel selection — used to route
    *  documentation observations to the forms feed instead. */
   excludeObs?: (o: DisaObs) => boolean;
-  /** AUDTDATA rows for this lab, mirroring ToV1Opts.auditRows. Used to
-   *  derive analysis_at / authorised_at / authorised_by / result_status.
-   *  Pass an empty array (or omit) when the audit trail is unavailable —
-   *  those fields degrade to null rather than failing. */
-  auditRows?: AUDTDATA[];
 }
 
 function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
@@ -732,18 +649,7 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const groups = groupByPanel(obs);
   const primary = selectPrimaryPanel(groups, opts.codebook);
   const rejection = detectDisaRejection(specimen);
-  const auditFacts = extractAuditFacts(opts.auditRows ?? []);
-  const orderedPanels = collectOrderedPanels(specimen);
-  const labRequest = buildLabRequest(
-    specimen,
-    primary,
-    opts.prefix,
-    opts.site,
-    opts.codebook,
-    rejection,
-    auditFacts,
-    orderedPanels,
-  );
+  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook, rejection);
   const patient = buildPatient(specimen, labRequest.received_at ?? labRequest.collected_datetime ?? labRequest.taken_datetime, labRequest.request_id);
   // Order matters: isolates first so lab_results can attach isolate_index
   // and AST tests can resolve the nearest-isolate linkage.

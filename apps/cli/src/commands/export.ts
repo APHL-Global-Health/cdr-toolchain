@@ -268,8 +268,6 @@ export function registerExportCommand(program: Command): void {
             // may still need the audit for quarantine but not annotate
             // the outgoing payload.
             auditReport: dataQualityEnabled ? auditReport : null,
-            // Retained on SpecimenRecpt by Fetch — no extra query needed.
-            auditRows: disa.AuditRows,
           });
 
       // Quarantine: if the audit report's max severity meets the threshold,
