@@ -162,8 +162,18 @@ test("result_status maps to DiagnosticReport.status", () => {
   assert.equal(s("C"), "corrected");
   assert.equal(s("X"), "cancelled");
   assert.equal(s("R"), "registered");
+  // hl7-fhir.schema.js:309 maps "partial" -> I, so the inverse is I -> partial.
+  assert.equal(s("I"), "partial");
   assert.equal(s(null), "unknown");     // never omit — CE requires status
   assert.equal(s("banana"), "unknown"); // unknown code must not crash or omit
+});
+
+test("a cancelled result revokes the ServiceRequest rather than completing it", () => {
+  const pl = basePayload();
+  pl.lab_request.result_status = "X";
+  const out = toFhir(pl, TZ);
+  assert.equal(findOne(out, "DiagnosticReport").status, "cancelled");
+  assert.equal(findOne(out, "ServiceRequest").status, "revoked");
 });
 
 test("a null panel_code still yields a DiagnosticReport with a code", () => {
@@ -445,4 +455,22 @@ test("all Observation ids are unique across results, isolates and ASTs", () => {
 test("an isolate with no ASTs has no hasMember key", () => {
   const out = toFhir(basePayload({ isolates: [isolate()] }), TZ);
   assert.equal("hasMember" in findIsolate(out), false);
+});
+
+test("duplicate isolate_index is refused rather than silently collapsed", () => {
+  // Both would emit the same Observation id; CE upserts on (resource_type,id),
+  // so the survivor would be the one WITHOUT its hasMember link.
+  const pl = basePayload({ isolates: [isolate(), isolate()] }); // both index 1
+  assert.throws(() => toFhir(pl, TZ), /duplicate isolate_index/);
+});
+
+test("an unknown test_method does not assert a measurement type", () => {
+  const out = toFhir(basePayload({
+    isolates: [isolate()],
+    susceptibility_tests: [ast({ test_method: null, result_numeric: 12 })],
+  }), TZ);
+  const abx = findAbx(out);
+  assert.equal(abx.component[0].valueQuantity.value, 12);
+  assert.equal("code" in abx.component[0], false);
+  assert.equal("method" in abx, false);
 });

@@ -104,10 +104,21 @@ function toReportStatus(rs: string | null): string {
     case "C": return "corrected";
     case "X": return "cancelled";
     case "R": return "registered";
-    case "I": return "registered";
+    case "I": return "partial";  // :309 maps "partial" -> I; this is its inverse
     default: return "unknown";
   }
 }
+
+/** A cancelled result means the ORDER was revoked — ServiceRequest has no
+ *  "cancelled". Anything else: this mapper only runs over resulted records,
+ *  so the order is definitionally complete. */
+function toRequestStatus(rs: string | null): string {
+  return (rs ?? "").trim().toUpperCase() === "X" ? "revoked" : "completed";
+}
+
+/** Interpretation coding system — carries lab abnormal_flag (H/L/...) as well
+ *  as susceptibility S/I/R; both are ObservationInterpretation values. */
+const INTERPRETATION_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation";
 
 /** CE requires DiagnosticReport.code, but DISA can leave the panel absent.
  *  data-absent-reason says "we don't know" honestly rather than inventing one. */
@@ -125,8 +136,9 @@ function requestResources(
   out.push(compact({
     resourceType: "ServiceRequest",
     id: rootId,
-    status: "completed",     // CE-required
-    intent: "order",         // CE-required
+    // Must not contradict the co-located DiagnosticReport.status.
+    status: toRequestStatus(lr.result_status),  // CE-required
+    intent: "order",                            // CE-required
     subject: { reference: patientRef },
     code: panel,
     ...(fhirText(lr.clinical_info) !== undefined
@@ -215,13 +227,11 @@ function observationResource(
     // The v2 reference nulls these on its FHIR path (:802-805) but populates
     // them on its v2 path (:192-194) — going FHIR-ward we map rather than drop.
     ...(flag !== undefined
-      ? { interpretation: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", code: flag }] }] }
+      ? { interpretation: [{ coding: [{ system: INTERPRETATION_SYSTEM, code: flag }] }] }
       : {}),
     ...(refRange !== undefined ? { referenceRange: [refRange] } : {}),
   });
 }
-
-const SIR_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation";
 
 /** Susceptibility (AST) Observation. toV2 gives isolates directly with a
  *  source_test_code, so there is no separate culture wrapper to synthesise —
@@ -230,12 +240,16 @@ const SIR_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpre
 function astResource(
   s: V2SusceptibilityTest, patientRef: string, rootId: string, index: number,
 ): FhirResource {
+  // An unknown test_method asserts no measurement type — mirrors how the
+  // sibling `method` field omits itself rather than guessing "Zone diameter".
   const component =
     s.result_numeric !== null
-      ? [{
-          code: { text: s.test_method === "MIC" ? "MIC" : "Zone diameter" },
+      ? [compact({
+          ...(s.test_method !== null
+            ? { code: { text: s.test_method === "MIC" ? "MIC" : "Zone diameter" } }
+            : {}),
           valueQuantity: compact({ value: s.result_numeric }),
-        }]
+        })]
       : undefined;
 
   return compact({
@@ -246,7 +260,7 @@ function astResource(
     subject: { reference: patientRef },
     // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
     ...(s.susceptibility_value !== null
-      ? { interpretation: [{ coding: [{ system: SIR_SYSTEM, code: s.susceptibility_value }] }] }
+      ? { interpretation: [{ coding: [{ system: INTERPRETATION_SYSTEM, code: s.susceptibility_value }] }] }
       : {}),
     ...(fhirText(s.result_raw) !== undefined ? { valueString: fhirText(s.result_raw) } : {}),
     ...(s.test_method !== null ? { method: { text: s.test_method } } : {}),
@@ -284,16 +298,30 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   const observations = payload.lab_results.map((r, i) =>
     observationResource(r, patientRef, rootId, i + 1, opts),
   );
-  const isolates = payload.isolates.map((iso) => isolateResource(iso, patientRef, rootId));
+  // isolate_index is V2's join key between isolates and their ASTs. Duplicates
+  // would collide on CE's (resource_type, id) upsert: the survivor would be the
+  // LAST written, but hasMember would have been linked to the FIRST — silently
+  // orphaning an AST. Upstream (v2-transform.ts:526) assigns i+1 per request so
+  // this cannot happen today; we refuse rather than rely on that staying true.
+  const byIndex = new Map<number, FhirResource>();
+  for (const iso of payload.isolates) {
+    if (byIndex.has(iso.isolate_index)) {
+      throw new Error(
+        `duplicate isolate_index ${iso.isolate_index} in ${payload.lab_request.request_id} — cannot map isolates unambiguously`,
+      );
+    }
+    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId));
+  }
+  const isolates = [...byIndex.values()];
+
   const asts = payload.susceptibility_tests.map((s, i) =>
     astResource(s, patientRef, rootId, i + 1),
   );
 
   // Hang each AST off its isolate. An AST whose isolate_index matches nothing
-  // (including null, which fhirId renders as the literal "null") is still
-  // emitted — unlinked, never silently dropped.
+  // (or is null) is still emitted — unlinked, never silently dropped.
   payload.susceptibility_tests.forEach((s, i) => {
-    const host = isolates.find((r) => r.id === fhirId(`${rootId}-iso-${s.isolate_index}`));
+    const host = s.isolate_index === null ? undefined : byIndex.get(s.isolate_index);
     if (host === undefined) return;
     const members = (host.hasMember as { reference: string }[] | undefined) ?? [];
     members.push({ reference: `Observation/${asts[i]!.id as string}` });
