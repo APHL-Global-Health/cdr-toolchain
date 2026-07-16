@@ -6,7 +6,7 @@
 //   Patient <- hl7-fhir.schema.js:913-926
 //   ServiceRequest/Specimen/DiagnosticReport <- hl7-fhir.schema.js:927-956
 //   result_status <-> DiagnosticReport.status <- hl7-fhir.schema.js:300-314
-import type { V2Payload, V2Patient, V2ConceptCode, V2LabRequest } from "./types.js";
+import type { V2Payload, V2Patient, V2ConceptCode, V2LabRequest, V2LabResult } from "./types.js";
 import { fhirId, fhirDateTime, fhirText } from "./fhir-primitives.js";
 
 export type FhirResource = Record<string, unknown>;
@@ -161,6 +161,64 @@ function requestResources(
   return out;
 }
 
+/** "4.0-11.0" -> {low,high}; anything else -> {text}. Never returns undefined
+ *  for a non-empty input, so a range is preserved either way. */
+function toReferenceRange(
+  range: string | null, unit: string | undefined,
+): Record<string, unknown> | undefined {
+  const t = fhirText(range);
+  if (t === undefined) return undefined;
+  const m = /^\s*(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)\s*$/.exec(t);
+  if (m !== null) {
+    return {
+      low: compact({ value: Number(m[1]), unit }),
+      high: compact({ value: Number(m[2]), unit }),
+    };
+  }
+  return { text: t };
+}
+
+function observationResource(
+  r: V2LabResult, patientRef: string, rootId: string, index: number, opts: ToFhirOptions,
+): FhirResource {
+  const unit = fhirText(r.numeric_units) ?? fhirText(r.rpt_units);
+
+  // value[x] — at most one. Order inverts hl7-fhir.schema.js:324-334.
+  let value: Record<string, unknown> = {};
+  if (r.numeric_value !== null) {
+    value = { valueQuantity: compact({ value: r.numeric_value, unit }) };
+  } else if (fhirText(r.coded_value) !== undefined) {
+    value = {
+      valueCodeableConcept: compact({
+        coding: [compact({ code: fhirText(r.coded_value), display: fhirText(r.result_value) })],
+        text: fhirText(r.result_value),
+      }),
+    };
+  } else {
+    const s = fhirText(r.result_value) ?? fhirText(r.text_value);
+    if (s !== undefined) value = { valueString: s };
+  }
+
+  const flag = fhirText(r.abnormal_flag);
+  const refRange = toReferenceRange(r.rpt_range, unit);
+
+  return compact({
+    resourceType: "Observation",
+    id: fhirId(`${rootId}-obs-${index}`),
+    status: "final",  // CE-required
+    code: toCodeableConcept(r.observation_code) ?? UNKNOWN_CODE,
+    subject: { reference: patientRef },
+    effectiveDateTime: fhirDateTime(r.result_timestamp, opts.tzOffset),
+    ...value,
+    // The v2 reference nulls these on its FHIR path (:802-805) but populates
+    // them on its v2 path (:192-194) — going FHIR-ward we map rather than drop.
+    ...(flag !== undefined
+      ? { interpretation: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", code: flag }] }] }
+      : {}),
+    ...(refRange !== undefined ? { referenceRange: [refRange] } : {}),
+  });
+}
+
 export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] {
   const rootId = fhirId(payload.lab_request.request_id);
   if (rootId === undefined) {
@@ -172,8 +230,20 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   // no patient identity — so there is no cross-visit patient dedup.
   const patientId = fhirId(payload.patient.patient_guid) ?? rootId;
   const patientRef = `Patient/${patientId}`;
-  return [
+
+  const observations = payload.lab_results.map((r, i) =>
+    observationResource(r, patientRef, rootId, i + 1, opts),
+  );
+
+  const out = [
     patientResource(payload.patient, patientId, opts),
     ...requestResources(payload.lab_request, patientRef, rootId, opts),
+    ...observations,
   ];
+
+  const dr = out.find((res) => res.resourceType === "DiagnosticReport");
+  if (dr !== undefined && observations.length > 0) {
+    dr.result = observations.map((o) => ({ reference: `Observation/${o.id as string}` }));
+  }
+  return out;
 }

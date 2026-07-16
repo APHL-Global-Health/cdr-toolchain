@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toFhir } from "./fhir-transform.js";
-import type { V2Payload } from "./types.js";
+import type { V2Payload, V2LabResult } from "./types.js";
 
 const TZ = { tzOffset: "+02:00" };
 
@@ -213,4 +213,107 @@ test("every emitted id satisfies CE's ID_RE", () => {
     const id = (r as any).id;
     if (id !== undefined) assert.match(id, CE_ID_RE, `${(r as any).resourceType} id "${id}"`);
   }
+});
+
+function labResult(over: Partial<V2LabResult> = {}): V2LabResult {
+  return {
+    source_test_code: "CULT", obx_set_id: 1, obx_sub_id: 0,
+    observation_code: {
+      concept_code: "WBC", display_name: "White Blood Cell Count",
+      concept_class: "test", datatype: "numeric", system_id: "DEFAULT_TEST",
+    },
+    result_value: "15.2", result_type: "NM", numeric_value: 15.2,
+    coded_value: null, text_value: null, numeric_units: "x10^9/L",
+    abnormal_flag: null, rpt_units: null, rpt_flag: null, rpt_range: null,
+    result_timestamp: null, isolate_index: null, is_resulted: true,
+    raw_result: {}, ...over,
+  };
+}
+
+test("numeric lab_result becomes an Observation with valueQuantity", () => {
+  const pl = basePayload({ lab_results: [labResult()] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.status, "final");           // CE-required
+  assert.equal(o.code.coding[0].code, "WBC");
+  assert.equal(o.valueQuantity.value, 15.2);
+  assert.equal(o.valueQuantity.unit, "x10^9/L");
+  assert.equal(o.subject.reference, "Patient/DEFAULT-REQ-2024-00456");
+});
+
+test("abnormal_flag maps to interpretation and rpt_range to referenceRange", () => {
+  // The v2 reference nulls both on its FHIR path; going FHIR-ward we map them.
+  const pl = basePayload({ lab_results: [labResult({ abnormal_flag: "H", rpt_range: "4.0-11.0" })] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.interpretation[0].coding[0].code, "H");
+  assert.equal(o.referenceRange[0].low.value, 4.0);
+  assert.equal(o.referenceRange[0].high.value, 11.0);
+  assert.equal(o.referenceRange[0].low.unit, "x10^9/L");
+});
+
+test("a non-numeric range falls back to referenceRange.text", () => {
+  const pl = basePayload({ lab_results: [labResult({ rpt_range: "negative" })] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.referenceRange[0].text, "negative");
+});
+
+test("a negative-bounded range still parses", () => {
+  const pl = basePayload({ lab_results: [labResult({ rpt_range: "-5 - 5" })] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.referenceRange[0].low.value, -5);
+  assert.equal(o.referenceRange[0].high.value, 5);
+});
+
+test("coded and string results pick the right value[x]", () => {
+  const coded = basePayload({
+    lab_results: [labResult({ result_type: "CE", numeric_value: null, coded_value: "ECO", result_value: "Escherichia coli" })],
+  });
+  assert.equal((findOne(toFhir(coded, TZ), "Observation") as any).valueCodeableConcept.coding[0].code, "ECO");
+
+  const str = basePayload({
+    lab_results: [labResult({ result_type: "ST", numeric_value: null, coded_value: null, result_value: "turbid" })],
+  });
+  assert.equal((findOne(toFhir(str, TZ), "Observation") as any).valueString, "turbid");
+});
+
+test("an Observation with no value at all is still emitted and valid", () => {
+  // is_resulted:false — an ordered-but-unresulted test. CE requires status+code
+  // but no value; the record must survive rather than vanish.
+  const pl = basePayload({
+    lab_results: [labResult({ result_value: null, numeric_value: null, coded_value: null, text_value: null, is_resulted: false })],
+  });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.status, "final");
+  assert.ok(o.code);
+  assert.equal("valueQuantity" in o, false);
+  assert.equal("valueString" in o, false);
+  assert.equal("valueCodeableConcept" in o, false);
+});
+
+test("result_timestamp gains the configured offset", () => {
+  const pl = basePayload({ lab_results: [labResult({ result_timestamp: "2024-07-20T10:00:00" })] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.effectiveDateTime, "2024-07-20T10:00:00+02:00");
+});
+
+test("DiagnosticReport.result references every Observation", () => {
+  const pl = basePayload({ lab_results: [labResult(), labResult({ obx_set_id: 2 })] });
+  const out = toFhir(pl, TZ);
+  const dr = findOne(out, "DiagnosticReport");
+  const obs = out.filter((r: any) => r.resourceType === "Observation");
+  assert.equal(obs.length, 2);
+  assert.equal(dr.result.length, 2);
+  const ids = new Set(obs.map((o: any) => `Observation/${o.id}`));
+  for (const ref of dr.result) assert.equal(ids.has(ref.reference), true);
+});
+
+test("Observation ids are unique across many results", () => {
+  const pl = basePayload({ lab_results: [labResult(), labResult(), labResult()] });
+  const obs = toFhir(pl, TZ).filter((r: any) => r.resourceType === "Observation");
+  const ids = new Set(obs.map((o: any) => o.id));
+  assert.equal(ids.size, 3, "duplicate Observation ids would collide on persist");
+});
+
+test("no DiagnosticReport.result key when there are no results", () => {
+  const dr = findOne(toFhir(basePayload(), TZ), "DiagnosticReport");
+  assert.equal("result" in dr, false);
 });
