@@ -34,18 +34,44 @@ const QUESTIONNAIRE_CONTEXTS: ReadonlySet<number> = new Set([
 // Organism description heuristics applied to COMMDICT[CONTEXT=50] entries
 // to bucket each organism code into v2's organism_type enum. Order matters:
 // "no growth" / "normal flora" must be checked before bacteria default.
-const NO_GROWTH_RE = /\b(no\s*(growth|bacterial|pathogen|organism)|normal\s*flora|sterile|negative)\b/i;
-const FUNGUS_RE = /\b(candida|cryptoc|aspergillus|fusarium|trichoph|microsporum|histoplasm|mucor|yeast|fungi|mould|mold)\b/i;
+// Explicit no-growth phrasing. `no\s*(\w+[\s.]+){0,3}growth` tolerates words
+// between "no" and "growth" ("No fungal growth", "No Signf. bact. growth") while
+// `\s*` still matches the one-word "Nogrowth after 7days Icubation" (GRW7).
+// Bounded to 3 words so it cannot join a stray "no" to a distant "growth".
+const NO_GROWTH_RE = /\b(no\s*(\w+[\s.]+){0,3}(growth|bacterial|pathogen|organism)|normal\s*flora|sterile)\b/i;
+
+// Gram-stain morphology ("Gram negative bacilli") is a BACTERIAL finding. It must
+// be recognised before NEGATIVE_RE, or the word "negative" in it reads as a
+// negative culture — the bug this fix exists for.
+const GRAM_STAIN_RE = /\bgram\s*(positive|negative)\b/i;
+
+// A culture reported negative: "Aerobic culture - Negative" (BC1), "Anaerobic
+// cult - negative" (BC3). Checked AFTER gram-stain morphology.
+const NEGATIVE_RE = /\bnegative\b/i;
+
+// 16 genera appended 2026-07-16, measured against the real dictionary: they were
+// classifying as bacteria. TORGL (Torulopsis glabrata) is the old name for
+// Candida glabrata — a major drug-resistant yeast reported as a bacterium.
+const FUNGUS_RE = /\b(candida|cryptoc|aspergillus|fusarium|trichoph|microsporum|histoplasm|mucor|yeast|fungi|mould|mold|absidia|acremonium|alternaria|bipolaris|curvularia|exophiala|geotrichum|hansenula|madurella|malassezia|phialophora|pichia|rhizopus|rhodotorula|sporothrix|torulopsis)\b/i;
+
 const PARASITE_RE = /\b(plasmodi|trypanos|leishman|schistos|filari|giardia|entamoeba|cryptosporid|toxoplasm|trichomon|ascaris|strongyl|hookworm|hymenolep|taenia|necator|enterobi)\b/i;
 
 export type OrganismCategory = "bacteria" | "fungus" | "parasite" | "none";
 
 /** Bucket a COMMDICT[CONTEXT=50] organism description into v2's organism_type.
  *  Exported so the classifier can be tested against a fixture of the real
- *  dictionary without a database — see codebook-classify.test.ts. */
+ *  dictionary without a database — see codebook-classify.test.ts.
+ *
+ *  Order is load-bearing:
+ *   1. explicit no-growth wins outright ("No growth of gram negative organisms")
+ *   2. gram-stain morphology is bacteria, NOT a negative culture
+ *   3. only then does a bare "negative" mean a negative culture
+ */
 export function classify(desc: string): OrganismCategory {
   if (desc.length === 0) return "bacteria";
   if (NO_GROWTH_RE.test(desc)) return "none";
+  if (GRAM_STAIN_RE.test(desc)) return "bacteria";
+  if (NEGATIVE_RE.test(desc)) return "none";
   if (FUNGUS_RE.test(desc)) return "fungus";
   if (PARASITE_RE.test(desc)) return "parasite";
   return "bacteria";
