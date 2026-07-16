@@ -76,3 +76,49 @@ test("classification is exhaustive and total", () => {
   const valid = new Set<OrganismCategory>(["bacteria", "fungus", "parasite", "none"]);
   for (const r of rows) assert.ok(valid.has(classify(r.description)), `${r.code} = ${r.description}`);
 });
+
+test("every 'No ...' description is a negative finding, not a pathogen", () => {
+  // Measured against real v1 data: NP alone occurs 321 times. Previously these
+  // classified as `bacteria` — a negative culture reported to GLASS as a pathogen.
+  for (const code of ["NBG", "NFG", "NG", "NG48", "NMRS", "NP", "NPB", "NSB", "NSSI"]) {
+    assert.equal(categoryOf(code), "none", `${code} = ${byCode.get(code)}`);
+  }
+});
+
+test("a leading 'No' needs a word boundary — Nocardia is a bacterium", () => {
+  // The rule is ^no\b, not ^no. Without the boundary every Nocardia species
+  // would silently become a negative culture.
+  assert.equal(classify("Nocardia species"), "bacteria");
+  assert.equal(classify("Nocardia asteroides"), "bacteria");
+});
+
+test("real pathogen-ID values from live v1 classify correctly", () => {
+  // Straight from OpenLDRData.dbo.LabResults where LIMSObservationCode='ORGS'.
+  assert.equal(classify("Vibrio cholera 01 Ogawa"), "bacteria");
+  assert.equal(classify("Shigella flexneri"), "bacteria");
+  assert.equal(classify("Salmonella typhi"), "bacteria");
+  assert.equal(classify("Neisseria gonorrhoeae"), "bacteria");
+  assert.equal(classify("Gram Negative"), "bacteria");   // coded GN — used in v1, absent from the fixture
+  assert.equal(classify("No pathogens isolated"), "none");
+});
+
+test("classification matches the golden snapshot for all 647 codes", () => {
+  // The harness used to assert ~40 hand-picked codes, which is exactly how four
+  // no-growth codes (NP/NPB/NMRS/NSSI) hid in plain sight. This pins ALL of them:
+  // any classifier change now shows its full blast radius as a diff.
+  // Regenerate deliberately with scripts/dump-classify-golden.ts and REVIEW the diff.
+  //
+  // The hand-written assertions above stay: the golden is generated from the
+  // code under test, so it can only detect drift, not wrongness — a golden
+  // alone would happily enshrine a bug. The explicit assertions encode what we
+  // independently know to be true (GNB is a bacterium; NP is a negative).
+  const golden: { code: string; description: string; category: OrganismCategory }[] =
+    JSON.parse(readFileSync(resolve(import.meta.dirname, "__fixtures__/commdict-context50-golden.json"), "utf8"));
+  assert.equal(golden.length, rows.length, "golden is stale — regenerate it");
+  const drift: string[] = [];
+  for (const g of golden) {
+    const actual = classify(g.description);
+    if (actual !== g.category) drift.push(`${g.code} "${g.description}": golden=${g.category} actual=${actual}`);
+  }
+  assert.deepEqual(drift, [], `classification drifted from the golden snapshot:\n${drift.join("\n")}`);
+});

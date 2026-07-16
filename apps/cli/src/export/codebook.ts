@@ -37,11 +37,19 @@ const QUESTIONNAIRE_CONTEXTS: ReadonlySet<number> = new Set([
 // these. Verified against all 647 real dictionary codes by
 // codebook-classify.test.ts; change nothing here without running it.
 
-// Explicit no-growth phrasing. `no\s*(\w+[\s.]+){0,3}growth` tolerates words
-// between "no" and "growth" ("No fungal growth", "No Signf. bact. growth") while
-// `\s*` still matches the one-word "Nogrowth after 7days Icubation" (GRW7).
-// Bounded to 3 words so it cannot join a stray "no" to a distant "growth".
-const NO_GROWTH_RE = /\b(no\s*(\w+[\s.]+){0,3}(growth|bacterial|pathogen|organism)|normal\s*flora|sterile)\b/i;
+/** A pathogen-ID description that STARTS with "No " is a negative finding:
+ *  "No growth", "No pathogens isolated", "No MRSA Isolated", "No Salmonella or
+ *  Shigella spec". `\bno\b` so "Nocardia species" cannot match — the word
+ *  boundary is load-bearing. Replaces an earlier noun-list pattern that broke on
+ *  plurals ("pathogens") and adjectives ("pathogenic"). */
+const NO_FINDING_RE = /^no\b/i;
+
+/** "Nogrowth after 7days Icubation" (GRW7) is one word, so there is no boundary
+ *  after "no" for NO_FINDING_RE to find. */
+const NOGROWTH_RE = /^nogrowth\b/i;
+
+/** Commensal / sterile phrasing that doesn't start with "No". */
+const NO_GROWTH_RE = /\b(normal\s*flora|sterile)\b/i;
 
 // Gram-stain morphology ("Gram negative bacilli") is a BACTERIAL finding. It must
 // be recognised before NEGATIVE_RE, or the word "negative" in it reads as a
@@ -66,17 +74,18 @@ export type OrganismCategory = "bacteria" | "fungus" | "parasite" | "none";
  *  dictionary without a database — see codebook-classify.test.ts.
  *
  *  Order is load-bearing:
- *   1. explicit no-growth wins outright ("No growth of gram negative organisms")
+ *   1. a negative finding wins outright ("No growth of gram negative organisms")
  *   2. gram-stain morphology is bacteria, NOT a negative culture
  *   3. only then does a bare "negative" mean a negative culture
  */
 export function classify(desc: string): OrganismCategory {
-  if (desc.length === 0) return "bacteria";
-  if (NO_GROWTH_RE.test(desc)) return "none";
-  if (GRAM_STAIN_RE.test(desc)) return "bacteria";
-  if (NEGATIVE_RE.test(desc)) return "none";
-  if (FUNGUS_RE.test(desc)) return "fungus";
-  if (PARASITE_RE.test(desc)) return "parasite";
+  const d = desc.trim();
+  if (d.length === 0) return "bacteria";
+  if (NO_FINDING_RE.test(d) || NOGROWTH_RE.test(d) || NO_GROWTH_RE.test(d)) return "none";
+  if (GRAM_STAIN_RE.test(d)) return "bacteria";
+  if (NEGATIVE_RE.test(d)) return "none";
+  if (FUNGUS_RE.test(d)) return "fungus";
+  if (PARASITE_RE.test(d)) return "parasite";
   return "bacteria";
 }
 
