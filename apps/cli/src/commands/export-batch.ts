@@ -521,6 +521,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
           codebook: ctx.codebook,
           auditReport,
           excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
+          auditRows: specimen.AuditRows,
         });
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(
@@ -552,6 +553,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       codebook: ctx.codebook,
       auditReport,
       excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
+      auditRows: specimen.AuditRows,
     });
 
     // -------- emit payloads (stdin to `openldr ingest stream`) --------

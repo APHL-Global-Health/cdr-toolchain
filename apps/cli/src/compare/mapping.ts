@@ -2,6 +2,9 @@ import type { SpecimenRecpt } from "disalab";
 import type { OpenLdrV1Request, PocFormat } from "../openldr.js";
 import { splitPointOfCare } from "../openldr.js";
 import { CliError } from "../errors.js";
+import { extractAuditFacts } from "../export/audit-facts.js";
+import { deriveResultStatus } from "../export/v2-transform.js";
+import { collectOrderedPanels } from "../export/panels.js";
 import {
   datetime,
   stringCi,
@@ -12,6 +15,7 @@ import {
   icd10Comparator,
   type CompareResult,
 } from "./comparators.js";
+import { detectDisaRejection } from "./result-mapping.js";
 
 export interface FieldDef {
   field: string;
@@ -62,6 +66,7 @@ export const REQUEST_FIELD_NAMES: readonly string[] = [
   "icd10",
   "therapy",
   "clinical_info",
+  "result_status",
 ];
 
 /** Resolve the effective PocFormat: a non-empty CLI override wins; otherwise
@@ -210,6 +215,21 @@ export function getRequestFields(opts: RequestFieldsOptions): FieldDef[] {
       s.ClinicalDiagnosisText,
     ],
     getV1: (r) => r.ClinicalInfo,
+  },
+  {
+    // Empirical fidelity gate for the AUDTDATA-derived result_status
+    // (see v2-transform.ts deriveResultStatus). v1's Requests.HL7ResultStatusCode
+    // is the trusted mirror — comparing the two here is what actually
+    // validates the derivation across real lab data, not just unit tests.
+    field: "result_status",
+    comparator: stringCi,
+    getDisa: (s) => {
+      const orderedPanels = collectOrderedPanels(s);
+      const facts = extractAuditFacts(s.AuditRows ?? []);
+      const rejection = detectDisaRejection(s);
+      return deriveResultStatus(orderedPanels, facts, rejection.rejected);
+    },
+    getV1: (r) => r.HL7ResultStatusCode,
   },
   ];
 }
