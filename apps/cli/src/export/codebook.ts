@@ -31,9 +31,12 @@ const QUESTIONNAIRE_CONTEXTS: ReadonlySet<number> = new Set([
   155, // Individual ARV drugs (ABACA, EFAVI, …)
 ]);
 
-// Organism description heuristics applied to COMMDICT[CONTEXT=50] entries
-// to bucket each organism code into v2's organism_type enum. Order matters:
-// "no growth" / "normal flora" must be checked before bacteria default.
+// Organism description heuristics applied to COMMDICT[CONTEXT=50] entries to
+// bucket each organism code into v2's organism_type enum. The evaluation order
+// is load-bearing and documented on classify() below — read it before touching
+// these. Verified against all 647 real dictionary codes by
+// codebook-classify.test.ts; change nothing here without running it.
+
 // Explicit no-growth phrasing. `no\s*(\w+[\s.]+){0,3}growth` tolerates words
 // between "no" and "growth" ("No fungal growth", "No Signf. bact. growth") while
 // `\s*` still matches the one-word "Nogrowth after 7days Icubation" (GRW7).
