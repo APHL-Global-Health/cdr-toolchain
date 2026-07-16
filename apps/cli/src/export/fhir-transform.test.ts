@@ -114,3 +114,103 @@ test("toFhir throws when request_id cannot form a FHIR id", () => {
   pl.patient.patient_guid = null;
   assert.throws(() => toFhir(pl, TZ), /request_id/);
 });
+
+test("lab_request produces ServiceRequest, Specimen and DiagnosticReport", () => {
+  const pl = basePayload();
+  pl.lab_request.panel_code = {
+    concept_code: "CULT", display_name: "Blood Culture",
+    concept_class: "panel", datatype: "coded", system_id: "DEFAULT_TEST",
+  };
+  pl.lab_request.specimen_code = {
+    concept_code: "BLD", display_name: "Blood",
+    concept_class: "specimen", datatype: "coded", system_id: "DEFAULT_SPEC",
+  };
+  pl.lab_request.collected_datetime = "2024-07-20T08:30:00";
+  pl.lab_request.received_at = "2024-07-20T09:00:00";
+
+  const out = toFhir(pl, TZ);
+  const sr = findOne(out, "ServiceRequest");
+  const sp = findOne(out, "Specimen");
+  const dr = findOne(out, "DiagnosticReport");
+
+  // CE requires status + intent + subject on ServiceRequest.
+  assert.equal(sr.status, "completed");
+  assert.equal(sr.intent, "order");
+  assert.equal(sr.subject.reference, "Patient/DEFAULT-REQ-2024-00456");
+  assert.equal(sr.code.coding[0].code, "CULT");
+
+  // DISA's unzoned local time must gain the configured offset, NOT Z.
+  assert.equal(sp.collection.collectedDateTime, "2024-07-20T08:30:00+02:00");
+  assert.equal(sp.receivedTime, "2024-07-20T09:00:00+02:00");
+  assert.equal(sp.type.coding[0].code, "BLD");
+
+  assert.equal(dr.status, "final");
+  assert.equal(dr.code.coding[0].code, "CULT");
+  assert.equal(dr.subject.reference, "Patient/DEFAULT-REQ-2024-00456");
+  assert.equal(dr.specimen[0].reference, `Specimen/${sp.id}`);
+  assert.equal(dr.basedOn[0].reference, `ServiceRequest/${sr.id}`);
+});
+
+test("result_status maps to DiagnosticReport.status", () => {
+  const s = (rs: string | null) => {
+    const pl = basePayload();
+    pl.lab_request.result_status = rs;
+    return (findOne(toFhir(pl, TZ), "DiagnosticReport") as any).status;
+  };
+  assert.equal(s("F"), "final");
+  assert.equal(s("P"), "preliminary");
+  assert.equal(s("C"), "corrected");
+  assert.equal(s("X"), "cancelled");
+  assert.equal(s("R"), "registered");
+  assert.equal(s(null), "unknown");     // never omit — CE requires status
+  assert.equal(s("banana"), "unknown"); // unknown code must not crash or omit
+});
+
+test("a null panel_code still yields a DiagnosticReport with a code", () => {
+  // CE REQUIRES DiagnosticReport.code — we must never emit a report without one.
+  const pl = basePayload();
+  pl.lab_request.panel_code = null;
+  const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
+  assert.ok(dr.code, "DiagnosticReport.code is required by CE");
+  assert.ok(dr.code.coding[0].code, "code must carry an actual coding");
+});
+
+test("a null specimen_code omits Specimen.type rather than emitting an empty one", () => {
+  const pl = basePayload();
+  pl.lab_request.specimen_code = null;
+  const sp = findOne(toFhir(pl, TZ), "Specimen");
+  assert.equal("type" in sp, false);
+});
+
+test("absent dates are omitted, not emitted as null", () => {
+  const pl = basePayload(); // all dates null
+  const sp = findOne(toFhir(pl, TZ), "Specimen");
+  const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
+  assert.equal("receivedTime" in sp, false);
+  assert.equal("collection" in sp, false);
+  assert.equal("effectiveDateTime" in dr, false);
+  assert.equal("issued" in dr, false);
+});
+
+test("clinical_info and requesting_doctor ride the ServiceRequest", () => {
+  const pl = basePayload();
+  pl.lab_request.clinical_info = "suspected sepsis";
+  pl.lab_request.requesting_doctor = "Dr Mwakasege";
+  const sr = findOne(toFhir(pl, TZ), "ServiceRequest");
+  assert.equal(sr.note[0].text, "suspected sepsis");
+  assert.equal(sr.requester.display, "Dr Mwakasege");
+});
+
+test("every emitted id satisfies CE's ID_RE", () => {
+  // The whole resource set must be id-safe, not just the Patient.
+  const CE_ID_RE = /^[A-Za-z0-9.\-]{1,64}$/;
+  const pl = basePayload();
+  pl.lab_request.specimen_code = {
+    concept_code: "BLD", display_name: "Blood",
+    concept_class: "specimen", datatype: "coded", system_id: "DEFAULT_SPEC",
+  };
+  for (const r of toFhir(pl, TZ)) {
+    const id = (r as any).id;
+    if (id !== undefined) assert.match(id, CE_ID_RE, `${(r as any).resourceType} id "${id}"`);
+  }
+});
