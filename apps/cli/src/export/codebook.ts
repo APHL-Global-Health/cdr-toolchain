@@ -40,6 +40,17 @@ const PARASITE_RE = /\b(plasmodi|trypanos|leishman|schistos|filari|giardia|entam
 
 export type OrganismCategory = "bacteria" | "fungus" | "parasite" | "none";
 
+/** Bucket a COMMDICT[CONTEXT=50] organism description into v2's organism_type.
+ *  Exported so the classifier can be tested against a fixture of the real
+ *  dictionary without a database — see codebook-classify.test.ts. */
+export function classify(desc: string): OrganismCategory {
+  if (desc.length === 0) return "bacteria";
+  if (NO_GROWTH_RE.test(desc)) return "none";
+  if (FUNGUS_RE.test(desc)) return "fungus";
+  if (PARASITE_RE.test(desc)) return "parasite";
+  return "bacteria";
+}
+
 export interface ParmEntry {
   code: string;
   description: string;
@@ -177,14 +188,6 @@ export async function loadCodebook(server: DisaServer): Promise<Codebook> {
   } catch {
     // USERDIC6 may not exist on every deployment — degrade gracefully and
     // let the transform fall back to raw user codes.
-  }
-
-  function classify(desc: string): OrganismCategory {
-    if (desc.length === 0) return "bacteria";
-    if (NO_GROWTH_RE.test(desc)) return "none";
-    if (FUNGUS_RE.test(desc)) return "fungus";
-    if (PARASITE_RE.test(desc)) return "parasite";
-    return "bacteria";
   }
 
   return {
