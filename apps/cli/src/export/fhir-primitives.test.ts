@@ -2,6 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fhirId, fhirDateTime, fhirText } from "./fhir-primitives.js";
 
+// Copied VERBATIM from openldr_ce/packages/fhir/src/datatypes/primitives.ts:3,6.
+// If CE tightens these, these tests must fail loudly — that is the point.
+const CE_ID_RE = /^[A-Za-z0-9.\-]{1,64}$/;
+const CE_DATETIME_RE = /^\d{4}(-\d{2}(-\d{2}(T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2}))?)?)?$/;
+
 test("fhirId strips characters FHIR forbids", () => {
   // CE's ID_RE is /^[A-Za-z0-9.\-]{1,64}$/ — underscore is NOT allowed.
   assert.equal(fhirId("DEFAULT_REQ-2024-00456"), "DEFAULT-REQ-2024-00456");
@@ -54,6 +59,37 @@ test("fhirDateTime omits rather than guesses at unrecognised formats", () => {
 test("fhirDateTime rejects a malformed offset loudly", () => {
   assert.throws(() => fhirDateTime("2024-07-20T08:30:00", "+2"), /offset/i);
   assert.throws(() => fhirDateTime("2024-07-20T08:30:00", "EAT"), /offset/i);
+});
+
+test("fhirDateTime rejects structurally-valid but impossible dates", () => {
+  // CE's regex is purely structural and would ACCEPT these — we must not emit them.
+  assert.equal(fhirDateTime("2024-13-45T99:99:99", "+02:00"), undefined);
+  assert.equal(fhirDateTime("2024-02-30T00:00:00", "+02:00"), undefined);
+  assert.equal(fhirDateTime("2024-00-00T00:00:00", "+02:00"), undefined);
+  assert.equal(fhirDateTime("2023-02-29T00:00:00", "+02:00"), undefined); // not a leap year
+  assert.equal(fhirDateTime("2024-02-29T00:00:00", "+02:00"), "2024-02-29T00:00:00+02:00"); // IS a leap year
+  assert.equal(fhirDateTime("2024-13", "+02:00"), undefined);
+  assert.equal(fhirDateTime("2024-02-30", "+02:00"), undefined);
+});
+
+test("every fhirId output satisfies CE's ID_RE", () => {
+  const inputs = ["DEFAULT_REQ-2024-00456", "ZUL0800028", "a b/c", "---", "-a-", "...",
+                  "Ω", "café", "x".repeat(70), "a".repeat(63) + "-" + "a".repeat(10), "  ", ""];
+  for (const raw of inputs) {
+    const out = fhirId(raw);
+    if (out !== undefined) assert.match(out, CE_ID_RE, `fhirId(${JSON.stringify(raw)}) -> ${out}`);
+  }
+});
+
+test("every fhirDateTime output satisfies CE's DATETIME_RE", () => {
+  const inputs = ["2024", "2024-07", "2024-07-20", "2024-07-20T08:30:00",
+                  "2024-07-20 08:30:00", "2024-07-20T08:30:00.123",
+                  "2024-07-20T08:30:00Z", "2024-07-20T08:30:00.000Z",
+                  "2024-07-20T08:30:00+05:30", "07/20/2024", "not a date", ""];
+  for (const raw of inputs) {
+    const out = fhirDateTime(raw, "+02:00");
+    if (out !== undefined) assert.match(out, CE_DATETIME_RE, `fhirDateTime(${JSON.stringify(raw)}) -> ${out}`);
+  }
 });
 
 test("fhirText omits empty strings rather than emitting them", () => {
