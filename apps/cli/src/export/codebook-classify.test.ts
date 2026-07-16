@@ -101,3 +101,24 @@ test("real pathogen-ID values from live v1 classify correctly", () => {
   assert.equal(classify("Gram Negative"), "bacteria");   // coded GN — used in v1, absent from the fixture
   assert.equal(classify("No pathogens isolated"), "none");
 });
+
+test("classification matches the golden snapshot for all 647 codes", () => {
+  // The harness used to assert ~40 hand-picked codes, which is exactly how four
+  // no-growth codes (NP/NPB/NMRS/NSSI) hid in plain sight. This pins ALL of them:
+  // any classifier change now shows its full blast radius as a diff.
+  // Regenerate deliberately with scripts/dump-classify-golden.ts and REVIEW the diff.
+  //
+  // The hand-written assertions above stay: the golden is generated from the
+  // code under test, so it can only detect drift, not wrongness — a golden
+  // alone would happily enshrine a bug. The explicit assertions encode what we
+  // independently know to be true (GNB is a bacterium; NP is a negative).
+  const golden: { code: string; description: string; category: OrganismCategory }[] =
+    JSON.parse(readFileSync(resolve(import.meta.dirname, "__fixtures__/commdict-context50-golden.json"), "utf8"));
+  assert.equal(golden.length, rows.length, "golden is stale — regenerate it");
+  const drift: string[] = [];
+  for (const g of golden) {
+    const actual = classify(g.description);
+    if (actual !== g.category) drift.push(`${g.code} "${g.description}": golden=${g.category} actual=${actual}`);
+  }
+  assert.deepEqual(drift, [], `classification drifted from the golden snapshot:\n${drift.join("\n")}`);
+});
