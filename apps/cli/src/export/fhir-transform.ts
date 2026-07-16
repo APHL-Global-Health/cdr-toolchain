@@ -116,6 +116,18 @@ function toRequestStatus(rs: string | null): string {
   return (rs ?? "").trim().toUpperCase() === "X" ? "revoked" : "completed";
 }
 
+/** DISA/HL7 priority -> FHIR request-priority. Measured over 3.4M v1 rows the
+ *  source emits exactly R/U/S, so this mapping is total; anything else is
+ *  omitted rather than guessed. */
+function toPriority(p: string | null): string | undefined {
+  switch ((p ?? "").trim().toUpperCase()) {
+    case "R": return "routine";
+    case "U": return "urgent";
+    case "S": return "stat";
+    default: return undefined;
+  }
+}
+
 /** Interpretation coding system — carries lab abnormal_flag (H/L/...) as well
  *  as susceptibility S/I/R; both are ObservationInterpretation values. */
 const INTERPRETATION_SYSTEM = "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation";
@@ -128,7 +140,8 @@ const UNKNOWN_CODE = {
 };
 
 function requestResources(
-  lr: V2LabRequest, patientRef: string, rootId: string, opts: ToFhirOptions,
+  lr: V2LabRequest, patientRef: string, rootId: string, specimenId: string | undefined,
+  opts: ToFhirOptions,
 ): FhirResource[] {
   const out: FhirResource[] = [];
   const panel = toCodeableConcept(lr.panel_code) ?? UNKNOWN_CODE;
@@ -141,13 +154,16 @@ function requestResources(
     intent: "order",                            // CE-required
     subject: { reference: patientRef },
     code: panel,
+    ...(fhirText(lr.request_id) !== undefined
+      ? { identifier: [{ system: "urn:openldr:request-id", value: fhirText(lr.request_id) }] } : {}),
+    priority: toPriority(lr.priority),
+    authoredOn: fhirDateTime(lr.registered_at, opts.tzOffset),
     ...(fhirText(lr.clinical_info) !== undefined
       ? { note: [{ text: fhirText(lr.clinical_info) }] } : {}),
     ...(fhirText(lr.requesting_doctor) !== undefined
       ? { requester: { display: fhirText(lr.requesting_doctor) } } : {}),
   }));
 
-  const specimenId = fhirId(`${rootId}-spec`);
   const collection = compact({ collectedDateTime: fhirDateTime(lr.collected_datetime, opts.tzOffset) });
   out.push(compact({
     resourceType: "Specimen",
@@ -193,7 +209,8 @@ function toReferenceRange(
 }
 
 function observationResource(
-  r: V2LabResult, patientRef: string, rootId: string, index: number, opts: ToFhirOptions,
+  r: V2LabResult, patientRef: string, rootId: string, specimenId: string | undefined,
+  index: number, opts: ToFhirOptions,
 ): FhirResource {
   const unit = fhirText(r.numeric_units) ?? fhirText(r.rpt_units);
 
@@ -222,6 +239,8 @@ function observationResource(
     status: "final",  // CE-required
     code: toCodeableConcept(r.observation_code) ?? UNKNOWN_CODE,
     subject: { reference: patientRef },
+    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     effectiveDateTime: fhirDateTime(r.result_timestamp, opts.tzOffset),
     ...value,
     // The v2 reference nulls these on its FHIR path (:802-805) but populates
@@ -238,7 +257,8 @@ function observationResource(
  *  this is the leaf of a 2-tier isolate -> AST tree (hl7-fhir.schema.js:496-518
  *  is 3-tier: culture -> isolate -> AST). */
 function astResource(
-  s: V2SusceptibilityTest, patientRef: string, rootId: string, index: number,
+  s: V2SusceptibilityTest, patientRef: string, rootId: string, specimenId: string | undefined,
+  index: number,
 ): FhirResource {
   // An unknown test_method asserts no measurement type — mirrors how the
   // sibling `method` field omits itself rather than guessing "Zone diameter".
@@ -258,6 +278,8 @@ function astResource(
     status: "final",  // CE-required
     code: toCodeableConcept(s.antibiotic_code) ?? UNKNOWN_CODE,
     subject: { reference: patientRef },
+    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
     ...(s.susceptibility_value !== null
       ? { interpretation: [{ coding: [{ system: INTERPRETATION_SYSTEM, code: s.susceptibility_value }] }] }
@@ -269,16 +291,31 @@ function astResource(
   });
 }
 
-/** Isolate Observation — the culture-level organism finding. */
+/** Isolate Observation — the culture-level organism finding.
+ *
+ *  Coded LOINC 634-6 "Bacteria identified": CE derives AMR reporting from
+ *  lab_results by convention (reporting/src/amr/query.ts:13-15), matching
+ *  observation_code = '634-6' for organisms. source_test_code is preserved
+ *  as a second coding so nothing is lost, but LOINC comes first — CE's
+ *  codeable() reads coding[0] only. */
 function isolateResource(
-  iso: V2Isolate, patientRef: string, rootId: string,
+  iso: V2Isolate, patientRef: string, rootId: string, specimenId: string | undefined,
 ): FhirResource {
   return compact({
     resourceType: "Observation",
     id: fhirId(`${rootId}-iso-${iso.isolate_index}`),
     status: "final",  // CE-required
-    code: { text: fhirText(iso.source_test_code) ?? "Isolate" },
+    code: compact({
+      coding: [
+        { system: "http://loinc.org", code: "634-6", display: "Bacteria identified" },
+        ...(fhirText(iso.source_test_code) !== undefined
+          ? [{ system: "urn:openldr:default_test", code: fhirText(iso.source_test_code) }] : []),
+      ],
+      text: "Bacteria identified",
+    }),
     subject: { reference: patientRef },
+    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     valueCodeableConcept: toCodeableConcept(iso.organism_code) ?? UNKNOWN_CODE,
   });
 }
@@ -294,9 +331,13 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   // no patient identity — so there is no cross-visit patient dedup.
   const patientId = fhirId(payload.patient.patient_guid) ?? rootId;
   const patientRef = `Patient/${patientId}`;
+  // Derived once here and threaded through every builder (requestResources,
+  // observationResource, isolateResource, astResource) so the id-derivation
+  // logic lives in exactly one place and cannot drift.
+  const specimenId = fhirId(`${rootId}-spec`);
 
   const observations = payload.lab_results.map((r, i) =>
-    observationResource(r, patientRef, rootId, i + 1, opts),
+    observationResource(r, patientRef, rootId, specimenId, i + 1, opts),
   );
   // isolate_index is V2's join key between isolates and their ASTs. Duplicates
   // would collide on CE's (resource_type, id) upsert: the survivor would be the
@@ -310,12 +351,12 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
         `duplicate isolate_index ${iso.isolate_index} in ${payload.lab_request.request_id} — cannot map isolates unambiguously`,
       );
     }
-    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId));
+    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, specimenId));
   }
   const isolates = [...byIndex.values()];
 
   const asts = payload.susceptibility_tests.map((s, i) =>
-    astResource(s, patientRef, rootId, i + 1),
+    astResource(s, patientRef, rootId, specimenId, i + 1),
   );
 
   // Hang each AST off its isolate. An AST whose isolate_index matches nothing
@@ -330,7 +371,7 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
 
   const out = [
     patientResource(payload.patient, patientId, opts),
-    ...requestResources(payload.lab_request, patientRef, rootId, opts),
+    ...requestResources(payload.lab_request, patientRef, rootId, specimenId, opts),
     ...observations,
     ...isolates,
     ...asts,
