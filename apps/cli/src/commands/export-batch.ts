@@ -16,12 +16,14 @@ import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
 import { DEFAULT_SITE } from "../export/site-config.js";
 import { toV2 } from "../export/v2-transform.js";
+import { toFhir } from "../export/fhir-transform.js";
 import { toFormSubmission } from "../export/forms-transform.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
+import { postFhirResources } from "../api/ce-client.js";
 import { fetchKeycloakToken } from "../api/keycloak.js";
 import { resolveDataFeedId } from "../api/feed-discovery.js";
 import { trackRun } from "../api/run-tracker.js";
@@ -61,6 +63,10 @@ interface ExportBatchOpts {
   explain?: boolean;
   emitPayloads?: boolean;
   pocFormat?: string;
+  ceUrl?: string;
+  ceHookPath?: string;
+  ceToken?: string;
+  ceTz?: string;
 }
 
 type LabStatus =
@@ -381,6 +387,11 @@ interface ProcessLabContext {
   docConfig: DocConfig;
   prefix: string;
   postConfig: PostConfig;
+  /** Present when the CE target is selected (--ce-url / OPENLDR_CE_URL). When
+   *  set, processOneLab sends resources to CE's workflow webhook instead of
+   *  the v2 lab+forms POST — see the CE branch near the top of the "POST"
+   *  section below. */
+  ceConfig?: { baseUrl: string; path: string; token: string; tzOffset: string };
   doCheck: boolean;
   doQuarantine: boolean;
   quarantineDir: string | null;
@@ -571,6 +582,25 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       return result;
     }
 
+    // -------- CE target: FHIR POST to the workflow webhook --------
+    // Takes over from here entirely when a CE target is configured — the v2
+    // lab-leg/forms-leg split below does not apply to CE (toFhir builds one
+    // resource bundle from the same v2 payload). Placed after emit-payloads/
+    // dry-run (both still operate on the V2 payload/contract unchanged) and
+    // before the v2 POST so a CE target never touches the v2 API.
+    if (ctx.ceConfig !== undefined) {
+      const resources = toFhir(payload, { tzOffset: ctx.ceConfig.tzOffset });
+      const post = await postFhirResources(resources, {
+        baseUrl: ctx.ceConfig.baseUrl,
+        path: ctx.ceConfig.path,
+        token: ctx.ceConfig.token,
+      });
+      result.http_status = post.status;
+      result.status = "posted";
+      result.duration_ms = Date.now() - start;
+      return result;
+    }
+
     // -------- POST --------
     // Resolve token per-lab so long-running batches don't post with a
     // stale Keycloak token (default lifetime 5 min). Resolver is cached
@@ -700,6 +730,45 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
   }
 }
 
+/** CE has no storage-level backstop: its Specimen schema requires only
+ *  resourceType, so a specimen-less record persists silently. v2's storage
+ *  rejected those. On the CE path the audit gate is the ONLY protection, so
+ *  disabling it must fail before the first query. A rule that depends on an
+ *  operator reading a doc is not a rule. */
+export function assertCeGatesEnabled(o: {
+  ceUrl: string | undefined; doCheck: boolean; doQuarantine: boolean;
+}): void {
+  if (o.ceUrl === undefined || o.ceUrl.length === 0) return;
+  if (!o.doCheck) {
+    throw new CliError(
+      "USAGE",
+      "--no-check is refused when the target is OpenLDR CE. CE's FHIR validation is structural only and accepts records the v1 fidelity check exists to catch; the gate is the only thing between bad source data and the store. Drop --no-check, or target v2 instead.",
+    );
+  }
+  if (!o.doQuarantine) {
+    throw new CliError(
+      "USAGE",
+      "--no-quarantine is refused when the target is OpenLDR CE. The audit gate is the only protection on this path — CE will not reject records the audit would quarantine.",
+    );
+  }
+}
+
+/** DISA stores unzoned local wall-clock (v2-transform.ts:38-50). FHIR needs a
+ *  zone. Moz/Zambia are UTC+2, so a silent UTC default would shift every
+ *  timestamp 2h earlier with no error — the worst failure mode for data
+ *  feeding a migration-fidelity comparison. Require it explicitly. */
+export function requireCeTimezone(ceUrl: string | undefined, tz: string | undefined): string | undefined {
+  if (ceUrl === undefined || ceUrl.length === 0) return undefined;
+  const t = (tz ?? "").trim();
+  if (!/^(Z|[+-]\d{2}:\d{2})$/.test(t)) {
+    throw new CliError(
+      "CONFIG_MISSING",
+      `A timezone offset is required when the target is OpenLDR CE (got ${JSON.stringify(tz ?? null)}). DISA stores unzoned local time; assuming UTC would shift Moz/Zambia timestamps 2h with no error. Set OPENLDR_CE_TIMEZONE or pass --ce-tz, e.g. +02:00.`,
+    );
+  }
+  return t;
+}
+
 export function registerExportBatchCommand(program: Command): void {
   program
     .command("export-batch")
@@ -719,6 +788,10 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--target-api <url>", "OpenLDR v2 base URL (overrides OPENLDR_V2_URL env)")
     .option("--token <bearer>", "Bearer token for the v2 API (overrides OPENLDR_V2_TOKEN env)")
     .option("--api-path <path>", "Endpoint path appended to the base URL")
+    .option("--ce-url <url>", "OpenLDR CE base URL (overrides OPENLDR_CE_URL env). Selects the CE target instead of v2.")
+    .option("--ce-hook-path <path>", "CE workflow webhook path (overrides OPENLDR_CE_HOOK_PATH env)")
+    .option("--ce-token <secret>", "CE webhook token for the x-webhook-token header (overrides OPENLDR_CE_WEBHOOK_TOKEN env)")
+    .option("--ce-tz <offset>", "UTC offset for DISA's unzoned local timestamps, e.g. +02:00. REQUIRED with --ce-url (overrides OPENLDR_CE_TIMEZONE env)")
     .option("--data-feed-id <uuid>", "Pre-resolved X-DataFeed-Id (skips discovery)")
     .option("--project-name <name>", "OpenLDR project for X-DataFeed-Id discovery")
     .option("--use-case-name <name>", "OpenLDR use case for X-DataFeed-Id discovery")
@@ -760,6 +833,10 @@ export function registerExportBatchCommand(program: Command): void {
       }
       const quarantineThreshold = quarantineThresholdRaw as Severity;
 
+      const ceUrl = opts.ceUrl ?? config.openldrCeUrl;
+      assertCeGatesEnabled({ ceUrl, doCheck, doQuarantine });
+      const ceTz = requireCeTimezone(ceUrl, opts.ceTz ?? config.openldrCeTimezone);
+
       if (opts.explain === true) {
         const trimmed = where.trim().replace(/^WHERE\s+/i, "");
         const userClause = trimmed.length > 0 ? `WHERE ${trimmed}` : "";
@@ -777,6 +854,9 @@ export function registerExportBatchCommand(program: Command): void {
             quarantine_dir: quarantineDir,
             quarantine_severity: quarantineThreshold,
           },
+          target: ceUrl !== undefined && ceUrl.length > 0
+            ? { kind: "ce", hook_path: opts.ceHookPath ?? config.openldrCeHookPath, tz: ceTz }
+            : { kind: "v2" },
           dry_run: opts.dryRun === true,
         }) + "\n");
         return;
@@ -875,11 +955,16 @@ export function registerExportBatchCommand(program: Command): void {
       // excluded from the lab payload and routed to the forms feed instead.
       const docConfig = loadCountryDocConfig(opts.country ?? config.country);
 
-      // Skip POST config resolution entirely when we won't POST anyway:
-      // --dry-run runs the gates without sending, --emit-payloads writes
-      // payloads to stdout (intended to pipe into `openldr ingest stream`)
-      // so neither needs the v2 URL + token.
-      const skipPostConfig = opts.dryRun === true || opts.emitPayloads === true;
+      // Skip v2 POST config resolution entirely when we won't POST via v2
+      // anyway: --dry-run runs the gates without sending, --emit-payloads
+      // writes payloads to stdout (intended to pipe into `openldr ingest
+      // stream`), and a CE target replaces the v2 lab+forms POST outright
+      // (see the CE branch in processOneLab) — none of these need the v2
+      // URL + token, so resolvePostConfig's v2-specific requirements
+      // (OPENLDR_V2_URL, a token source, X-DataFeed-Id) must not gate a
+      // CE-only deployment that has no v2 config at all.
+      const targetsCe = ceUrl !== undefined && ceUrl.length > 0;
+      const skipPostConfig = opts.dryRun === true || opts.emitPayloads === true || targetsCe;
       const postConfig: PostConfig = skipPostConfig
         ? {
             baseUrl: "",
@@ -895,6 +980,25 @@ export function registerExportBatchCommand(program: Command): void {
             trackIntervalMs: undefined,
           }
         : await resolvePostConfig(opts, config);
+
+      // -------- CE target config --------
+      // Presence of ceUrl selects the CE target; assertCeGatesEnabled /
+      // requireCeTimezone already validated this above, before any DISA
+      // query ran.
+      const ceConfig = targetsCe
+        ? {
+            baseUrl: ceUrl!,
+            path: opts.ceHookPath ?? config.openldrCeHookPath,
+            token: opts.ceToken ?? config.openldrCeWebhookToken ?? "",
+            tzOffset: ceTz!,
+          }
+        : undefined;
+      if (ceConfig !== undefined && ceConfig.token.length === 0) {
+        throw new CliError(
+          "CONFIG_MISSING",
+          "A CE webhook token is required. Set OPENLDR_CE_WEBHOOK_TOKEN or pass --ce-token.",
+        );
+      }
 
       // Resume set: lab numbers we should skip because a prior run
       // already processed them (success or failure).
@@ -921,6 +1025,7 @@ export function registerExportBatchCommand(program: Command): void {
         docConfig,
         prefix,
         postConfig,
+        ceConfig,
         doCheck,
         doQuarantine,
         quarantineDir,

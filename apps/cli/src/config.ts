@@ -25,6 +25,16 @@ export interface LoadedConfig {
   /** Path appended to openldrV2Url for the lab-request POST endpoint.
    *  Default `/api/v2/lab-requests` per PRD §9. */
   openldrV2Path: string;
+  /** OpenLDR CE base URL — the workflow-webhook target. Presence selects the CE target. */
+  openldrCeUrl?: string;
+  /** Path of the CE workflow webhook, e.g. /api/workflows/hooks/cdr-ingest. */
+  openldrCeHookPath: string;
+  /** Secret for the CE webhook's `x-webhook-token` header. */
+  openldrCeWebhookToken?: string;
+  /** UTC offset for DISA's unzoned local timestamps, e.g. "+02:00". REQUIRED when
+   *  targeting CE: DISA stores local wall-clock (v2-transform.ts:38-50) and assuming
+   *  UTC would shift Moz/Zambia (UTC+2) timestamps 2h earlier with no error. NO DEFAULT. */
+  openldrCeTimezone?: string;
   /** Keycloak base URL (no trailing slash), e.g. https://kc.example.com/keycloak. */
   keycloakUrl?: string;
   /** Keycloak realm hosting the OpenLDR client. */
@@ -65,6 +75,10 @@ export interface ConfigOverrides {
   openldrV2Url?: string;
   openldrV2Token?: string;
   openldrV2Path?: string;
+  openldrCeUrl?: string;
+  openldrCeHookPath?: string;
+  openldrCeWebhookToken?: string;
+  openldrCeTimezone?: string;
   keycloakUrl?: string;
   keycloakRealm?: string;
   keycloakClientId?: string;
@@ -102,6 +116,10 @@ const EnvSchema = z.object({
   OPENLDR_FORMS_DATA_FEED_ID: z.string().min(1).optional(),
   OPENLDR_COUNTRY: z.string().min(1).optional(),
   OPENLDR_V2_INSECURE_TLS: z.string().optional(),
+  OPENLDR_CE_URL: z.string().url().optional(),
+  OPENLDR_CE_HOOK_PATH: z.string().optional(),
+  OPENLDR_CE_WEBHOOK_TOKEN: z.string().min(1).optional(),
+  OPENLDR_CE_TIMEZONE: z.string().optional(),
 });
 
 function parseBool(v: string | undefined): boolean {
@@ -194,6 +212,10 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     openldrV2Url: overrides.openldrV2Url ?? env.data.OPENLDR_V2_URL,
     openldrV2Token: overrides.openldrV2Token ?? env.data.OPENLDR_V2_TOKEN,
     openldrV2Path: overrides.openldrV2Path ?? env.data.OPENLDR_V2_PATH ?? "/api/v2/lab-requests",
+    openldrCeUrl: overrides.openldrCeUrl ?? env.data.OPENLDR_CE_URL,
+    openldrCeHookPath: overrides.openldrCeHookPath ?? env.data.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/cdr-ingest",
+    openldrCeWebhookToken: overrides.openldrCeWebhookToken ?? env.data.OPENLDR_CE_WEBHOOK_TOKEN,
+    openldrCeTimezone: overrides.openldrCeTimezone ?? env.data.OPENLDR_CE_TIMEZONE,
     keycloakUrl: overrides.keycloakUrl ?? env.data.KEYCLOAK_PUBLIC_URL,
     keycloakRealm: overrides.keycloakRealm ?? env.data.KEYCLOAK_REALM,
     keycloakClientId: overrides.keycloakClientId ?? env.data.KEYCLOAK_CLIENT_ID,

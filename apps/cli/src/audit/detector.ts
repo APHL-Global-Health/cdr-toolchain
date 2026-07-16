@@ -95,7 +95,7 @@ function detectPanelSpecimenMismatch(input: AuditInputs, cb: Codebook): Anomaly[
     out.push({
       class: "specimen_missing",
       severity: "error",
-      message: `Lab has ${realPanels.length} ordered test panel(s) but no specimen recorded. v2 storage will reject — fix the source data before re-attempting.`,
+      message: `Lab has ${realPanels.length} ordered test panel(s) but no specimen recorded. Quarantined: v2 storage rejects this, but OpenLDR CE would silently accept it — its Specimen schema requires only resourceType. On the CE path this gate is the only thing catching it. Fix the source data before re-attempting.`,
       panel_code: firstPanel,
       details: {
         ordered_panels: realPanels,
