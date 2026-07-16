@@ -474,3 +474,75 @@ test("an unknown test_method does not assert a measurement type", () => {
   assert.equal("code" in abx.component[0], false);
   assert.equal("method" in abx, false);
 });
+
+test("every Observation links back to its ServiceRequest and Specimen", () => {
+  // CE projects lab_results.request_id from Observation.basedOn[0] and
+  // specimen_id from Observation.specimen. Without these every observation
+  // lands orphaned from its request.
+  const pl = basePayload({
+    lab_results: [labResult()], isolates: [isolate()], susceptibility_tests: [ast()],
+  });
+  const out = toFhir(pl, TZ);
+  const sr = findOne(out, "ServiceRequest");
+  const sp = findOne(out, "Specimen");
+  const obs = out.filter((r: any) => r.resourceType === "Observation");
+  assert.ok(obs.length >= 3);
+  for (const o of obs as any[]) {
+    assert.equal(o.basedOn[0].reference, `ServiceRequest/${sr.id}`, `Observation ${o.id} basedOn`);
+    assert.equal(o.specimen.reference, `Specimen/${sp.id}`, `Observation ${o.id} specimen`);
+  }
+});
+
+test("ServiceRequest carries the business identifier CE projects as request_id", () => {
+  const sr = findOne(toFhir(basePayload(), TZ), "ServiceRequest");
+  // Raw request_id, not the sanitised FHIR id — identifier.value has no charset limit.
+  assert.equal(sr.identifier[0].value, "DEFAULT_REQ-2024-00456");
+});
+
+test("DISA priority maps onto FHIR's enum", () => {
+  const p = (v: string | null) => {
+    const pl = basePayload(); pl.lab_request.priority = v;
+    return (findOne(toFhir(pl, TZ), "ServiceRequest") as any).priority;
+  };
+  // Measured across 3.4M v1 rows the source emits only R/U/S.
+  assert.equal(p("R"), "routine");
+  assert.equal(p("U"), "urgent");
+  assert.equal(p("S"), "stat");
+  assert.equal(p(null), undefined);
+  assert.equal(p("banana"), undefined); // omit, never guess
+});
+
+test("registered_at becomes authoredOn with the configured offset", () => {
+  const pl = basePayload();
+  pl.lab_request.registered_at = "2024-07-20T07:00:00";
+  const sr = findOne(toFhir(pl, TZ), "ServiceRequest");
+  assert.equal(sr.authoredOn, "2024-07-20T07:00:00+02:00");
+});
+
+test("an isolate is coded LOINC 634-6 so CE's AMR reporting can see it", () => {
+  // CE derives organisms via lab_results.observation_code = '634-6'
+  // (reporting/src/amr/query.ts:13). Our old code:{text:'CULT'} was invisible.
+  const out = toFhir(basePayload({ isolates: [isolate()] }), TZ);
+  const iso = findIsolate(out);
+  assert.equal(iso.code.coding[0].code, "634-6");
+  assert.equal(iso.code.coding[0].system, "http://loinc.org");
+  // organism still rides valueCodeableConcept
+  assert.equal(iso.valueCodeableConcept.coding[0].code, "ECO");
+  // source_test_code preserved, but NOT first (CE reads coding[0])
+  assert.equal(iso.code.coding[1].code, "CULT");
+});
+
+test("AST interpretation still projects to abnormal_flag for CE's AMR query", () => {
+  // CE finds ASTs via lab_results.abnormal_flag in (S,I,R).
+  const out = toFhir(basePayload({ isolates: [isolate()], susceptibility_tests: [ast()] }), TZ);
+  assert.equal(findAbx(out).interpretation[0].coding[0].code, "R");
+});
+
+test("no Specimen id means no dangling Observation.specimen reference", () => {
+  // Guard against emitting a reference to a resource we didn't emit.
+  const out = toFhir(basePayload({ lab_results: [labResult()] }), TZ);
+  const sp = findOne(out, "Specimen");
+  const o: any = out.find((r: any) => r.resourceType === "Observation");
+  if (sp.id === undefined) assert.equal("specimen" in o, false);
+  else assert.equal(o.specimen.reference, `Specimen/${sp.id}`);
+});
