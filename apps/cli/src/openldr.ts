@@ -86,6 +86,25 @@ export interface OpenLdrV1LabResult {
   LIMSRptRange: string | null;
   SIValue: number | null;
   SIUnits: string | null;
+  /**
+   * v1's LIMS-NATIVE flag. ⚠ **NOT the same field as HL7AbnormalFlagCodes**: its
+   * value set is L/H/L-/H+ where the HL7 one is N/L/H/LL/HH. They are the
+   * LIMS-native and HL7-normalised flags. **Do NOT map one onto the other.**
+   * Measured on TDS: 8,372 of 643,855 non-empty (1.3%) — L 5,337 / H 2,194 /
+   * L- 666 / H+ 145. v2-transform.ts:497 hardcodes `rpt_flag: null` against it.
+   */
+  LIMSRptFlag: string | null;
+  LIMSRptUnits: string | null;
+  /** ⚠ v1 splits the reference range NUMERICALLY; CDR emits rpt_range as a
+   *  STRING from the codebook. 0 is v1's empty convention for numerics. */
+  SILoRange: number | null;
+  SIHiRange: number | null;
+  /** ⚠ DISTINCT from LIMSCodedValue, which is also fetched. */
+  CodedValue: string | null;
+  /** -1 x 37,185 / 1 x 12,205 / 2 x 9 / 3 x 10 (TDS). Tracks CodedValue's 49,410
+   *  almost exactly, which SUGGESTS a '<' / '>' qualifier — a HYPOTHESIS, not a
+   *  mapping. Measure before mapping it to anything. */
+  ResultSemiquantitive: number | null;
 }
 
 const REQUEST_COLUMNS = `
@@ -248,8 +267,15 @@ const LAB_RESULT_COLUMNS = `
   lr.[LIMSObservationCode], lr.[LIMSObservationDesc],
   lr.[LIMSRptResult], lr.[LIMSCodedValue],
   lr.[HL7ResultTypeCode], lr.[HL7AbnormalFlagCodes],
-  lr.[LIMSRptRange], lr.[SIValue], lr.[SIUnits]
+  lr.[LIMSRptRange], lr.[SIValue], lr.[SIUnits],
+  lr.[LIMSRptFlag], lr.[LIMSRptUnits],
+  lr.[SILoRange], lr.[SIHiRange],
+  lr.[CodedValue], lr.[ResultSemiquantitive]
 `;
+// ⚠ Every new entry is `lr.` — LIMSPanelCode/LIMSPanelDesc are the ONLY `req.`
+// columns here, joined in from Requests. That asymmetry is load-bearing: it is
+// why they are not LabResults columns and never appear in the schema snapshot.
+// ⚠ CodedValue and LIMSCodedValue are DIFFERENT columns; both are selected.
 
 export function buildLabResultsSql(databaseName: string): string {
   const resultsTable = `${quoteIdent(databaseName)}.[dbo].[LabResults]`;
