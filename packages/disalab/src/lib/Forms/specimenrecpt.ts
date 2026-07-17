@@ -227,12 +227,31 @@ export class SpecimenRecpt {
       // RTKNIDX5.TAKENDATE is a date-only column (midnight), so prefer
       // REGDAT4.TakenDateTime (which carries the time too) when it parses;
       // only fall back to the index if REGDAT4 didn't decode anything.
+      //
+      // ⛔ THE CAST HERE USED TO LIE: `rtknidx5[0].TAKENDATE as string | null`.
+      // TAKENDATE is `unknown` and the mssql driver hands back a **Date object**,
+      // not a string. The cast silenced the compiler, the Date survived into a
+      // `string` field, and every downstream `String(...)` produced
+      // "Fri Sep 20 2013 03:00:00 GMT+0300 (East Africa Time)".
+      //
+      // That was not cosmetic. Measured 2026-07-17 on a random spread sample:
+      // taken_datetime was MALFORMED on 136 of 147 labs (92.5%). disaToIso only
+      // recognises MM/DD/YYYY and passes anything else through
+      // (v2-transform.ts:46), so the garbage reached fhirDateTime, which returns
+      // undefined, and compact() dropped the key — the field vanished SILENTLY
+      // while every unit test (clean fixtures) stayed green.
+      //
+      // ⚠ DATE-ONLY ON PURPOSE. The column is midnight (the toString above is
+      // 03:00:00+0300 == 00:00 UTC), so we emit "2013-09-20" and NEVER
+      // "2013-09-20T00:00:00+03:00": stamping midnight would assert a collection
+      // TIME we do not have. Read the UTC components — the local ones would roll
+      // the date backwards on any host west of the source's zone.
       if (
         Core.IsNullOrEmpty(r.TakenDateTime) &&
         rtknidx5 !== null &&
         rtknidx5.length > 0
       ) {
-        r.TakenDateTime = rtknidx5[0]!.TAKENDATE as string | null;
+        r.TakenDateTime = Core.DateOnlyIso(rtknidx5[0]!.TAKENDATE);
       }
 
       regdat4.Tests.forEach((test) => {
