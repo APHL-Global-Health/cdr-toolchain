@@ -629,20 +629,33 @@ export interface DisaRejection {
 /**
  * Detect whether a DISA specimen receipt represents a rejected request.
  *
- * A request counts as rejected when EITHER:
- *  - the specimen carries a recorded `Condition` (e.g. "Unsuitable for
- *    testing", "Clotted") — DISA's request-level specimen-condition field; or
- *  - any panel holds `RJREA` (rejection reason) / `RJREM` (rejection memo)
- *    metadata. These are stripped from the normal observation stream (see
- *    `flattenDisa`), so we scan the raw stream — `includeEmpty` keeps them —
- *    rather than re-deriving the order layout here.
+ * A request counts as rejected when any panel holds `RJREA` (rejection reason)
+ * or `RJREM` (rejection memo) metadata. These are stripped from the normal
+ * observation stream (see `flattenDisa`), so we scan the raw stream —
+ * `includeEmpty` keeps them — rather than re-deriving the order layout here.
  *
- * Rejected requests legitimately produce no observations (the sample was
- * never tested), so downstream code treats an empty observation set on a
- * rejected request as expected rather than a clinically-empty error.
+ * `reason` is the raw reason text for annotation: the RJREA reason, else the
+ * RJREM memo.
  *
- * `reason` is the raw reason text for annotation (Condition, else the RJREM
- * memo, else the RJREA reason).
+ * Rejected requests legitimately produce no observations (the sample was never
+ * tested), so downstream code treats an empty observation set on a rejected
+ * request as expected rather than a clinically-empty error.
+ *
+ * ⚠ CORRECTED 2026-07-17 — the previous version of this comment was the ROOT
+ * CAUSE, and it was wrong twice:
+ *
+ *  1. It claimed a request counts as rejected when "the specimen carries a
+ *     recorded `Condition` (e.g. 'Unsuitable for testing', 'Clotted')".
+ *     **That is an ASSUMPTION about the field's contents, and it is false.**
+ *     Measured across 900 DISA/TDS labs: `Condition` is `'GOOD'` (690) or empty
+ *     (210) — **never a rejection reason.** So the predicate marked 89% of labs
+ *     rejected because their specimen was GOOD, against v1's 0.6%.
+ *  2. It described `reason` as "(Condition, else the RJREM memo, else the RJREA
+ *     reason)" — but the code preferred RJREA over RJREM. The comment had its
+ *     own precedence backwards.
+ *
+ * The lesson worth keeping: **an example value in a comment is not a
+ * measurement.** "e.g. 'Clotted'" read as documentation and was invention.
  */
 export function detectDisaRejection(s: SpecimenRecpt): DisaRejection {
   const trim = (v: unknown): string | null => {
@@ -667,14 +680,34 @@ export function detectDisaRejection(s: SpecimenRecpt): DisaRejection {
       if (v !== null) memos.add(v);
     }
   }
-  const rejected = condition !== null || reasons.size > 0 || memos.size > 0;
+  // ⛔ `Condition` is deliberately NOT consulted — it is a SPECIMEN-QUALITY
+  // descriptor, not a rejection flag. The old predicate was
+  //     condition !== null || reasons.size > 0 || memos.size > 0
+  // and the old reason was `condition ?? ...`. Both were wrong, measured:
+  //
+  //   Condition's FULL value set across 900 DISA/TDS labs (2026-07-17):
+  //       empty  210
+  //       'GOOD' 690      <- and NOTHING else. Not one other value.
+  //
+  // So `condition !== null` marked a request rejected BECAUSE THE SPECIMEN WAS
+  // GOOD. On a random 158-lab sample the V2<->v1 gate caught it: CDR called 141
+  // (89%) rejected while v1 recorded ONE. And `reason = condition ?? ...` meant
+  // a genuinely rejected request reported its reason as "GOOD", masking the real
+  // RJREA text. Not cosmetic: "rejected" means NO RESULT downstream, and it
+  // re-sources panel_code (v2-transform.ts:283-287).
+  //
+  // ⚠ TDS is 1 site of 22. If another deployment records a real rejecting
+  // condition here (e.g. "HAEMOLYSED"), this drops that signal — but such a
+  // request should still carry RJREA, which IS the coded reject reason. Do not
+  // re-add `condition` as a trigger without measuring its value set at that site
+  // FIRST: that is exactly the assumption that produced this bug.
+  const rejected = reasons.size > 0 || memos.size > 0;
   const reason =
-    condition ??
-    (reasons.size > 0
+    reasons.size > 0
       ? [...reasons].join("; ")
       : memos.size > 0
         ? [...memos].join("; ")
-        : null);
+        : null;
   return { rejected, reason };
 }
 
