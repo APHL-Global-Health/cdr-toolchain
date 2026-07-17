@@ -89,6 +89,35 @@ export interface V2FieldException {
  */
 export const V1_REQUEST_BOOKKEEPING: readonly string[] = ["allPanelCodes"];
 
+/**
+ * ⛔ GRAIN MISMATCH — read before interpreting ANY request-level number.
+ *
+ * v1 and v2 do not agree on what one row IS:
+ *  - **v1's grain is (RequestID, OBRSetID)** — one row per ORDERED PANEL. TDS has
+ *    174,261 rows for 98,259 distinct requests (~1.77 each), and only **38,119
+ *    (38.8%) are single-panel — 60,140 (61.2%) carry 2+ distinct LIMSPanelCodes
+ *    across sibling OBR rows.**
+ *  - **v2's grain is the REQUEST** — one record, `obr_set_id` defaulted to 1, one
+ *    `panel_code` (the primary panel), and every panel's observations carried in
+ *    `lab_results` with their own `source_test_code`. Results bind to the request
+ *    by a FK to its auto-generated UUID primary key, assigned at ingest.
+ *
+ * `fetchRequestByRequestId` returns the LOWEST OBRSetID row (openldr.ts:110), so
+ * these defs compare CDR's PRIMARY panel against v1's FIRST OBR. For a
+ * multi-panel request those are two different panels and the difference is a
+ * GRAIN artifact, not an export defect.
+ *
+ * ⚠ This is why the old table made panel_code a CANDIDATE ARRAY (`allPanelCodes`,
+ * openldr.ts:33-41: "the parent panel code can sit on any OBRSetID, not just
+ * OBR=1"). This table bans candidate arrays on purpose — "a match on either
+ * wins" is what stopped the old gate ever learning the real rule. The strict
+ * assertion is kept, and where it reds systematically the REPORT derives the
+ * rule (D4). Do not reach for a candidate array to make it green.
+ *
+ * ⚠ Consequence for T7: panel_code / panel_desc / section_code numbers are only
+ * interpretable ALONGSIDE the multi-panel rate. `section_code` is derived FROM
+ * the panel (v2-transform.ts:323), so it inherits this exactly.
+ */
 const lr = (p: V2Payload) => p.lab_request;
 
 /** v1 prepends a "DISA" system prefix to facility codes; reuse the same rule the
@@ -462,15 +491,21 @@ export const V2_RESULT_EXCEPTIONS: readonly V2ResultFieldException[] = [
     field: "obr_set_id",
     v1Column: "OBRSetID",
     reason:
-      "v1 groups observations into HL7 OBR sets — one per ordered panel, assigned " +
-      "by v1's own migration. V2 has no OBR concept at all: V2LabResult carries " +
-      "source_test_code (the panel) and obx_set_id (position within it), and the " +
-      "OBR grouping is reconstructed by the consumer. There is no V2 value to " +
-      "compare, so grading it would only measure v1's numbering against nothing.",
+      "A DELIBERATE CONTRACT CHANGE, not an omission. v1 identifies an observation " +
+      "by the natural key (RequestID, OBRSetID, OBXSetID). v2 dropped that key: a " +
+      "lab_result belongs to its request by a foreign key to the request's " +
+      "auto-generated UUID primary key, assigned by v2 AT INGEST. So OBRSetID has " +
+      "no counterpart in a CDR payload by design — and the UUID cannot substitute " +
+      "for it here, because it does not exist yet: this gate compares the payload " +
+      "BEFORE it is posted, so there is no primary key to join on. Grading OBRSetID " +
+      "would measure v1's internal numbering against nothing.",
     evidence:
-      "types.ts:59-83 — V2LabResult has no obr_set_id and no request id. " +
-      "openldr.ts:224-236 shows OBRSetID is v1's join key between LabResults and " +
-      "Requests, i.e. v1-internal structure rather than observed clinical data.",
+      "openldr-v2/apps/openldr-minio/default-plugins/schema/hl7-fhir.schema.js " +
+      "(convertRecord, :1424-1441) is the v2 ingest contract: it builds ONE record " +
+      "per request, defaults `lab_request.obr_set_id` to 1, and carries lab_results " +
+      "as a contained array with no request id and no OBR field of their own. " +
+      "cdr types.ts:30-83 mirrors that: V2LabRequest has no obr_set_id and " +
+      "V2LabResult has neither a request id nor an OBRSetID.",
   },
   {
     field: "panel_desc",
