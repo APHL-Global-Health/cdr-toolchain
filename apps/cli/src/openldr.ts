@@ -31,6 +31,29 @@ export interface OpenLdrV1Request {
   TestedBy: string | null;
   AuthorisedBy: string | null;
   /**
+   * HL7 OBR set id. **v1's grain is (RequestID, OBRSetID) — ONE ROW PER ORDERED
+   * PANEL.** Measured on TDS: 76,002 of 174,261 rows are OBRSetID > 1 (43.6%),
+   * and 60,140 of 98,259 requests (61.2%) carry 2+ distinct LIMSPanelCodes.
+   * ⚠ `fetchRequestByRequestId` returns the LOWEST OBRSetID row (see below), so
+   * this is always the FIRST OBR — a fact that was implicit until now.
+   */
+  OBRSetID: number | null;
+  /** ⚠ NOT a duplicate of HL7PriorityCode — measured, they are orthogonal:
+   *  D x R 154,888 / E x R 19,260 / D x U 87 / E x U 14 / D x S 12. */
+  RequestTypeCode: string | null;
+  /** ⚠ The SAME facility as RequestingFacilityCode, WITHOUT v1's "DISA" prefix —
+   *  measured: RequestingFacilityCode 'DISA0JJAA' vs LIMSFacilityCode '0JJAA'. */
+  LIMSFacilityCode: string | null;
+  RegisteredBy: string | null;
+  /** ⚠ NOT free text — measured, the values are numeric codes ('17', '18',
+   *  '2421', '06050100'). Meaning undocumented. */
+  OrderingNotes: string | null;
+  LIMSAnalyzerCode: string | null;
+  LIMSVendorCode: string | null;
+  CollectionVolume: number | null;
+  LIMSRejectionCode: string | null;
+  LIMSRejectionDesc: string | null;
+  /**
    * All non-null LIMSPanelCode values across every OBR-set row for this
    * RequestID, deduplicated. v1 may split DISA's parent panel into several
    * OBR rows (one per sub-test) so the parent panel code can sit on any
@@ -76,8 +99,15 @@ const REQUEST_COLUMNS = `
   [HL7PriorityCode], [HL7SexCode], [HL7PatientClassCode],
   [HL7SectionCode], [HL7ResultStatusCode],
   [AgeInYears], [AgeInDays],
-  [AttendingDoctor], [TestedBy], [AuthorisedBy]
+  [AttendingDoctor], [TestedBy], [AuthorisedBy],
+  [OBRSetID], [RequestTypeCode], [LIMSFacilityCode],
+  [RegisteredBy], [OrderingNotes], [LIMSAnalyzerCode], [LIMSVendorCode],
+  [CollectionVolume], [LIMSRejectionCode], [LIMSRejectionDesc]
 `;
+// ⚠ EncryptedPatientID is deliberately ABSENT: PHI, and not_carried
+// (v1-coverage.ts). The gate prints values into diff rows and into committed
+// findings docs, so coverage is not a licence to widen a PHI blast radius.
+// The other 19 not_carried columns are likewise never selected.
 
 function quoteIdent(name: string): string {
   // SQL Server: escape closing brackets in identifiers
