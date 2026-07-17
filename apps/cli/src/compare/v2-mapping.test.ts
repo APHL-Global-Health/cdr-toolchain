@@ -164,61 +164,13 @@ test("the conditional rule does NOT fire for a FINAL result — that stays red",
 });
 
 // ---------------------------------------------------------------------------
-// THE COVERAGE GUARD. Without it, "cover every v1 column" degrades silently the
-// first time someone adds one. Enumerated from OpenLdrV1Request (openldr.ts:6-42),
-// not from memory.
+// The coverage guard MOVED to v1-coverage.test.ts, which asserts against the
+// GENERATED v1 schema snapshot (60/28 real columns) instead of a hand-maintained
+// list of OpenLdrV1Request's fields (26/13). The old guard covered 43% of v1
+// while claiming to cover all of it -- the exact blind spot this slice removed --
+// and a hand-maintained list would have to be edited every time a def is added,
+// which is how it silently drifted in the first place.
 // ---------------------------------------------------------------------------
-
-const V1_REQUEST_COLUMNS: readonly (keyof OpenLdrV1Request)[] = [
-  "RequestID",
-  "RequestingFacilityCode",
-  "TestingFacilityCode",
-  "LIMSPointOfCareDesc",
-  "LIMSPanelCode",
-  "LIMSPanelDesc",
-  "LIMSSpecimenSourceCode",
-  "LIMSSpecimenSourceDesc",
-  "SpecimenDateTime",
-  "ReceivedDateTime",
-  "RegisteredDateTime",
-  "AnalysisDateTime",
-  "AuthorisedDateTime",
-  "ClinicalInfo",
-  "ICD10ClinicalInfoCodes",
-  "Therapy",
-  "HL7PriorityCode",
-  "HL7SexCode",
-  "HL7PatientClassCode",
-  "HL7SectionCode",
-  "HL7ResultStatusCode",
-  "AgeInYears",
-  "AgeInDays",
-  "AttendingDoctor",
-  "TestedBy",
-  "AuthorisedBy",
-  "allPanelCodes",
-];
-
-test("every v1 request column has a field def, an exception, or is bookkeeping", () => {
-  const covered = new Set<string>([
-    ...V2_REQUEST_FIELDS.map((f) => f.v1Column),
-    ...V2_REQUEST_EXCEPTIONS.map((e) => e.v1Column),
-    ...V1_REQUEST_DERIVED,
-  ]);
-  const uncovered = V1_REQUEST_COLUMNS.filter((c) => !covered.has(c));
-  assert.deepEqual(uncovered, [], `uncovered v1 columns: ${uncovered.join(", ")}`);
-});
-
-// Guards the guard: if the list above drifts from the real interface, the test
-// above would still pass while silently checking fewer columns.
-test("the coverage list matches the def/exception tables — no phantom columns", () => {
-  const known = new Set<string>(V1_REQUEST_COLUMNS);
-  const phantom = [
-    ...V2_REQUEST_FIELDS.map((f) => f.v1Column),
-    ...V2_REQUEST_EXCEPTIONS.map((e) => e.v1Column),
-  ].filter((c) => !known.has(c));
-  assert.deepEqual(phantom, [], `defs reference v1 columns that do not exist: ${phantom.join(", ")}`);
-});
 
 // ---------------------------------------------------------------------------
 // The exception registry must carry EVIDENCE, not an assertion. This is what
@@ -238,4 +190,55 @@ test("no field is both graded and excepted — an exception cannot silence a def
   const graded = new Set(V2_REQUEST_FIELDS.map((f) => f.v1Column));
   const both = V2_REQUEST_EXCEPTIONS.filter((e) => graded.has(e.v1Column));
   assert.deepEqual(both.map((e) => e.field), []);
+});
+
+// ---------------------------------------------------------------------------
+// The 10 new request-level defs. Every getV2 below was MEASURED, not guessed.
+// ---------------------------------------------------------------------------
+
+// lims_facility_code DOES have a V2 counterpart and must MATCH. Measured on TDS,
+// the four v1 facility columns disambiguate exactly:
+//   RequestingFacilityCode 'DISA0JJAA'   TestingFacilityCode   'TDS'
+//   LIMSFacilityCode       '0JJAA'       ReceivingFacilityCode 'TDS'
+// i.e. LIMSFacilityCode is RequestingFacilityCode WITHOUT v1's DISA prefix, and
+// equals DISA's own Facility.Code -- which is what V2 emits. So this def is
+// expected GREEN and exists to PROVE the mapping, not to accuse. If it reds, the
+// bug is here, not in the export. (Asserting a defect on a field V2 does carry is
+// how patient_class nearly sent a fix slice to invent data v1 never had.)
+test("lims_facility_code matches V2's requesting facility concept — no prefix", () => {
+  const p = payload({ requesting_facility_code: { concept_code: "0JJAA" } as never });
+  assert.equal(statusOf(p, v1({ LIMSFacilityCode: "0JJAA" }), "lims_facility_code"), "match");
+});
+
+// THE MULTI-PANEL DEFECT. V2LabRequest has no obr_set_id at all (types.ts:30-57)
+// while v2's own contract does: 02-openldr_external.sql:276
+// `obr_set_id INTEGER -- HL7 OBR set ID (for multi-panel requests)` under
+// UNIQUE (request_id, obr_set_id, facility_id), and
+// external-persistence.service.ts:632 defaults it `?? 1`. Expected RED.
+test("obr_set_id is only_v1 — V2LabRequest has no such field", () => {
+  assert.equal(statusOf(payload({}), v1({ OBRSetID: 2 }), "obr_set_id"), "only_v1");
+});
+
+// CDR knows a request was REJECTED (result_status: rejection.rejected ? "X" : null,
+// v2-transform.ts:350) but carries no code or reason. v1 has both on 4,518 rows
+// (2.6%). detectDisaRejection is real logic that has never been graded.
+test("rejection_code is only_v1 — CDR drops WHY a request was rejected", () => {
+  assert.equal(statusOf(payload({}), v1({ LIMSRejectionCode: "HAEM" }), "rejection_code"), "only_v1");
+});
+
+// The '' pair-guard for the new defs: v1 writes '' not NULL for an absent string,
+// so an UNREJECTED request must MATCH. Without this, 169,743 unrejected rows would
+// report as losses.
+test("rejection_code vs an EMPTY v1 value is a match", () => {
+  assert.equal(statusOf(payload({}), v1({ LIMSRejectionCode: "" }), "rejection_code"), "match");
+});
+
+test("registered_by is only_v1 — CDR has no registered_by field", () => {
+  assert.equal(statusOf(payload({}), v1({ RegisteredBy: "JDOE" }), "registered_by"), "only_v1");
+});
+
+// 0 is v1's empty convention for numerics (types.ts:160). Without this, 137,887
+// zero rows would report as losses.
+test("collection_volume vs v1's zero is a match — 0 is v1's empty for numerics", () => {
+  assert.equal(statusOf(payload({}), v1({ CollectionVolume: 0 }), "collection_volume"), "match");
 });

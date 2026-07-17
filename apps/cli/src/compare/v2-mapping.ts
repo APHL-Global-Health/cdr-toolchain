@@ -340,6 +340,118 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     getV1: (r) => r.AuthorisedBy,
     comparator: stringCi,
   },
+  {
+    // ⛔ THE MULTI-PANEL DEFECT. v1's grain is (RequestID, OBRSetID) — one row per
+    // ORDERED PANEL — and v2 AGREES: 02-openldr_external.sql:276 has
+    // `obr_set_id INTEGER -- HL7 OBR set ID (for multi-panel requests)` under
+    // UNIQUE (request_id, obr_set_id, facility_id). CDR is the outlier:
+    // V2LabRequest has no obr_set_id, toV2 emits ONE record per DISA lab, and
+    // external-persistence.service.ts:632 pins it to `?? 1`.
+    //
+    // Measured: 76,002 of 174,261 rows are OBR > 1 (43.6%); 60,140 of 98,259
+    // requests (61.2%) carry 2+ distinct panels. Expected RED on every row — that
+    // IS the finding.
+    //
+    // ⚠ The FIX is its own slice, and it MUST emit obr_set_id: emitting one record
+    // per panel WITHOUT it is WORSE than the bug, because every panel collides on
+    // (request_id, 1, facility_id) and the ON CONFLICT DO UPDATE silently
+    // overwrites the last.
+    field: "obr_set_id",
+    v1Column: "OBRSetID",
+    getV2: () => null,
+    getV1: (r) => r.OBRSetID,
+    comparator: stringCi,
+  },
+  {
+    // MEASURED, and GREEN by design — this def exists to PROVE the mapping, not to
+    // accuse. The four v1 facility columns disambiguate exactly (TDS):
+    //   RequestingFacilityCode 'DISA0JJAA'   TestingFacilityCode   'TDS'
+    //   LIMSFacilityCode       '0JJAA'       ReceivingFacilityCode 'TDS'
+    // LIMSFacilityCode is RequestingFacilityCode minus v1's "DISA" prefix, and is
+    // DISA's own Facility.Code — exactly what V2 emits. Same concept, compared
+    // WITHOUT the prefix strip its sibling needs. If this reds, the bug is HERE.
+    field: "lims_facility_code",
+    v1Column: "LIMSFacilityCode",
+    getV2: (p) => lr(p).requesting_facility_code?.concept_code ?? null,
+    getV1: (r) => r.LIMSFacilityCode,
+    comparator: stringCi,
+  },
+  {
+    // ⚠ NOT a duplicate of `priority` — I assumed it was; measurement killed that.
+    // Orthogonal: D x R 154,888 / E x R 19,260 / D x U 87 / E x U 14 / D x S 12.
+    // CDR has no counterpart. Expected RED on all 174,261.
+    field: "request_type",
+    v1Column: "RequestTypeCode",
+    getV2: () => null,
+    getV1: (r) => r.RequestTypeCode,
+    comparator: stringCi,
+  },
+  {
+    // v1 173,915 of 174,261 (99.8%). CDR has no registered_by. Expected RED.
+    field: "registered_by",
+    v1Column: "RegisteredBy",
+    getV2: () => null,
+    getV1: (r) => r.RegisteredBy,
+    comparator: stringCi,
+  },
+  {
+    // v1 171,670 of 174,261 (98.5%). ⚠ NOT free text — I suspected PHI; measurement
+    // killed that: the values are numeric codes ('17', '18', '2421', '06050100').
+    // Meaning undocumented. CDR has no counterpart. Expected RED.
+    field: "ordering_notes",
+    v1Column: "OrderingNotes",
+    getV2: () => null,
+    getV1: (r) => r.OrderingNotes,
+    comparator: stringCi,
+  },
+  {
+    // v1 78,289 of 174,261 (44.9%) — real instrument codes (ALINA, ALINK, 75PCR,
+    // MSKAN). Genuine provenance, not noise; AMR/QC may want it. Expected RED.
+    field: "analyzer_code",
+    v1Column: "LIMSAnalyzerCode",
+    getV2: () => null,
+    getV1: (r) => r.LIMSAnalyzerCode,
+    comparator: stringCi,
+  },
+  {
+    // v1 46,381 of 174,261 (26.6%). CDR has no counterpart. Expected RED.
+    field: "vendor_code",
+    v1Column: "LIMSVendorCode",
+    getV2: () => null,
+    getV1: (r) => r.LIMSVendorCode,
+    comparator: stringCi,
+  },
+  {
+    // v1 36,374 non-zero of 174,261 (20.9%). ⚠ MEASURED WITH `<> 0`, not `<> ''`:
+    // a numeric 0 casts to '0' and would have read as 100% populated — that error
+    // is what made the spec's first pass claim twelve 100% columns. 0 is v1's
+    // empty convention for numerics (types.ts:160), so map it to null: otherwise
+    // 137,887 zero rows report as losses.
+    field: "collection_volume",
+    v1Column: "CollectionVolume",
+    getV2: () => null,
+    getV1: (r) => (r.CollectionVolume === 0 ? null : r.CollectionVolume),
+    comparator: stringCi,
+  },
+  {
+    // ⛔ THE HIGHEST-VALUE NEW DEF: real logic, never graded. toV2 DOES detect
+    // rejection (detectDisaRejection, v2-transform.ts:669) but carries only the
+    // FACT — `result_status: rejection.rejected ? "X" : null` (:350). It drops the
+    // CODE and the REASON. v1 has both on 4,518 rows (2.6%); the other 169,743 are
+    // '' and correctly match CDR's null.
+    field: "rejection_code",
+    v1Column: "LIMSRejectionCode",
+    getV2: () => null,
+    getV1: (r) => r.LIMSRejectionCode,
+    comparator: stringCi,
+  },
+  {
+    field: "rejection_desc",
+    v1Column: "LIMSRejectionDesc",
+    getV2: () => null,
+    getV1: (r) => r.LIMSRejectionDesc,
+    comparator: stringCiLoose,
+  },
 ];
 
 export const V2_REQUEST_EXCEPTIONS: readonly V2FieldException[] = [
