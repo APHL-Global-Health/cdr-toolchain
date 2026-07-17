@@ -17,6 +17,13 @@ import { emitMeta } from "../output.js";
 import { loadRuntime } from "./context.js";
 import { toV2 } from "../export/v2-transform.js";
 import type { V2Payload } from "../export/types.js";
+import {
+  diffV2Request,
+  diffV2Results,
+  type V2FieldStats,
+  type V2ResultDiffSummary,
+} from "../compare/v2-diff.js";
+import { V2_REQUEST_FIELDS, V2_RESULT_FIELDS } from "../compare/v2-mapping.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
 import { DEFAULT_SITE } from "../export/site-config.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
@@ -82,6 +89,18 @@ interface BatchSummary {
     /** Which config/<country>.yaml drove excludeObs. `null` = none, which means
      *  an EMPTY documentation-panel set — a materially different payload. */
     country: string | null;
+    /** Request-level V2<->v1 grading, per field. */
+    per_field: Record<string, V2FieldStats>;
+    /** Observation-level grading. Only present with --results. */
+    results?: {
+      observations_v2: number;
+      observations_v1: number;
+      paired: number;
+      only_v2: number;
+      only_v1: number;
+      v1_results_documentation_excluded: number;
+      per_field: Record<string, V2FieldStats>;
+    };
   };
 }
 
@@ -292,10 +311,43 @@ export function registerCompareBatchCommand(program: Command): void {
       let codebook: Codebook | null = null;
       let docConfig: DocConfig | null = null;
       let v2PayloadsBuilt = 0;
+      const v2PerField: Record<string, V2FieldStats> = {};
+      const v2ResultPerField: Record<string, V2FieldStats> = {};
+      const v2ResultAgg = {
+        observations_v2: 0,
+        observations_v1: 0,
+        paired: 0,
+        only_v2: 0,
+        only_v1: 0,
+        v1_results_documentation_excluded: 0,
+      };
       if (runV2) {
         codebook = await loadCodebook(buildServer(config.connectionString));
         await closePool();
         docConfig = loadCountryDocConfig(opts.country ?? config.country);
+        for (const def of V2_REQUEST_FIELDS) {
+          v2PerField[def.field] = { match: 0, mismatch: 0, only_v2: 0, only_v1: 0 };
+        }
+        for (const def of V2_RESULT_FIELDS) {
+          v2ResultPerField[def.field] = { match: 0, mismatch: 0, only_v2: 0, only_v1: 0 };
+        }
+      }
+
+      function rollUpV2Results(s: V2ResultDiffSummary): void {
+        v2ResultAgg.observations_v2 += s.observations_v2;
+        v2ResultAgg.observations_v1 += s.observations_v1;
+        v2ResultAgg.paired += s.paired;
+        v2ResultAgg.only_v2 += s.only_v2;
+        v2ResultAgg.only_v1 += s.only_v1;
+        v2ResultAgg.v1_results_documentation_excluded += s.v1_results_documentation_excluded;
+        for (const [field, stats] of Object.entries(s.per_field)) {
+          const agg = v2ResultPerField[field];
+          if (agg === undefined) continue;
+          agg.match += stats.match;
+          agg.mismatch += stats.mismatch;
+          agg.only_v2 += stats.only_v2;
+          agg.only_v1 += stats.only_v1;
+        }
       }
 
       // One resolver instance for the whole batch — the (CODE1, CODE2)
@@ -339,13 +391,14 @@ export function registerCompareBatchCommand(program: Command): void {
             labResult.summary = diff.summary;
             let labPerfect = isPerfectMatch(diff.summary);
 
-            // Build the shipping payload. Nothing grades it yet — the V2<->v1
-            // field defs are the next task. Building it here first proves the
-            // wiring (codebook, site, doc config, audit) works against real
-            // labs before any assertion depends on it.
+            // Build the shipping payload and grade it against v1 — the leg the
+            // gate has never looked at.
+            let v2Payload: V2Payload | null = null;
             if (runV2 && codebook !== null && docConfig !== null) {
-              buildV2Payload(disa, prefix, codebook, docConfig);
+              v2Payload = buildV2Payload(disa, prefix, codebook, docConfig);
               v2PayloadsBuilt++;
+              const v2Diff = diffV2Request(v2Payload, v1);
+              for (const row of v2Diff.fields) v2PerField[row.field]![row.status]++;
             }
 
             for (const row of diff.fields) {
@@ -370,6 +423,15 @@ export function registerCompareBatchCommand(program: Command): void {
                 labsPendingInV1++;
                 labResult.results_status = "pending_in_v1";
               } else {
+                // Same skip as the DISA<->v1 gate above: a pending lab has no v1
+                // results at all, so grading the V2 stream against nothing would
+                // report every observation as only_v2 — false red, not a finding.
+                if (v2Payload !== null && docConfig !== null) {
+                  rollUpV2Results(
+                    diffV2Results(v2Payload, v1Rows, { documentationPanels: docConfig.panels })
+                      .summary,
+                  );
+                }
                 const rdiff = diffResults(disa, v1Rows, { includeEmpty });
                 labResult.results_summary = rdiff.summary;
                 obsAgg.total += rdiff.summary.observations_total;
@@ -420,6 +482,8 @@ export function registerCompareBatchCommand(program: Command): void {
               v2: {
                 payloads_built: v2PayloadsBuilt,
                 country: opts.country ?? config.country ?? null,
+                per_field: v2PerField,
+                ...(runResults ? { results: { ...v2ResultAgg, per_field: v2ResultPerField } } : {}),
               },
             }
           : {}),

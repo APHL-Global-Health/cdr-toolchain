@@ -1,5 +1,5 @@
-import type { V2Payload } from "../export/types.js";
-import type { OpenLdrV1Request } from "../openldr.js";
+import type { V2LabResult, V2Payload } from "../export/types.js";
+import type { OpenLdrV1LabResult, OpenLdrV1Request } from "../openldr.js";
 import {
   datetime,
   stringCi,
@@ -326,5 +326,163 @@ export const V2_REQUEST_EXCEPTIONS: readonly V2FieldException[] = [
       "separate `facility_name` and `ward` fields. comparators.ts:88-103 records the " +
       "truncation empirically: 87 TDS labs where v1 stores 'KCMC' for DISA's 'KCMC " +
       "CLINICAL LABORATORY', and 594 where v1's parsed facility name is null entirely.",
+  },
+];
+
+// ===========================================================================
+// RESULT LEVEL — the observation stream.
+// ===========================================================================
+
+export interface V2ResultFieldDef {
+  field: string;
+  v1Column: keyof OpenLdrV1LabResult;
+  getV2: (r: V2LabResult) => unknown;
+  getV1: (r: OpenLdrV1LabResult) => unknown;
+  comparator: (v2: unknown, v1: unknown) => CompareResult;
+}
+
+export interface V2ResultFieldException {
+  field: string;
+  v1Column: keyof OpenLdrV1LabResult;
+  reason: string;
+  evidence: string;
+}
+
+/**
+ * The PAIRING KEY, plus v1's own request pointer.
+ *
+ * ⚠ These are deliberately NOT graded. Paired rows are selected BY these
+ * columns, so a def over them would compare each value to itself and report
+ * 100% match forever — a vacuous green that would look like coverage. The
+ * honest signal for these lives in the pairing outcome instead: an observation
+ * whose panel+param finds no partner is reported as `only_v1` / `only_v2`.
+ *
+ * ⚠ The plan named the key `(RequestID, OBRSetID, OBXSetID)`. That is not
+ * buildable: `V2LabResult` carries neither a request id nor an OBRSetID (see
+ * types.ts:59-83). The real key is `(source_test_code, observation_code)` —
+ * which is exactly the `(panelCode, paramCode)` key `result-diff.ts:349` already
+ * pairs the DISA<->v1 gate on. Reused rather than reinvented.
+ */
+export const V1_RESULT_BOOKKEEPING: readonly string[] = [
+  "RequestID",
+  "LIMSPanelCode",
+  "LIMSObservationCode",
+];
+
+export const V2_RESULT_FIELDS: readonly V2ResultFieldDef[] = [
+  {
+    // v1's OBX-1 vs the counter buildLabResults maintains (v2-transform.ts:433-441,
+    // resetting per panelCode#panelIndex). Genuinely comparable — and if the two
+    // orderings disagree, that is a finding, not a nuisance.
+    field: "obx_set_id",
+    v1Column: "OBXSetID",
+    getV2: (r) => r.obx_set_id,
+    getV1: (r) => r.OBXSetID,
+    comparator: stringCi,
+  },
+  {
+    field: "obx_sub_id",
+    v1Column: "OBXSubID",
+    getV2: (r) => r.obx_sub_id,
+    getV1: (r) => r.OBXSubID,
+    comparator: stringCi,
+  },
+  {
+    field: "observation_desc",
+    v1Column: "LIMSObservationDesc",
+    getV2: (r) => r.observation_code?.display_name ?? null,
+    getV1: (r) => r.LIMSObservationDesc,
+    comparator: stringCiLoose,
+  },
+  {
+    field: "result_value",
+    v1Column: "LIMSRptResult",
+    getV2: (r) => r.result_value,
+    getV1: (r) => r.LIMSRptResult,
+    comparator: stringCiLoose,
+  },
+  {
+    field: "coded_value",
+    v1Column: "LIMSCodedValue",
+    getV2: (r) => r.coded_value,
+    getV1: (r) => r.LIMSCodedValue,
+    comparator: stringCi,
+  },
+  {
+    field: "result_type",
+    v1Column: "HL7ResultTypeCode",
+    getV2: (r) => r.result_type,
+    getV1: (r) => r.HL7ResultTypeCode,
+    comparator: stringCi,
+  },
+  {
+    // ★ THE ACCEPTANCE FIELD — the reason this slice exists.
+    //
+    // v2-transform.ts:496 hardcodes `abnormal_flag: null`. v1 carries a real
+    // flag on 107,602 of 643,855 DISA/TDS rows (16.7%): N 99,232 / L 6,003 /
+    // H 2,339 / LL 16 / HH 12. Nothing has ever compared them, because the gate
+    // never looked at the export. Expected RED on ~107,602 rows.
+    //
+    // ⚠ NOT 100%. The spec claimed 643,855/643,855 because count() counts
+    // NON-NULL and v1 writes '' for "no flag" on the other 536,253 rows. Those
+    // must score MATCH against CDR's null — see the pair-guard test. If this
+    // reports ~643,855 red, the ''-empty rule is broken and the number is a
+    // 6x fabrication, not a finding.
+    field: "abnormal_flag",
+    v1Column: "HL7AbnormalFlagCodes",
+    getV2: (r) => r.abnormal_flag,
+    getV1: (r) => r.HL7AbnormalFlagCodes,
+    comparator: stringCi,
+  },
+  {
+    field: "rpt_range",
+    v1Column: "LIMSRptRange",
+    getV2: (r) => r.rpt_range,
+    getV1: (r) => r.LIMSRptRange,
+    comparator: stringCiLoose,
+  },
+  {
+    field: "numeric_value",
+    v1Column: "SIValue",
+    getV2: (r) => r.numeric_value,
+    getV1: (r) => r.SIValue,
+    comparator: stringCi,
+  },
+  {
+    field: "numeric_units",
+    v1Column: "SIUnits",
+    getV2: (r) => r.numeric_units,
+    getV1: (r) => r.SIUnits,
+    comparator: stringCiLoose,
+  },
+];
+
+export const V2_RESULT_EXCEPTIONS: readonly V2ResultFieldException[] = [
+  {
+    field: "obr_set_id",
+    v1Column: "OBRSetID",
+    reason:
+      "v1 groups observations into HL7 OBR sets — one per ordered panel, assigned " +
+      "by v1's own migration. V2 has no OBR concept at all: V2LabResult carries " +
+      "source_test_code (the panel) and obx_set_id (position within it), and the " +
+      "OBR grouping is reconstructed by the consumer. There is no V2 value to " +
+      "compare, so grading it would only measure v1's numbering against nothing.",
+    evidence:
+      "types.ts:59-83 — V2LabResult has no obr_set_id and no request id. " +
+      "openldr.ts:224-236 shows OBRSetID is v1's join key between LabResults and " +
+      "Requests, i.e. v1-internal structure rather than observed clinical data.",
+  },
+  {
+    field: "panel_desc",
+    v1Column: "LIMSPanelDesc",
+    reason:
+      "Not a LabResults column: openldr.ts:217 selects it as req.[LIMSPanelDesc] " +
+      "through the join to Requests, so every result row under one panel repeats " +
+      "the same request-level value. It is already graded strictly at the request " +
+      "level as `panel_desc`. Grading it again per observation would multiply one " +
+      "request-level finding by the observation count and misreport its size.",
+    evidence:
+      "openldr.ts:215-222 (LAB_RESULT_COLUMNS) — LIMSPanelCode and LIMSPanelDesc " +
+      "are both prefixed `req.`, unlike every other selected column, which is `lr.`.",
   },
 ];
