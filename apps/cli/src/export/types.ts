@@ -101,6 +101,11 @@ export interface V2LabResult {
 
 export interface V2Isolate {
   isolate_index: number;
+  /** The OBR this isolate was cultured under. Required for the same reason as
+   *  V2LabResult.obr_set_id: FHIR hangs the isolate Observation off its OBR's
+   *  ServiceRequest, and with N ServiceRequests per lab there is no single
+   *  "the" request to reference. Linked via export/obr-sets.ts. */
+  obr_set_id: number;
   source_test_code: string;
   organism_code: V2ConceptCode;
   organism_type: "bacteria" | "fungus" | "parasite" | "none";
@@ -122,6 +127,8 @@ export interface V2Isolate {
 
 export interface V2SusceptibilityTest {
   isolate_index: number | null;
+  /** The OBR this AST ran under — see V2Isolate.obr_set_id. */
+  obr_set_id: number;
   source_test_code: string;
   antibiotic_code: V2ConceptCode;
   test_method: "DISK" | "MIC" | null;

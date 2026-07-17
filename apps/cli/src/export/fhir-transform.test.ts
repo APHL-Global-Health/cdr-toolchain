@@ -13,8 +13,9 @@ export function basePayload(over: Partial<V2Payload> = {}): V2Payload {
       surname: "Doe", sex: "F", folder_no: "FLD-9981", date_of_birth: "1990-05-14",
       phone: null, email: null, national_id: null, patient_data: {},
     },
-    lab_request: {
+    lab_requests: [{
       request_id: "DEFAULT_REQ-2024-00456",
+      obr_set_id: 1,
       facility_code: null, panel_code: null, specimen_code: null,
       taken_datetime: null, collected_datetime: null, received_at: null,
       registered_at: null, analysis_at: null, authorised_at: null,
@@ -23,7 +24,7 @@ export function basePayload(over: Partial<V2Payload> = {}): V2Payload {
       section_code: null, result_status: "F", requesting_facility_code: null,
       testing_facility_code: null, requesting_doctor: null, tested_by: null,
       authorised_by: null, source_payload: {},
-    },
+    }],
     lab_results: [], isolates: [], susceptibility_tests: [],
     ...over,
   };
@@ -110,23 +111,23 @@ test("a patient with nothing but a guid still yields a valid minimal Patient", (
 
 test("toFhir throws when request_id cannot form a FHIR id", () => {
   const pl = basePayload();
-  pl.lab_request.request_id = "___";
+  pl.lab_requests[0]!.request_id = "___";
   pl.patient.patient_guid = null;
   assert.throws(() => toFhir(pl, TZ), /request_id/);
 });
 
 test("lab_request produces ServiceRequest, Specimen and DiagnosticReport", () => {
   const pl = basePayload();
-  pl.lab_request.panel_code = {
+  pl.lab_requests[0]!.panel_code = {
     concept_code: "CULT", display_name: "Blood Culture",
     concept_class: "panel", datatype: "coded", system_id: "DEFAULT_TEST",
   };
-  pl.lab_request.specimen_code = {
+  pl.lab_requests[0]!.specimen_code = {
     concept_code: "BLD", display_name: "Blood",
     concept_class: "specimen", datatype: "coded", system_id: "DEFAULT_SPEC",
   };
-  pl.lab_request.collected_datetime = "2024-07-20T08:30:00";
-  pl.lab_request.received_at = "2024-07-20T09:00:00";
+  pl.lab_requests[0]!.collected_datetime = "2024-07-20T08:30:00";
+  pl.lab_requests[0]!.received_at = "2024-07-20T09:00:00";
 
   const out = toFhir(pl, TZ);
   const sr = findOne(out, "ServiceRequest");
@@ -154,7 +155,7 @@ test("lab_request produces ServiceRequest, Specimen and DiagnosticReport", () =>
 test("result_status maps to DiagnosticReport.status", () => {
   const s = (rs: string | null) => {
     const pl = basePayload();
-    pl.lab_request.result_status = rs;
+    pl.lab_requests[0]!.result_status = rs;
     return (findOne(toFhir(pl, TZ), "DiagnosticReport") as any).status;
   };
   assert.equal(s("F"), "final");
@@ -170,7 +171,7 @@ test("result_status maps to DiagnosticReport.status", () => {
 
 test("a cancelled result revokes the ServiceRequest rather than completing it", () => {
   const pl = basePayload();
-  pl.lab_request.result_status = "X";
+  pl.lab_requests[0]!.result_status = "X";
   const out = toFhir(pl, TZ);
   assert.equal(findOne(out, "DiagnosticReport").status, "cancelled");
   assert.equal(findOne(out, "ServiceRequest").status, "revoked");
@@ -179,7 +180,7 @@ test("a cancelled result revokes the ServiceRequest rather than completing it", 
 test("a null panel_code still yields a DiagnosticReport with a code", () => {
   // CE REQUIRES DiagnosticReport.code — we must never emit a report without one.
   const pl = basePayload();
-  pl.lab_request.panel_code = null;
+  pl.lab_requests[0]!.panel_code = null;
   const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
   assert.ok(dr.code, "DiagnosticReport.code is required by CE");
   assert.ok(dr.code.coding[0].code, "code must carry an actual coding");
@@ -187,7 +188,7 @@ test("a null panel_code still yields a DiagnosticReport with a code", () => {
 
 test("a null specimen_code omits Specimen.type rather than emitting an empty one", () => {
   const pl = basePayload();
-  pl.lab_request.specimen_code = null;
+  pl.lab_requests[0]!.specimen_code = null;
   const sp = findOne(toFhir(pl, TZ), "Specimen");
   assert.equal("type" in sp, false);
 });
@@ -204,8 +205,8 @@ test("absent dates are omitted, not emitted as null", () => {
 
 test("clinical_info and requesting_doctor ride the ServiceRequest", () => {
   const pl = basePayload();
-  pl.lab_request.clinical_info = "suspected sepsis";
-  pl.lab_request.requesting_doctor = "Dr Mwakasege";
+  pl.lab_requests[0]!.clinical_info = "suspected sepsis";
+  pl.lab_requests[0]!.requesting_doctor = "Dr Mwakasege";
   const sr = findOne(toFhir(pl, TZ), "ServiceRequest");
   assert.equal(sr.note[0].text, "suspected sepsis");
   assert.equal(sr.requester.display, "Dr Mwakasege");
@@ -215,7 +216,7 @@ test("every emitted id satisfies CE's ID_RE", () => {
   // The whole resource set must be id-safe, not just the Patient.
   const CE_ID_RE = /^[A-Za-z0-9.\-]{1,64}$/;
   const pl = basePayload();
-  pl.lab_request.specimen_code = {
+  pl.lab_requests[0]!.specimen_code = {
     concept_code: "BLD", display_name: "Blood",
     concept_class: "specimen", datatype: "coded", system_id: "DEFAULT_SPEC",
   };
@@ -227,7 +228,7 @@ test("every emitted id satisfies CE's ID_RE", () => {
 
 function labResult(over: Partial<V2LabResult> = {}): V2LabResult {
   return {
-    source_test_code: "CULT", obx_set_id: 1, obx_sub_id: 0,
+    source_test_code: "CULT", obr_set_id: 1, obx_set_id: 1, obx_sub_id: 0,
     observation_code: {
       concept_code: "WBC", display_name: "White Blood Cell Count",
       concept_class: "test", datatype: "numeric", system_id: "DEFAULT_TEST",
@@ -330,7 +331,7 @@ test("no DiagnosticReport.result key when there are no results", () => {
 
 function isolate(over: Partial<V2Isolate> = {}): V2Isolate {
   return {
-    isolate_index: 1, source_test_code: "CULT",
+    isolate_index: 1, obr_set_id: 1, source_test_code: "CULT",
     organism_code: {
       concept_code: "ECO", display_name: "Escherichia coli",
       concept_class: "organism", datatype: "coded",
@@ -345,7 +346,7 @@ function isolate(over: Partial<V2Isolate> = {}): V2Isolate {
 
 function ast(over: Partial<V2SusceptibilityTest> = {}): V2SusceptibilityTest {
   return {
-    isolate_index: 1, source_test_code: "SENS",
+    isolate_index: 1, obr_set_id: 1, source_test_code: "SENS",
     antibiotic_code: {
       concept_code: "AMP", display_name: "Ampicillin",
       concept_class: "antibiotic", datatype: "coded",
@@ -501,7 +502,7 @@ test("ServiceRequest carries the business identifier CE projects as request_id",
 
 test("DISA priority maps onto FHIR's enum", () => {
   const p = (v: string | null) => {
-    const pl = basePayload(); pl.lab_request.priority = v;
+    const pl = basePayload(); pl.lab_requests[0]!.priority = v;
     return (findOne(toFhir(pl, TZ), "ServiceRequest") as any).priority;
   };
   // Measured across 3.4M v1 rows the source emits only R/U/S.
@@ -514,7 +515,7 @@ test("DISA priority maps onto FHIR's enum", () => {
 
 test("registered_at becomes authoredOn with the configured offset", () => {
   const pl = basePayload();
-  pl.lab_request.registered_at = "2024-07-20T07:00:00";
+  pl.lab_requests[0]!.registered_at = "2024-07-20T07:00:00";
   const sr = findOne(toFhir(pl, TZ), "ServiceRequest");
   assert.equal(sr.authoredOn, "2024-07-20T07:00:00+02:00");
 });
@@ -545,4 +546,76 @@ test("no Specimen id means no dangling Observation.specimen reference", () => {
   const o: any = out.find((r: any) => r.resourceType === "Observation");
   if (sp.id === undefined) assert.equal("specimen" in o, false);
   else assert.equal(o.specimen.reference, `Specimen/${sp.id}`);
+});
+
+// ---------------------------------------------------------------------------
+// MULTI-OBR — the cardinality this slice buys. Modelled on TZDISATDS0047711:
+// TestOrders [MRCSW,MRCSW,MRCSW,MICBM,MSENS], and v1 puts results under OBR 3
+// and 4 ONLY (OBR 1,2 are superseded reruns; OBR 5 was never resulted).
+// ---------------------------------------------------------------------------
+
+function multiObrPayload(): V2Payload {
+  const base = basePayload();
+  const req = (obr: number, panel: string) => ({
+    ...base.lab_requests[0]!,
+    obr_set_id: obr,
+    panel_code: {
+      concept_code: panel, display_name: panel,
+      concept_class: "panel", datatype: "coded", system_id: "DEFAULT_TEST",
+    } as never,
+  });
+  return basePayload({
+    lab_requests: [req(1, "MRCSW"), req(2, "MRCSW"), req(3, "MRCSW"), req(4, "MICBM"), req(5, "MSENS")],
+    lab_results: [
+      labResult({ source_test_code: "MRCSW", obr_set_id: 3 }),
+      labResult({ source_test_code: "MICBM", obr_set_id: 4 }),
+    ],
+  });
+}
+
+test("a 5-OBR lab emits 5 ServiceRequests with distinct ids, in order", () => {
+  const out = toFhir(multiObrPayload(), TZ);
+  const srs = out.filter((r: any) => r.resourceType === "ServiceRequest") as any[];
+  assert.equal(srs.length, 5);
+  assert.equal(new Set(srs.map((r) => r.id)).size, 5);
+  assert.deepEqual(srs.map((r) => r.code.coding[0].code), ["MRCSW", "MRCSW", "MRCSW", "MICBM", "MSENS"]);
+});
+
+test("the Specimen stays SINGLE — it is specimen-level, not per-OBR", () => {
+  // A per-OBR loop would emit 5 Specimens sharing one id, and CE's
+  // (resource_type, id) upsert would silently keep only the last.
+  findOne(toFhir(multiObrPayload(), TZ), "Specimen");
+});
+
+test("obr_set_id rides on ServiceRequest.identifier", () => {
+  const out = toFhir(multiObrPayload(), TZ);
+  const srs = out.filter((r: any) => r.resourceType === "ServiceRequest") as any[];
+  assert.deepEqual(
+    srs.map((r) => r.identifier.find((i: any) => i.system === "urn:openldr:obr-set-id").value),
+    ["1", "2", "3", "4", "5"],
+  );
+});
+
+test("each Observation hangs off ITS OWN OBR's ServiceRequest", () => {
+  const out = toFhir(multiObrPayload(), TZ);
+  const obs = out.filter((r: any) => r.resourceType === "Observation") as any[];
+  assert.deepEqual(
+    obs.map((o) => o.basedOn[0].reference),
+    ["ServiceRequest/DEFAULT-REQ-2024-00456-obr3", "ServiceRequest/DEFAULT-REQ-2024-00456-obr4"],
+  );
+});
+
+test("each report indexes only ITS OWN OBR's results", () => {
+  // The old code found the FIRST DiagnosticReport and gave it every observation
+  // in the lab — with N reports that files another panel's results under this one.
+  const out = toFhir(multiObrPayload(), TZ);
+  const byObr = new Map<string, any>();
+  for (const r of out as any[]) {
+    if (r.resourceType !== "DiagnosticReport") continue;
+    byObr.set(r.identifier.find((i: any) => i.system === "urn:openldr:obr-set-id").value, r);
+  }
+  assert.deepEqual(byObr.get("3").result.map((x: any) => x.reference), ["Observation/DEFAULT-REQ-2024-00456-obs-1"]);
+  assert.deepEqual(byObr.get("4").result.map((x: any) => x.reference), ["Observation/DEFAULT-REQ-2024-00456-obs-2"]);
+  // superseded reruns (1,2) and the never-resulted panel (5): order kept, no results
+  for (const obr of ["1", "2", "5"]) assert.equal("result" in byObr.get(obr), false);
 });

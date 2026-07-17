@@ -1,4 +1,4 @@
-import type { V2LabResult, V2Payload } from "../export/types.js";
+import type { V2LabRequest, V2LabResult, V2Payload } from "../export/types.js";
 import type { OpenLdrV1LabResult, OpenLdrV1Request } from "../openldr.js";
 import {
   datetime,
@@ -35,8 +35,10 @@ export interface V2FieldDef {
   /** The v1 column this field maps to. Typed against the real row shape so a
    *  renamed column is a compile error, and drives the coverage guard. */
   v1Column: keyof OpenLdrV1Request;
-  /** ONE source. Returning an array is not supported — see the header. */
-  getV2: (p: V2Payload) => unknown;
+  /** ONE source. Returning an array is not supported — see the header.
+   *  Receives the single lab_request being graded — the payload's OBR whose
+   *  obr_set_id matches the v1 row's OBRSetID. */
+  getV2: (r: V2LabRequest) => unknown;
   /** ONE source. */
   getV1: (r: OpenLdrV1Request) => unknown;
   comparator: (v2: unknown, v1: unknown) => CompareResult;
@@ -122,7 +124,12 @@ export interface V2FieldException {
  * OBR=1") — "a match on either wins" turned a structural defect green. That is
  * why this table bans them. Do NOT reach for one to make this pass.
  */
-const lr = (p: V2Payload) => p.lab_request;
+// ⛔ REMOVED: `const lr = (p: V2Payload) => p.lab_request`.
+// A payload no longer HAS one request — it has one per ordered panel. The defs
+// now receive the single V2LabRequest being graded, and compare-batch pairs it
+// against the v1 row with the SAME OBRSetID. Reaching back to the payload here
+// would reintroduce "grade CDR's primary panel against v1's first OBR", which
+// is the defect this slice fixes.
 
 /** v1 prepends a "DISA" system prefix to facility codes; reuse the same rule the
  *  DISA<->v1 table uses (mapping.ts:95) rather than inventing a second one. */
@@ -132,35 +139,35 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
   {
     field: "request_id",
     v1Column: "RequestID",
-    getV2: (p) => lr(p).request_id,
+    getV2: (r) => r.request_id,
     getV1: (r) => r.RequestID,
     comparator: stringCi,
   },
   {
     field: "requesting_facility_code",
     v1Column: "RequestingFacilityCode",
-    getV2: (p) => lr(p).requesting_facility_code?.concept_code ?? null,
+    getV2: (r) => r.requesting_facility_code?.concept_code ?? null,
     getV1: (r) => r.RequestingFacilityCode,
     comparator: facilityCode,
   },
   {
     field: "testing_facility_code",
     v1Column: "TestingFacilityCode",
-    getV2: (p) => lr(p).testing_facility_code?.concept_code ?? null,
+    getV2: (r) => r.testing_facility_code?.concept_code ?? null,
     getV1: (r) => r.TestingFacilityCode,
     comparator: facilityCode,
   },
   {
     field: "panel_code",
     v1Column: "LIMSPanelCode",
-    getV2: (p) => lr(p).panel_code?.concept_code ?? null,
+    getV2: (r) => r.panel_code?.concept_code ?? null,
     getV1: (r) => r.LIMSPanelCode,
     comparator: stringCi,
   },
   {
     field: "panel_desc",
     v1Column: "LIMSPanelDesc",
-    getV2: (p) => lr(p).panel_code?.display_name ?? null,
+    getV2: (r) => r.panel_code?.display_name ?? null,
     getV1: (r) => r.LIMSPanelDesc,
     // Loose: both sides carry the codebook description, but v1's column is a
     // varchar and truncates. Substring containment, not equality.
@@ -169,14 +176,14 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
   {
     field: "specimen_code",
     v1Column: "LIMSSpecimenSourceCode",
-    getV2: (p) => lr(p).specimen_code?.concept_code ?? null,
+    getV2: (r) => r.specimen_code?.concept_code ?? null,
     getV1: (r) => r.LIMSSpecimenSourceCode,
     comparator: stringCi,
   },
   {
     field: "specimen_desc",
     v1Column: "LIMSSpecimenSourceDesc",
-    getV2: (p) => lr(p).specimen_code?.display_name ?? null,
+    getV2: (r) => r.specimen_code?.display_name ?? null,
     getV1: (r) => r.LIMSSpecimenSourceDesc,
     comparator: stringCiLoose,
   },
@@ -193,21 +200,21 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     // systematically red, the fix slice follows the DATA, not this comment.
     field: "collected_datetime",
     v1Column: "SpecimenDateTime",
-    getV2: (p) => lr(p).collected_datetime,
+    getV2: (r) => r.collected_datetime,
     getV1: (r) => r.SpecimenDateTime,
     comparator: datetime,
   },
   {
     field: "received_at",
     v1Column: "ReceivedDateTime",
-    getV2: (p) => lr(p).received_at,
+    getV2: (r) => r.received_at,
     getV1: (r) => r.ReceivedDateTime,
     comparator: datetime,
   },
   {
     field: "registered_at",
     v1Column: "RegisteredDateTime",
-    getV2: (p) => lr(p).registered_at,
+    getV2: (r) => r.registered_at,
     getV1: (r) => r.RegisteredDateTime,
     comparator: datetime,
   },
@@ -216,7 +223,7 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     // v1 has it on 99.0% of DISA/TDS requests. Expected RED — that is the point.
     field: "analysis_at",
     v1Column: "AnalysisDateTime",
-    getV2: (p) => lr(p).analysis_at,
+    getV2: (r) => r.analysis_at,
     getV1: (r) => r.AnalysisDateTime,
     comparator: datetime,
   },
@@ -225,7 +232,7 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     // Expected RED — but only for FINAL results; see the conditional rule.
     field: "authorised_at",
     v1Column: "AuthorisedDateTime",
-    getV2: (p) => lr(p).authorised_at,
+    getV2: (r) => r.authorised_at,
     getV1: (r) => r.AuthorisedDateTime,
     comparator: datetime,
     // CONDITIONAL RULE (measured, spec §3.3b, DISA/TDS): AuthorisedDateTime is
@@ -244,35 +251,35 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
   {
     field: "clinical_info",
     v1Column: "ClinicalInfo",
-    getV2: (p) => lr(p).clinical_info,
+    getV2: (r) => r.clinical_info,
     getV1: (r) => r.ClinicalInfo,
     comparator: stringCiLoose,
   },
   {
     field: "icd10_codes",
     v1Column: "ICD10ClinicalInfoCodes",
-    getV2: (p) => lr(p).icd10_codes,
+    getV2: (r) => r.icd10_codes,
     getV1: (r) => r.ICD10ClinicalInfoCodes,
     comparator: stringCi,
   },
   {
     field: "therapy",
     v1Column: "Therapy",
-    getV2: (p) => lr(p).therapy,
+    getV2: (r) => r.therapy,
     getV1: (r) => r.Therapy,
     comparator: stringCiLoose,
   },
   {
     field: "priority",
     v1Column: "HL7PriorityCode",
-    getV2: (p) => lr(p).priority,
+    getV2: (r) => r.priority,
     getV1: (r) => r.HL7PriorityCode,
     comparator: stringCi,
   },
   {
     field: "sex",
     v1Column: "HL7SexCode",
-    getV2: (p) => lr(p).sex,
+    getV2: (r) => r.sex,
     getV1: (r) => r.HL7SexCode,
     comparator: stringCi,
   },
@@ -287,79 +294,77 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     // fix slice to invent data v1 never had.
     field: "patient_class",
     v1Column: "HL7PatientClassCode",
-    getV2: (p) => lr(p).patient_class,
+    getV2: (r) => r.patient_class,
     getV1: (r) => r.HL7PatientClassCode,
     comparator: stringCi,
   },
   {
     field: "section_code",
     v1Column: "HL7SectionCode",
-    getV2: (p) => lr(p).section_code,
+    getV2: (r) => r.section_code,
     getV1: (r) => r.HL7SectionCode,
     comparator: stringCi,
   },
   {
     field: "result_status",
     v1Column: "HL7ResultStatusCode",
-    getV2: (p) => lr(p).result_status,
+    getV2: (r) => r.result_status,
     getV1: (r) => r.HL7ResultStatusCode,
     comparator: stringCi,
   },
   {
     field: "age_years",
     v1Column: "AgeInYears",
-    getV2: (p) => lr(p).age_years,
+    getV2: (r) => r.age_years,
     getV1: (r) => r.AgeInYears,
     comparator: stringCi,
   },
   {
     field: "age_days",
     v1Column: "AgeInDays",
-    getV2: (p) => lr(p).age_days,
+    getV2: (r) => r.age_days,
     getV1: (r) => r.AgeInDays,
     comparator: stringCi,
   },
   {
     field: "requesting_doctor",
     v1Column: "AttendingDoctor",
-    getV2: (p) => lr(p).requesting_doctor,
+    getV2: (r) => r.requesting_doctor,
     getV1: (r) => r.AttendingDoctor,
     comparator: stringCiLoose,
   },
   {
     field: "tested_by",
     v1Column: "TestedBy",
-    getV2: (p) => lr(p).tested_by,
+    getV2: (r) => r.tested_by,
     getV1: (r) => r.TestedBy,
     comparator: stringCi,
   },
   {
     field: "authorised_by",
     v1Column: "AuthorisedBy",
-    getV2: (p) => lr(p).authorised_by,
+    getV2: (r) => r.authorised_by,
     getV1: (r) => r.AuthorisedBy,
     comparator: stringCi,
   },
   {
-    // ⛔ THE MULTI-PANEL DEFECT. v1's grain is (RequestID, OBRSetID) — one row per
-    // ORDERED PANEL — and v2 AGREES: 02-openldr_external.sql:276 has
-    // `obr_set_id INTEGER -- HL7 OBR set ID (for multi-panel requests)` under
-    // UNIQUE (request_id, obr_set_id, facility_id). CDR is the outlier:
-    // V2LabRequest has no obr_set_id, toV2 emits ONE record per DISA lab, and
-    // external-persistence.service.ts:632 pins it to `?? 1`.
+    // ✅ FIXED — this def was the multi-panel defect's own detector, and read
+    // 158/158 only_v1 because getV2 was hardcoded `() => null`.
     //
-    // Measured: 76,002 of 174,261 rows are OBR > 1 (43.6%); 60,140 of 98,259
-    // requests (61.2%) carry 2+ distinct panels. Expected RED on every row — that
-    // IS the finding.
+    // v1's grain is (RequestID, OBRSetID) — one row per ORDERED PANEL — and v2
+    // AGREES: 02-openldr_external.sql:276 has `obr_set_id INTEGER` under
+    // UNIQUE (request_id, obr_set_id, facility_id). CDR is no longer the
+    // outlier: toV2 emits one lab_request per ordered panel, and compare-batch
+    // pairs each against the v1 row with the SAME OBRSetID — so this now grades
+    // a real value against its true counterpart, not against v1's first OBR.
     //
-    // ⚠ The FIX is its own slice, and it MUST emit obr_set_id: emitting one record
-    // per panel WITHOUT it is WORSE than the bug, because every panel collides on
-    // (request_id, 1, facility_id) and the ON CONFLICT DO UPDATE silently
-    // overwrites the last.
+    // ⚠ Source is the 1-based position in TestOrders[], NOT TESTINDEX (93.6%).
+    // See export/obr-sets.ts for the measurement.
     field: "obr_set_id",
     v1Column: "OBRSetID",
-    getV2: () => null,
+    getV2: (r) => r.obr_set_id,
     getV1: (r) => r.OBRSetID,
+    // v1's OBRSetID is `number | null`, v2's is `number` — stringCi coerces both.
     comparator: stringCi,
   },
   {
@@ -372,7 +377,7 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     // WITHOUT the prefix strip its sibling needs. If this reds, the bug is HERE.
     field: "lims_facility_code",
     v1Column: "LIMSFacilityCode",
-    getV2: (p) => lr(p).requesting_facility_code?.concept_code ?? null,
+    getV2: (r) => r.requesting_facility_code?.concept_code ?? null,
     getV1: (r) => r.LIMSFacilityCode,
     comparator: stringCi,
   },

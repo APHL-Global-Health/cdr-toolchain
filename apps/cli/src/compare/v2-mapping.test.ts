@@ -9,7 +9,7 @@ process.env.TZ = "Africa/Dar_es_Salaam";
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { V2Payload } from "../export/types.js";
+import type { V2LabRequest } from "../export/types.js";
 import type { OpenLdrV1Request } from "../openldr.js";
 import {
   V2_REQUEST_FIELDS,
@@ -25,21 +25,17 @@ test("TZ pin took effect", () => {
   assert.equal(new Date("2018-05-18").getTimezoneOffset(), -180);
 });
 
-function payload(req: Partial<V2Payload["lab_request"]>): V2Payload {
-  return {
-    patient: {},
-    lab_request: { request_id: "TZDISATDS0013541", ...req },
-    lab_results: [],
-    isolates: [],
-    susceptibility_tests: [],
-  } as unknown as V2Payload;
+// The defs grade ONE lab_request (the OBR paired against a v1 row), not the
+// whole payload — a payload no longer has a single "the" request.
+function payload(req: Partial<V2LabRequest>): V2LabRequest {
+  return { request_id: "TZDISATDS0013541", obr_set_id: 1, ...req } as unknown as V2LabRequest;
 }
 
 function v1(cols: Partial<OpenLdrV1Request>): OpenLdrV1Request {
   return { RequestID: "TZDISATDS0013541", allPanelCodes: [], ...cols } as OpenLdrV1Request;
 }
 
-function statusOf(p: V2Payload, r: OpenLdrV1Request, field: string): string {
+function statusOf(p: V2LabRequest, r: OpenLdrV1Request, field: string): string {
   const row = diffV2Request(p, r).fields.find((f) => f.field === field);
   assert.ok(row !== undefined, `no field def named ${field}`);
   return row.status;
@@ -210,13 +206,20 @@ test("lims_facility_code matches V2's requesting facility concept — no prefix"
   assert.equal(statusOf(p, v1({ LIMSFacilityCode: "0JJAA" }), "lims_facility_code"), "match");
 });
 
-// THE MULTI-PANEL DEFECT. V2LabRequest has no obr_set_id at all (types.ts:30-57)
-// while v2's own contract does: 02-openldr_external.sql:276
-// `obr_set_id INTEGER -- HL7 OBR set ID (for multi-panel requests)` under
-// UNIQUE (request_id, obr_set_id, facility_id), and
-// external-persistence.service.ts:632 defaults it `?? 1`. Expected RED.
-test("obr_set_id is only_v1 — V2LabRequest has no such field", () => {
-  assert.equal(statusOf(payload({}), v1({ OBRSetID: 2 }), "obr_set_id"), "only_v1");
+// THE MULTI-PANEL DEFECT — now FIXED. This test used to assert the defect
+// ("obr_set_id is only_v1 — V2LabRequest has no such field", expected RED).
+// V2LabRequest now carries obr_set_id, toV2 emits one lab_request per ordered
+// panel, and compare-batch pairs each against the v1 row with the SAME OBRSetID.
+// Rewritten to pin the FIX rather than deleted: the pairing is what the whole
+// slice buys, so it must stay asserted.
+test("obr_set_id matches the v1 OBR row it is paired against", () => {
+  assert.equal(statusOf(payload({ obr_set_id: 2 }), v1({ OBRSetID: 2 }), "obr_set_id"), "match");
+});
+
+// The other half of the pair — without this, a def that returned a constant 2,
+// or one that ignored the payload entirely, would pass the test above.
+test("obr_set_id from the WRONG OBR is a mismatch, not a pass", () => {
+  assert.equal(statusOf(payload({ obr_set_id: 1 }), v1({ OBRSetID: 2 }), "obr_set_id"), "mismatch");
 });
 
 // CDR knows a request was REJECTED (result_status: rejection.rejected ? "X" : null,

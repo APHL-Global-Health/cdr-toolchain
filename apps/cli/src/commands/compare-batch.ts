@@ -3,7 +3,11 @@ import { REGDAT4, SpecimenRecpt } from "disalab";
 import type { DisaServer } from "disalab";
 import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
-import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
+import {
+  fetchAllRequestsByRequestId,
+  fetchLabResultsByRequestId,
+  fetchRequestByRequestId,
+} from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
 import { REQUEST_FIELD_NAMES, resolvePocFormat } from "../compare/mapping.js";
 import { diffRecord, isPerfectMatch, type DiffSummary } from "../compare/diff.js";
@@ -86,6 +90,17 @@ interface BatchSummary {
    */
   v2?: {
     payloads_built: number;
+    /**
+     * OBR-level pairing: payload lab_requests <-> v1 OBR rows, joined on
+     * obr_set_id == OBRSetID.
+     *
+     * ⚠ `only_v2` / `only_v1` are the CARDINALITY disagreement and must stay
+     * visible. This is where v1's staleness surfaces (~0.05%: v1 is a
+     * point-in-time migration, and DISA kept re-running panels after it — e.g.
+     * v1 recorded RPR at 18:26 while DISA re-ran it at 18:30 and 18:34). It is
+     * an EXPECTED residual, not a defect to fix, and not a pass to hide.
+     */
+    obr_pairing: { paired: number; only_v2: number; only_v1: number };
     /** Which config/<country>.yaml drove excludeObs. `null` = none, which means
      *  an EMPTY documentation-panel set — a materially different payload. */
     country: string | null;
@@ -313,6 +328,10 @@ export function registerCompareBatchCommand(program: Command): void {
       let v2PayloadsBuilt = 0;
       const v2PerField: Record<string, V2FieldStats> = {};
       const v2ResultPerField: Record<string, V2FieldStats> = {};
+      // OBR-level pairing between the payload's lab_requests and v1's OBR rows.
+      // `only_v2` / `only_v1` here are the cardinality disagreement — reported
+      // so the v1-staleness residual is a NUMBER, not a silent pass.
+      const v2ObrPairing = { paired: 0, only_v2: 0, only_v1: 0 };
       const v2ResultAgg = {
         observations_v2: 0,
         observations_v1: 0,
@@ -397,8 +416,35 @@ export function registerCompareBatchCommand(program: Command): void {
             if (runV2 && codebook !== null && docConfig !== null) {
               v2Payload = buildV2Payload(disa, prefix, codebook, docConfig);
               v2PayloadsBuilt++;
-              const v2Diff = diffV2Request(v2Payload, v1);
-              for (const row of v2Diff.fields) v2PerField[row.field]![row.status]++;
+              // v1's grain is (RequestID, OBRSetID) and v2 now matches it, so
+              // pair on the NATURAL key. `v1` above is only the LOWEST OBRSetID
+              // (fetchRequestByRequestId, openldr.ts:110) — grading every panel
+              // against it is exactly the defect this slice fixes. The DISA<->v1
+              // leg keeps using it, so its output stays byte-identical.
+              const v1Rows = await fetchAllRequestsByRequestId(
+                norm.openldrRequestId,
+                openldrCs,
+                config.openldrDataDatabase,
+              );
+              const v1ByObr = new Map(v1Rows.map((r) => [Number(r.OBRSetID ?? 0), r]));
+              for (const req of v2Payload.lab_requests) {
+                const v1Row = v1ByObr.get(req.obr_set_id);
+                if (v1Row === undefined) {
+                  // An OBR v1 has no row for. ⚠ COUNTED, never skipped silently:
+                  // this is where the 0.05% v1-staleness residual lands (v1 is a
+                  // point-in-time migration; DISA kept changing), and it must be
+                  // visible as a number rather than pass as green.
+                  v2ObrPairing.only_v2++;
+                  continue;
+                }
+                v2ObrPairing.paired++;
+                const v2Diff = diffV2Request(req, v1Row);
+                for (const row of v2Diff.fields) v2PerField[row.field]![row.status]++;
+              }
+              const emitted = new Set(v2Payload.lab_requests.map((r) => r.obr_set_id));
+              for (const r of v1Rows) {
+                if (!emitted.has(Number(r.OBRSetID ?? 0))) v2ObrPairing.only_v1++;
+              }
             }
 
             for (const row of diff.fields) {
@@ -482,6 +528,9 @@ export function registerCompareBatchCommand(program: Command): void {
               v2: {
                 payloads_built: v2PayloadsBuilt,
                 country: opts.country ?? config.country ?? null,
+                // One payload is now N lab_requests (one per ordered panel), so
+                // payloads_built no longer counts graded records — this does.
+                obr_pairing: v2ObrPairing,
                 per_field: v2PerField,
                 ...(runResults ? { results: { ...v2ResultAgg, per_field: v2ResultPerField } } : {}),
               },

@@ -1,4 +1,4 @@
-import type { V2LabResult, V2Payload } from "../export/types.js";
+import type { V2LabRequest, V2LabResult, V2Payload } from "../export/types.js";
 import type { OpenLdrV1LabResult, OpenLdrV1Request } from "../openldr.js";
 import { V2_REQUEST_FIELDS, V2_RESULT_FIELDS, type V2FieldDef } from "./v2-mapping.js";
 import { isEmpty } from "./comparators.js";
@@ -35,7 +35,7 @@ export interface V2DiffResult {
   summary: V2DiffSummary;
 }
 
-function compareOne(def: V2FieldDef, p: V2Payload, v1: OpenLdrV1Request): V2FieldRow {
+function compareOne(def: V2FieldDef, p: V2LabRequest, v1: OpenLdrV1Request): V2FieldRow {
   const v2Value = def.getV2(p);
   const v1Value = def.getV1(v1);
   const raw = def.comparator(v2Value, v1Value);
@@ -71,10 +71,15 @@ function compareOne(def: V2FieldDef, p: V2Payload, v1: OpenLdrV1Request): V2Fiel
 }
 
 /**
- * Grade the V2 export payload against the v1 row — the gate the toolchain has
+ * Grade ONE lab_request against ONE v1 OBR row — the gate the toolchain has
  * never had. `diffRecord` (diff.ts) grades the decoder; this grades the export.
+ *
+ * ⚠ The caller MUST pair them on obr_set_id == OBRSetID. Grading a payload
+ * against `fetchRequestByRequestId` (which returns v1's LOWEST OBRSetID,
+ * openldr.ts:110) would compare every panel against v1's first OBR — the very
+ * defect this slice fixes.
  */
-export function diffV2Request(p: V2Payload, v1: OpenLdrV1Request): V2DiffResult {
+export function diffV2Request(p: V2LabRequest, v1: OpenLdrV1Request): V2DiffResult {
   const fields: V2FieldRow[] = [];
   const summary: V2DiffSummary = { total: 0, match: 0, mismatch: 0, only_v2: 0, only_v1: 0 };
 

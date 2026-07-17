@@ -518,8 +518,16 @@ function buildIsolates(
   site: SiteConfig,
   request: V2LabRequest,
   birthIso: string | null,
+  obrOf: (panelCode: string, panelIndex: number) => number | null,
 ): V2Isolate[] {
-  const orgs = obs.filter((o) => o.paramCode === "ORGS" && o.valueStr.length > 0);
+  // An isolate whose panel was never ordered has no OBR to hang from — the same
+  // case buildLabResults drops. Filter BEFORE assigning isolate_index so the
+  // index stays dense and the AST join key (isolate_index) cannot skew.
+  // ⚠ Never default it to OBR 1: that files the isolate under an unrelated
+  // panel, and its own lab_results were dropped anyway.
+  const orgs = obs.filter(
+    (o) => o.paramCode === "ORGS" && o.valueStr.length > 0 && obrOf(o.panelCode, o.panelIndex) !== null,
+  );
   // Order isolates by (panelIndex, orderIndex) so isolate_index is stable.
   orgs.sort((a, b) => (a.panelIndex - b.panelIndex) || (a.orderIndex - b.orderIndex));
 
@@ -532,6 +540,9 @@ function buildIsolates(
     const commEntry = codebook.organismEntry(code);
     return {
       isolate_index: i + 1,
+      // Non-null by construction: `orgs` is pre-filtered to linkable rows
+      // above, so the index assignment stays dense and the AST join key holds.
+      obr_set_id: obrOf(o.panelCode, o.panelIndex)!,
       source_test_code: o.panelCode,
       organism_code: {
         system_id: site.organism_system_id,
@@ -578,8 +589,15 @@ function buildSusceptibilityTests(
   site: SiteConfig,
   isolates: V2Isolate[],
   defaultGuideline: string,
+  obrOf: (panelCode: string, panelIndex: number) => number | null,
 ): V2SusceptibilityTest[] {
-  const ast = obs.filter((o) => codebook.isAntibiotic(o.paramCode) && susceptibilitySIR(o) !== null);
+  // Same rule as isolates: an AST under a never-ordered panel has no OBR.
+  const ast = obs.filter(
+    (o) =>
+      codebook.isAntibiotic(o.paramCode) &&
+      susceptibilitySIR(o) !== null &&
+      obrOf(o.panelCode, o.panelIndex) !== null,
+  );
 
   return ast.map((o) => {
     const parm = codebook.paramEntry(o.paramCode);
@@ -589,6 +607,8 @@ function buildSusceptibilityTests(
     const sir = susceptibilitySIR(o)!; // ast filter guarantees non-null
     return {
       isolate_index: nearestGrowthPositiveIsolate(o.panelIndex, isolates),
+      // Non-null by construction — `ast` is pre-filtered to linkable rows above.
+      obr_set_id: obrOf(o.panelCode, o.panelIndex)!,
       source_test_code: o.panelCode,
       antibiotic_code: {
         system_id: site.antibiotic_system_id,
@@ -713,9 +733,9 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const isolates =
     refRequest === null
       ? []
-      : buildIsolates(obs, opts.codebook, opts.site, refRequest, patient.date_of_birth);
+      : buildIsolates(obs, opts.codebook, opts.site, refRequest, patient.date_of_birth, obrOf);
   const labResults = buildLabResults(obs, opts.codebook, opts.site, isolates, obrOf);
-  const susceptibilityTests = buildSusceptibilityTests(obs, opts.codebook, opts.site, isolates, opts.site.default_guideline);
+  const susceptibilityTests = buildSusceptibilityTests(obs, opts.codebook, opts.site, isolates, opts.site.default_guideline, obrOf);
 
   if (patient.date_of_birth !== null) {
     for (const r of labRequests) {

@@ -447,7 +447,11 @@ export function registerExportCommand(program: Command): void {
             data_feed_id: dataFeedId ?? null,
             data_feed_source: dataFeedSource,
             payload_bytes: Buffer.byteLength(JSON.stringify(payload), "utf8"),
-            request_id: targetType === "v2" ? (payload as { lab_request: { request_id: string } }).lab_request.request_id : null,
+            // Every lab_request of a lab shares one request_id (they differ by
+            // obr_set_id), so the first one names the lab.
+            request_id: targetType === "v2"
+              ? (payload as { lab_requests: { request_id: string }[] }).lab_requests[0]?.request_id ?? null
+              : null,
           }, null, 2) + "\n");
           return;
         }
@@ -492,7 +496,8 @@ export function registerExportCommand(program: Command): void {
           }
         }
 
-        const ingestRequestId = (payload as { lab_request: { request_id: string } }).lab_request.request_id;
+        const ingestRequestId =
+          (payload as { lab_requests: { request_id: string }[] }).lab_requests[0]!.request_id;
         process.stdout.write(JSON.stringify({
           posted: true,
           request_id: ingestRequestId,
