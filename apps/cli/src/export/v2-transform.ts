@@ -49,25 +49,6 @@ function disaToIso(s: string | null | undefined): string | null {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss ?? "00"}`;
 }
 
-/** TESTDATA.DATESTAMP reaches us as a JS Date: mssql/tedious builds it with
- *  `useUTC` (its default), so the Date's **UTC components are the wall-clock
- *  digits DISA stored** — DISA keeps unzoned local time. Measured against
- *  DisalabData.TESTDATA: SQL `2019-01-23 15:56:42.257` → getUTC* →
- *  `2019-01-23T15:56:42` (ground truth), while local getters gave `18:56:42`
- *  on a UTC+3 host.
- *
- *  Returns UNZONED wall-clock for `fhirDateTime` to stamp with the deployment
- *  offset (`OPENLDR_CE_TIMEZONE`).
- *
- *  Do NOT return the full `toISOString()`: its trailing `Z` makes fhirDateTime
- *  treat the value as already-zoned UTC and pass it through, silently shifting
- *  every clinical timestamp by the offset. Do NOT use local getters: they
- *  depend on the host TZ and would LOOK correct on a UTC+3 dev machine. */
-export function disaDatestampToIso(d: Date | null): string | null {
-  if (d === null || Number.isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 19);
-}
-
 /** True if the OrderItem.Type byte indicates a numeric slot (1=Real, 2=Int). */
 export function isNumericTypeChar(typeChar: string): boolean {
   if (typeChar.length === 0) return false;
