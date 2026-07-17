@@ -156,50 +156,52 @@ test("observations are paired on panel AND param, not param alone", () => {
   assert.equal(d.summary.only_v1, 1);
 });
 
-// ---------------------------------------------------------------------------
-// Coverage guard — enumerated from OpenLdrV1LabResult (openldr.ts:50-66).
-// ---------------------------------------------------------------------------
-
-const V1_RESULT_COLUMNS: readonly (keyof OpenLdrV1LabResult)[] = [
-  "RequestID",
-  "OBRSetID",
-  "OBXSetID",
-  "OBXSubID",
-  "LIMSPanelCode",
-  "LIMSPanelDesc",
-  "LIMSObservationCode",
-  "LIMSObservationDesc",
-  "LIMSRptResult",
-  "LIMSCodedValue",
-  "HL7ResultTypeCode",
-  "HL7AbnormalFlagCodes",
-  "LIMSRptRange",
-  "SIValue",
-  "SIUnits",
-];
-
-test("every v1 result column has a field def, an exception, or is bookkeeping", () => {
-  const covered = new Set<string>([
-    ...V2_RESULT_FIELDS.map((f) => f.v1Column),
-    ...V2_RESULT_EXCEPTIONS.map((e) => e.v1Column),
-    ...V1_RESULT_PAIRING_KEY,
-  ]);
-  const uncovered = V1_RESULT_COLUMNS.filter((c) => !covered.has(c));
-  assert.deepEqual(uncovered, [], `uncovered v1 result columns: ${uncovered.join(", ")}`);
-});
-
-test("the result coverage list has no phantom columns", () => {
-  const known = new Set<string>(V1_RESULT_COLUMNS);
-  const phantom = [
-    ...V2_RESULT_FIELDS.map((f) => f.v1Column),
-    ...V2_RESULT_EXCEPTIONS.map((e) => e.v1Column),
-  ].filter((c) => !known.has(c));
-  assert.deepEqual(phantom, []);
-});
+// The coverage guard MOVED to v1-coverage.test.ts, which asserts against the
+// GENERATED snapshot (28 real LabResults columns) rather than OpenLdrV1LabResult's
+// 15 declared fields -- two of which (LIMSPanelCode/LIMSPanelDesc) are joined from
+// Requests and are not LabResults columns at all.
 
 test("every result exception carries a reason and real evidence", () => {
   for (const e of V2_RESULT_EXCEPTIONS) {
     assert.ok(e.reason.trim().length > 0, `${e.field}: empty reason`);
     assert.ok(e.evidence.trim().length > 0, `${e.field}: empty evidence`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// The 6 new result-level defs.
+// ---------------------------------------------------------------------------
+
+// v2-transform.ts:497 hardcodes `rpt_flag: null` while v1's LIMSRptFlag carries a
+// real flag on 8,372 of 643,855 rows (1.3%). A SECOND stub of the same shape as
+// abnormal_flag -- but 13x smaller, and on a DIFFERENT value set: L/H/L-/H+ here
+// vs N/L/H/LL/HH for the HL7 one. They are different fields; do not map one onto
+// the other.
+test("ACCEPTANCE: the rpt_flag stub vs a populated v1 LIMSRptFlag reports only_v1", () => {
+  assert.equal(fieldStatus({ rpt_flag: null }, { LIMSRptFlag: "L-" }, "rpt_flag"), "only_v1");
+});
+
+// THE PAIR-GUARD. v1 is '' on 635,483 of 643,855 rows -- 98.7%. Without this, the
+// test above is satisfied by a comparator that reds every row, and the report
+// would claim ~643,855 losses instead of the true ~8,372: a 77x fabrication.
+test("PAIR-GUARD: the rpt_flag stub vs an EMPTY v1 flag is a match", () => {
+  assert.equal(fieldStatus({ rpt_flag: null }, { LIMSRptFlag: "" }, "rpt_flag"), "match");
+});
+
+// CDR emits rpt_units from the codebook (v2-transform.ts:497); v1 has LIMSRptUnits
+// on 7.1%. A real two-sided comparison -- this one may well be GREEN.
+test("rpt_units compares CDR's codebook units against v1's", () => {
+  assert.equal(fieldStatus({ rpt_units: "g/dL" }, { LIMSRptUnits: "g/dL" }, "rpt_units"), "match");
+});
+
+// v1 splits the range NUMERICALLY (SILoRange/SIHiRange); CDR emits rpt_range as a
+// STRING from the codebook. No V2 counterpart for the numeric halves.
+test("si_lo_range is only_v1 — CDR has no numeric range field", () => {
+  assert.equal(fieldStatus({}, { SILoRange: 3.5 }, "si_lo_range"), "only_v1");
+});
+
+// A numeric 0 is v1's EMPTY convention, not a value (types.ts:160). Without this,
+// 611,191 zero rows would report as losses.
+test("si_lo_range vs v1's zero is a match — 0 is v1's empty for numerics", () => {
+  assert.equal(fieldStatus({}, { SILoRange: 0 }, "si_lo_range"), "match");
 });

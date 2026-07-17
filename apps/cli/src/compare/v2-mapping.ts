@@ -602,6 +602,74 @@ export const V2_RESULT_FIELDS: readonly V2ResultFieldDef[] = [
     getV1: (r) => r.SIUnits,
     comparator: stringCiLoose,
   },
+  {
+    // ★ v2-transform.ts:497 hardcodes `rpt_flag: null`. v1's LIMSRptFlag: 8,372 of
+    // 643,855 non-empty (1.3%) — L 5,337 / H 2,194 / L- 666 / H+ 145.
+    //
+    // ⚠ A DIFFERENT FIELD from HL7AbnormalFlagCodes (N/L/H/LL/HH): these are the
+    // LIMS-native and HL7-normalised flags. Do NOT map one onto the other.
+    // ⚠ Expect ~8,372 red — NOT ~107,602 (that would mean it was mapped onto
+    // abnormal_flag) and NOT ~643,855 (the ''-empty rule broken).
+    field: "rpt_flag",
+    v1Column: "LIMSRptFlag",
+    getV2: (r) => r.rpt_flag,
+    getV1: (r) => r.LIMSRptFlag,
+    comparator: stringCi,
+  },
+  {
+    // v1 45,461 of 643,855 (7.1%). CDR emits rpt_units from the codebook
+    // (v2-transform.ts:497 `rpt_units: nz(parm?.units ?? null)`), so this is a real
+    // two-sided comparison and may well be GREEN.
+    field: "rpt_units",
+    v1Column: "LIMSRptUnits",
+    getV2: (r) => r.rpt_units,
+    getV1: (r) => r.LIMSRptUnits,
+    comparator: stringCiLoose,
+  },
+  {
+    // v1 32,664 non-zero of 643,855 (5.1%). v1 splits the reference range into
+    // NUMERIC lo/hi; CDR emits rpt_range as a STRING from the codebook, so there is
+    // no V2 counterpart for the numeric halves. ⚠ 0 is v1's empty convention for
+    // numerics (types.ts:160) — mapping it to null keeps 611,191 rows from
+    // reporting as losses.
+    field: "si_lo_range",
+    v1Column: "SILoRange",
+    getV2: () => null,
+    getV1: (r) => (r.SILoRange === 0 ? null : r.SILoRange),
+    comparator: stringCi,
+  },
+  {
+    // v1 50,761 non-zero of 643,855 (7.9%). Same shape as si_lo_range.
+    field: "si_hi_range",
+    v1Column: "SIHiRange",
+    getV2: () => null,
+    getV1: (r) => (r.SIHiRange === 0 ? null : r.SIHiRange),
+    comparator: stringCi,
+  },
+  {
+    // ⚠ DISTINCT from LIMSCodedValue, which is already graded as `coded_value`.
+    // v1 49,410 of 643,855 (7.7%). No known V2 counterpart — CDR's coded_value maps
+    // to LIMSCodedValue. Expected RED; if the report shows this tracking
+    // coded_value exactly, that is evidence they are the same concept and the
+    // mapping needs revisiting.
+    field: "si_coded_value",
+    v1Column: "CodedValue",
+    getV2: () => null,
+    getV1: (r) => r.CodedValue,
+    comparator: stringCi,
+  },
+  {
+    // v1 49,409 non-zero of 643,855 (7.7%) — -1 x 37,185 / 1 x 12,205 / 3 x 10 /
+    // 2 x 9. It tracks CodedValue's 49,410 almost exactly, which SUGGESTS a
+    // qualifier ('<' / '>') — but that is a HYPOTHESIS, not a mapping.
+    // ⚠ Do NOT map it to a V2 field on the strength of that correlation. Measure
+    // first. Graded against null so the report shows its true size.
+    field: "result_semiquantitive",
+    v1Column: "ResultSemiquantitive",
+    getV2: () => null,
+    getV1: (r) => (r.ResultSemiquantitive === 0 ? null : r.ResultSemiquantitive),
+    comparator: stringCi,
+  },
 ];
 
 export const V2_RESULT_EXCEPTIONS: readonly V2ResultFieldException[] = [
