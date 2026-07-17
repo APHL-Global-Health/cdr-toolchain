@@ -314,11 +314,33 @@ function buildLabRequest(
       };
 
   const facilityConcept = buildFacilityConcept(facility, site);
-  // DISA doesn't carry a separate requesting-facility code distinct from
-  // the testing lab — the previous attempt to derive one by splitting
-  // WardClinic on `~` produced ward codes mislabelled as facilities
-  // (Moz "SAAJS", etc.). Emit the same concept for both; v2 consumers
-  // can infer requesting == testing from the equality.
+  // ⛔ KNOWN DEFECT — the comment that used to sit here was FALSE, and it is what
+  // made this look intentional. It claimed: "DISA doesn't carry a separate
+  // requesting-facility code distinct from the testing lab ... Emit the same
+  // concept for both; v2 consumers can infer requesting == testing from the
+  // equality." The relationship is BACKWARDS.
+  //
+  // DISA's Facility IS the REQUESTING clinic. The TESTING lab is the DISA
+  // *deployment* itself — one instance is one lab — which is why nothing on
+  // SpecimenRecpt carries it and SiteConfig has no slot for it.
+  //
+  // v1 proves both exist and are distinct (measured 2026-07-17, TDS):
+  //   TestingFacilityCode 'TDS' on 172,092 rows (98.8%) — ONE constant, the lab
+  //   distinct requesting facilities (LIMSFacilityCode): 3,349
+  // i.e. ONE lab serving 3,349 clinics. Emitting facilityConcept for BOTH puts
+  // one of those 3,349 clinics in the testing_facility_code slot. The V2<->v1
+  // gate reports it 195/195 mismatch (docs .../2026-07-17-mapping-gate-findings.md §3.3).
+  //
+  // NOT FIXED HERE: that slice adds `testing_facility_code` to SiteConfig, since
+  // the lab is a property of the deployment, not of a record.
+  // ⚠ Do NOT derive it from LabNumber.slice(0,3) — 'TDS' being the LabNo prefix
+  // is an undocumented coincidence of this site's numbering, and CDR must also
+  // run in Zambia and Mozambique.
+  //
+  // (The `~`-splitting history in the old comment is real and still worth
+  // heeding: deriving a facility by splitting WardClinic produced ward codes
+  // mislabelled as facilities — Moz "SAAJS". That is why requesting stays
+  // sourced from Facility.Code.)
   const requestingFacilityConcept = facilityConcept;
 
   const sectionCode = panel?.section ?? null;
