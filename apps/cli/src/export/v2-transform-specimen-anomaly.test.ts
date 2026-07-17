@@ -52,7 +52,7 @@ test("corroborated (warn) panel_specimen_mismatch tags specimen with the anomaly
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(), auditReport: reportWithMismatch("warn"),
   });
-  const spec = payload.lab_request.specimen_code;
+  const spec = payload.lab_requests[0]!.specimen_code;
   assert.ok(spec, "expected specimen_code");
   assert.equal(spec.system_id, "DEFAULT_SPEC_ANOMALY");
   assert.equal(spec.concept_code, "B");
@@ -63,12 +63,12 @@ test("no audit report leaves the specimen on the default system_id", () => {
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(),
   });
-  assert.equal(payload.lab_request.specimen_code?.system_id, "DEFAULT_SPEC");
+  assert.equal(payload.lab_requests[0]!.specimen_code?.system_id, "DEFAULT_SPEC");
 });
 
 test("an error-level (uncorroborated) mismatch does NOT tag the specimen (it would quarantine, not migrate)", () => {
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(), auditReport: reportWithMismatch("error"),
   });
-  assert.equal(payload.lab_request.specimen_code?.system_id, "DEFAULT_SPEC");
+  assert.equal(payload.lab_requests[0]!.specimen_code?.system_id, "DEFAULT_SPEC");
 });

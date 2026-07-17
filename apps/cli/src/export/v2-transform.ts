@@ -673,7 +673,20 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // 99.95% vs v1 at n=3,874 against TESTINDEX's 93.6%). Ordered-but-unresulted
   // panels are included: they have zero TestResults and still get a v1 row.
   const obrSets = deriveObrSets(specimen.TestOrders);
-  const obrOf = linkObsToObr(obrSets, obs);
+  // ⛔ The linker MUST see EVERY panel iteration, not the surviving observations.
+  // Rule P ranks the i-th distinct base(TESTINDEX) of a code onto its i-th
+  // order, so the rank is only correct against the COMPLETE iteration set.
+  // Two filters run before this point and both shift the rank:
+  //   - supersedePanelIterations drops MRCSW#1,#2 in favour of #3, so MRCSW's
+  //     surviving base is {3} and rank 1 would map it to OBR 1 instead of 3;
+  //   - flattenDisa drops RJREA/RJREM padding, so a rejection-only iteration
+  //     yields ZERO observations and disappears from the rank entirely.
+  // TestResults is the iteration list itself, so it is immune to both.
+  const iterations = specimen.TestResults.map((t) => ({
+    panelCode: String(t.TESTCODE ?? "").trim(),
+    panelIndex: Number(t.TESTINDEX ?? 0),
+  }));
+  const obrOf = linkObsToObr(obrSets, iterations);
   const labRequests = obrSets.map((obr) =>
     buildLabRequest(specimen, obr, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous),
   );

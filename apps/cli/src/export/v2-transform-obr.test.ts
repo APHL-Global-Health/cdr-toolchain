@@ -116,6 +116,36 @@ test("TESTINDEX is not the obr_set_id — a gapped index still yields OBR 1", ()
   assert.deepEqual(payload.lab_requests.map((r) => r.obr_set_id), [1]);
 });
 
+test("superseded iterations keep their ORDER but carry no results", () => {
+  // TZDISATDS0047711 — v1: 5 OBR rows; results under OBR 3 (MRCSW) and 4 (MICBM)
+  // only. OBR 1,2 are superseded MRCSW reruns: order present, ZERO results.
+  // OBR 5 (MSENS) was ordered and never resulted.
+  // ⚠ Both failure modes are SILENT: resurrecting results under OBR 1-2 invents
+  // phantom result sets; dropping OBR 1-2 loses real orders.
+  const payload = toV2(
+    specimenFixture({
+      TestOrders: ["MRCSW", "MRCSW", "MRCSW", "MICBM", "MSENS"],
+      TestResults: [
+        // #1 and #2 are superseded by #3 (same panelCode, later panelIndex)
+        { TESTCODE: "MRCSW", TESTINDEX: 1, DATESTAMP: null, ORDER: [makeItem("WETP", "1")] },
+        { TESTCODE: "MRCSW", TESTINDEX: 2, DATESTAMP: null, ORDER: [makeItem("WETP", "2")] },
+        { TESTCODE: "MRCSW", TESTINDEX: 3, DATESTAMP: null, ORDER: [makeItem("WETP", "3")] },
+        { TESTCODE: "MICBM", TESTINDEX: 4, DATESTAMP: null, ORDER: [makeItem("OXID", "4")] },
+      ],
+    }),
+    opts(),
+  );
+  // all five ORDERS survive
+  assert.deepEqual(payload.lab_requests.map((r) => r.obr_set_id), [1, 2, 3, 4, 5]);
+  assert.deepEqual(
+    payload.lab_requests.map((r) => r.panel_code?.concept_code),
+    ["MRCSW", "MRCSW", "MRCSW", "MICBM", "MSENS"],
+  );
+  // results only under the surviving iteration (OBR 3) and MICBM (OBR 4)
+  const withResults = [...new Set(payload.lab_results.map((r) => r.obr_set_id))].sort();
+  assert.deepEqual(withResults, [3, 4]);
+});
+
 test("a +100 second slot does NOT create an extra request", () => {
   // TDS0012427 — orders [COL,RNAHF]; results COL#1, COL#101, RNAHF#2 -> v1 has 2 rows.
   const payload = toV2(
