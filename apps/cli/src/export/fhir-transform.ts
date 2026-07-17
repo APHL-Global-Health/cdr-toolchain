@@ -339,7 +339,9 @@ function observationResource(
 function astResource(
   s: V2SusceptibilityTest, patientRef: string, rootId: string, obrId: string,
   specimenId: string | undefined,
+  collectionIso: string | null,
   index: number,
+  opts: ToFhirOptions,
 ): FhirResource {
   // An unknown test_method asserts no measurement type — mirrors how the
   // sibling `method` field omits itself rather than guessing "Zone diameter".
@@ -361,6 +363,19 @@ function astResource(
     subject: { reference: patientRef },
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
+    // ⛔ THE AMR ZERO-ROW BUG LIVED HERE, and the design never looked. An AST
+    // Observation had NO time at all — the field was simply absent, not stubbed.
+    // CE projects `result_timestamp: str(r['effectiveDateTime'])`, so every AST
+    // row landed with a NULL timestamp, and q-amr-resistance /
+    // q-amr-facility-summary filter on `abnormal_flag in ('S','I','R')` — which
+    // is EXACTLY the AST rows. Fixing only observationResource (which the design
+    // pointed at) left all 31 flagged rows timeless and the queries still at
+    // ZERO. Caught by the live re-ingest, not by any test.
+    //
+    // Same collection time as every other observation off this specimen: R4's
+    // effective[x] is the physiologically relevant time, and an AST run on an
+    // isolate from this specimen was collected when the specimen was.
+    effectiveDateTime: fhirDateTime(collectionIso, opts.tzOffset),
     // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
     ...(s.susceptibility_value !== null
       ? { interpretation: [{ coding: [{ system: INTERPRETATION_SYSTEM, code: s.susceptibility_value }] }] }
@@ -382,6 +397,8 @@ function astResource(
 function isolateResource(
   iso: V2Isolate, patientRef: string, rootId: string, obrId: string,
   specimenId: string | undefined,
+  collectionIso: string | null,
+  opts: ToFhirOptions,
 ): FhirResource {
   return compact({
     resourceType: "Observation",
@@ -400,6 +417,9 @@ function isolateResource(
     subject: { reference: patientRef },
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
+    // Same rule as the AST and lab-result Observations — one collection time per
+    // specimen. An isolate with no time is invisible to every dated AMR report.
+    effectiveDateTime: fhirDateTime(collectionIso, opts.tzOffset),
     valueCodeableConcept: toCodeableConcept(iso.organism_code) ?? UNKNOWN_CODE,
   });
 }
@@ -447,12 +467,12 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
         `duplicate isolate_index ${iso.isolate_index} in ${first.request_id} — cannot map isolates unambiguously`,
       );
     }
-    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, obrId(iso.obr_set_id), specimenId));
+    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, obrId(iso.obr_set_id), specimenId, collectionTime(first), opts));
   }
   const isolates = [...byIndex.values()];
 
   const asts = payload.susceptibility_tests.map((s, i) =>
-    astResource(s, patientRef, rootId, obrId(s.obr_set_id), specimenId, i + 1),
+    astResource(s, patientRef, rootId, obrId(s.obr_set_id), specimenId, collectionTime(first), i + 1, opts),
   );
 
   // Hang each AST off its isolate. An AST whose isolate_index matches nothing
