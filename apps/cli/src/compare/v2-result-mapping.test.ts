@@ -5,7 +5,7 @@ import type { OpenLdrV1LabResult } from "../openldr.js";
 import {
   V2_RESULT_FIELDS,
   V2_RESULT_EXCEPTIONS,
-  V1_RESULT_BOOKKEEPING,
+  V1_RESULT_PAIRING_KEY,
 } from "./v2-mapping.js";
 import { diffV2Results } from "./v2-diff.js";
 
@@ -182,7 +182,7 @@ test("every v1 result column has a field def, an exception, or is bookkeeping", 
   const covered = new Set<string>([
     ...V2_RESULT_FIELDS.map((f) => f.v1Column),
     ...V2_RESULT_EXCEPTIONS.map((e) => e.v1Column),
-    ...V1_RESULT_BOOKKEEPING,
+    ...V1_RESULT_PAIRING_KEY,
   ]);
   const uncovered = V1_RESULT_COLUMNS.filter((c) => !covered.has(c));
   assert.deepEqual(uncovered, [], `uncovered v1 result columns: ${uncovered.join(", ")}`);

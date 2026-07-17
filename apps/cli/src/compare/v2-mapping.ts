@@ -81,46 +81,9 @@ export interface V2FieldException {
   evidence: string;
 }
 
-/**
- * v1 columns that are not data: bookkeeping, or derived by our own fetch layer.
- * `allPanelCodes` is not a column at all — `fetchRequestByRequestId` synthesises
- * it by aggregating LIMSPanelCode across sibling OBR rows (openldr.ts:114-124).
- * Grading it would grade our own aggregation, not the export.
- */
-export const V1_REQUEST_BOOKKEEPING: readonly string[] = ["allPanelCodes"];
-
-/**
- * ⛔ THE COVERAGE GUARD IS NOT WHAT ITS NAME CLAIMS. Read this before quoting it.
- *
- * It asserts every column of `OpenLdrV1Request` has a def or an exception. But
- * `OpenLdrV1Request` is not v1 — it is the 26-column subset `REQUEST_COLUMNS`
- * bothers to SELECT (openldr.ts:69-80). **v1's Requests table has 60 columns**
- * (measured against INFORMATION_SCHEMA, 2026-07-17). So the real coverage is
- * **26 of 60 (43%)**, and the guard cannot see the other 34 — it grades the
- * fetch, not the oracle.
- *
- * Same class of error as `count(col)`, the blob layer, and the multi-LIMS
- * population: **trusting a derived artifact instead of the source.** A TS
- * interface is not a schema.
- *
- * **Not covered, and NOT known to be safe** (bookkeeping excluded):
- *   OBRSetID ← the multi-panel key; see the header on V2_REQUEST_FIELDS
- *   LOINCPanelCode, AdmitAttendDateTime, CollectionVolume, ReceivingFacilityCode,
- *   RequestTypeCode, HL7SpecimenSourceCode, HL7SpecimenSiteCode,
- *   LIMSSpecimenSiteCode, LIMSSpecimenSiteDesc, WorkUnits, CostUnits,
- *   RegisteredBy, OrderingNotes, EncryptedPatientID, HL7EthnicGroupCode,
- *   Deceased, Newborn, ReferringRequestID, LIMSAnalyzerCode, TargetTimeDays,
- *   TargetTimeMins, LIMSRejectionCode, LIMSRejectionDesc, LIMSFacilityCode,
- *   Repeated, LIMSPreReg_RegistrationDateTime, LIMSPreReg_ReceivedDateTime,
- *   LIMSPreReg_RegistrationFacilityCode, LIMSVendorCode
- *
- * ⚠ `LIMSRejectionCode` / `LIMSRejectionDesc` are conspicuous: `toV2` has a whole
- * `detectDisaRejection` path (v2-transform.ts:669). Nothing grades it against v1.
- *
- * Closing this means widening the SELECT and the row type first. Until then the
- * gate's honest claim is "every FETCHED v1 column", and T7 must say so.
- */
-export const V1_REQUEST_UNCOVERED_NOT_FETCHED = 34;
+// Column classification (bookkeeping / derived / not_carried) lives in
+// v1-coverage.ts, which asserts against the GENERATED v1 schema snapshot rather
+// than against our row types.
 
 /**
  * ⛔ CDR CANNOT REPRESENT A MULTI-PANEL REQUEST — a real defect, not a grain
@@ -433,32 +396,13 @@ export interface V2ResultFieldException {
  * which is exactly the `(panelCode, paramCode)` key `result-diff.ts:349` already
  * pairs the DISA<->v1 gate on. Reused rather than reinvented.
  */
-export const V1_RESULT_BOOKKEEPING: readonly string[] = [
+export const V1_RESULT_PAIRING_KEY: readonly string[] = [
   "RequestID",
   "LIMSPanelCode",
   "LIMSObservationCode",
 ];
 
-/**
- * ⛔ Same caveat as V1_REQUEST_UNCOVERED_NOT_FETCHED. `OpenLdrV1LabResult`
- * declares 15 fields, but two of those (LIMSPanelCode, LIMSPanelDesc) are joined
- * in from Requests — so it covers **13 of LabResults' 28 real columns (46%)**.
- *
- * **Not covered, and NOT known to be safe** (bookkeeping excluded):
- *   LIMSRptFlag  ← ⚠ REAL, and V2 hardcodes `rpt_flag: null` (v2-transform.ts:497).
- *                   A SECOND stub of the same shape as abnormal_flag, never graded.
- *                   ⚠ I previously amended the spec to claim LIMSRptFlag "is not a
- *                   column — the spec invented it". THAT WAS WRONG: it is not on
- *                   the fetched TYPE, but it IS a real v1 column.
- *   LIMSRptUnits ← V2 emits `rpt_units`; nothing grades it.
- *   DateTimeValue ← ⚠ investigate before believing "v1 has no per-result
- *                   timestamp". It may be a date-typed VALUE rather than a
- *                   result time — do not repeat the `issued` mistake by assuming
- *                   either way. MEASURE it.
- *   LOINCCode, SILoRange, SIHiRange, CodedValue, ResultSemiquantitive, Note,
- *   WorkUnits, CostUnits
- */
-export const V1_RESULT_UNCOVERED_NOT_FETCHED = 11;
+
 
 export const V2_RESULT_FIELDS: readonly V2ResultFieldDef[] = [
   {

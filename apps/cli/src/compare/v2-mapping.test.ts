@@ -14,8 +14,8 @@ import type { OpenLdrV1Request } from "../openldr.js";
 import {
   V2_REQUEST_FIELDS,
   V2_REQUEST_EXCEPTIONS,
-  V1_REQUEST_BOOKKEEPING,
 } from "./v2-mapping.js";
+import { V1_REQUEST_DERIVED } from "./v1-coverage.js";
 import { diffV2Request } from "./v2-diff.js";
 
 // Asserts the OUTCOME (the offset), not the mechanism, so it cannot pass while
@@ -203,7 +203,7 @@ test("every v1 request column has a field def, an exception, or is bookkeeping",
   const covered = new Set<string>([
     ...V2_REQUEST_FIELDS.map((f) => f.v1Column),
     ...V2_REQUEST_EXCEPTIONS.map((e) => e.v1Column),
-    ...V1_REQUEST_BOOKKEEPING,
+    ...V1_REQUEST_DERIVED,
   ]);
   const uncovered = V1_REQUEST_COLUMNS.filter((c) => !covered.has(c));
   assert.deepEqual(uncovered, [], `uncovered v1 columns: ${uncovered.join(", ")}`);
