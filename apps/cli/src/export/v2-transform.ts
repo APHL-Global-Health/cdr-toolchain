@@ -515,13 +515,7 @@ function buildLabResults(
       rpt_units: nz(parm?.units ?? null),
       rpt_flag: null,
       rpt_range: nz(parm?.reference ?? null),
-      // Un-stubbed (was a hardcoded null): the panel iteration's
-      // TESTDATA.DATESTAMP as unzoned wall-clock. DisaObs.datestamp documents
-      // this as when the panel iteration was CREATED; it is also the primary
-      // supersession key (latest wins, TESTINDEX tiebreaks). fhir-transform
-      // currently feeds it to Observation.effectiveDateTime — whether that is
-      // the right FHIR field is Task 4's question, not settled here.
-      result_timestamp: disaDatestampToIso(o.datestamp),
+      result_timestamp: null,
       isolate_index: isolateIndex,
       is_resulted: true,
       raw_result: {
