@@ -139,23 +139,67 @@ const UNKNOWN_CODE = {
   text: "unknown",
 };
 
+/**
+ * The Specimen is SPECIMEN-level — one per lab, not per OBR. DISA records one
+ * specimen per request (which is why a panel/specimen mismatch is an audit
+ * anomaly, not a second Specimen). Built once, outside the per-OBR loop:
+ * emitting it inside would produce N resources sharing one id, and CE's
+ * (resource_type, id) upsert would silently keep only the last.
+ */
+function specimenResource(
+  lr: V2LabRequest, patientRef: string, specimenId: string | undefined, opts: ToFhirOptions,
+): FhirResource {
+  const collection = compact({ collectedDateTime: fhirDateTime(lr.collected_datetime, opts.tzOffset) });
+  return compact({
+    resourceType: "Specimen",
+    id: specimenId,
+    subject: { reference: patientRef },
+    type: toCodeableConcept(lr.specimen_code),
+    receivedTime: fhirDateTime(lr.received_at, opts.tzOffset),
+    ...(Object.keys(collection).length > 0 ? { collection } : {}),
+  });
+}
+
+/**
+ * One OBR = one ServiceRequest + one DiagnosticReport.
+ *
+ * OBR is the ORDER, so ServiceRequest + DiagnosticReport is the idiomatic
+ * mapping, not a workaround.
+ *
+ * ⚠ The report is emitted even when the OBR has NO results — an
+ * ordered-but-unresulted panel (v1 status 'I') or a superseded iteration (v1
+ * keeps the order row with zero results). The spec's first draft said report
+ * "for the surviving iterations only", but that sentence was written without
+ * reading this file: `no DiagnosticReport.result key when there are no results`
+ * (fhir-transform.test.ts) already pins the opposite as a DELIBERATE decision —
+ * the report is emitted, and `result` is simply omitted. Its `status` carries
+ * the truth (partial / registered / cancelled), so an empty report asserts
+ * nothing false, and keeping it preserves behaviour for single-panel labs.
+ *
+ * ⚠ FHIR has no native OBR set-id field; `identifier` carries it, matching the
+ * existing urn:openldr:request-id / folder-no / national-id pattern.
+ */
 function requestResources(
-  lr: V2LabRequest, patientRef: string, rootId: string, specimenId: string | undefined,
+  lr: V2LabRequest, patientRef: string, obrId: string, specimenId: string | undefined,
   opts: ToFhirOptions,
 ): FhirResource[] {
   const out: FhirResource[] = [];
   const panel = toCodeableConcept(lr.panel_code) ?? UNKNOWN_CODE;
+  const identifier = [
+    ...(fhirText(lr.request_id) !== undefined
+      ? [{ system: "urn:openldr:request-id", value: fhirText(lr.request_id) }] : []),
+    { system: "urn:openldr:obr-set-id", value: String(lr.obr_set_id) },
+  ];
 
   out.push(compact({
     resourceType: "ServiceRequest",
-    id: rootId,
+    id: obrId,
     // Must not contradict the co-located DiagnosticReport.status.
     status: toRequestStatus(lr.result_status),  // CE-required
     intent: "order",                            // CE-required
     subject: { reference: patientRef },
     code: panel,
-    ...(fhirText(lr.request_id) !== undefined
-      ? { identifier: [{ system: "urn:openldr:request-id", value: fhirText(lr.request_id) }] } : {}),
+    identifier,
     priority: toPriority(lr.priority),
     authoredOn: fhirDateTime(lr.registered_at, opts.tzOffset),
     ...(fhirText(lr.clinical_info) !== undefined
@@ -164,26 +208,17 @@ function requestResources(
       ? { requester: { display: fhirText(lr.requesting_doctor) } } : {}),
   }));
 
-  const collection = compact({ collectedDateTime: fhirDateTime(lr.collected_datetime, opts.tzOffset) });
-  out.push(compact({
-    resourceType: "Specimen",
-    id: specimenId,
-    subject: { reference: patientRef },
-    type: toCodeableConcept(lr.specimen_code),
-    receivedTime: fhirDateTime(lr.received_at, opts.tzOffset),
-    ...(Object.keys(collection).length > 0 ? { collection } : {}),
-  }));
-
   out.push(compact({
     resourceType: "DiagnosticReport",
-    id: rootId,
+    id: obrId,
     status: toReportStatus(lr.result_status),  // CE-required
     code: panel,                               // CE-required
     subject: { reference: patientRef },
+    identifier,
     ...(specimenId !== undefined ? { specimen: [{ reference: `Specimen/${specimenId}` }] } : {}),
     effectiveDateTime: fhirDateTime(lr.taken_datetime ?? lr.collected_datetime, opts.tzOffset),
     issued: fhirDateTime(lr.authorised_at, opts.tzOffset),
-    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(fhirText(lr.testing_facility_code?.display_name ?? null) !== undefined
       ? { performer: [{ display: fhirText(lr.testing_facility_code!.display_name) }] } : {}),
   }));
@@ -209,7 +244,7 @@ function toReferenceRange(
 }
 
 function observationResource(
-  r: V2LabResult, patientRef: string, rootId: string, specimenId: string | undefined,
+  r: V2LabResult, patientRef: string, rootId: string, obrId: string, specimenId: string | undefined,
   index: number, opts: ToFhirOptions,
 ): FhirResource {
   const unit = fhirText(r.numeric_units) ?? fhirText(r.rpt_units);
@@ -239,7 +274,11 @@ function observationResource(
     status: "final",  // CE-required
     code: toCodeableConcept(r.observation_code) ?? UNKNOWN_CODE,
     subject: { reference: patientRef },
-    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    // Hangs off ITS OWN OBR's order, not a lab-wide one — that linkage is the
+    // whole point of the slice. FHIR has no OBX set-id field either, so
+    // obx_set_id rides on identifier alongside it (spec §5.3).
+    identifier: [{ system: "urn:openldr:obx-set-id", value: String(r.obx_set_id) }],
+    basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     effectiveDateTime: fhirDateTime(r.result_timestamp, opts.tzOffset),
     ...value,
@@ -257,7 +296,8 @@ function observationResource(
  *  this is the leaf of a 2-tier isolate -> AST tree (hl7-fhir.schema.js:496-518
  *  is 3-tier: culture -> isolate -> AST). */
 function astResource(
-  s: V2SusceptibilityTest, patientRef: string, rootId: string, specimenId: string | undefined,
+  s: V2SusceptibilityTest, patientRef: string, rootId: string, obrId: string,
+  specimenId: string | undefined,
   index: number,
 ): FhirResource {
   // An unknown test_method asserts no measurement type — mirrors how the
@@ -278,7 +318,7 @@ function astResource(
     status: "final",  // CE-required
     code: toCodeableConcept(s.antibiotic_code) ?? UNKNOWN_CODE,
     subject: { reference: patientRef },
-    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
     ...(s.susceptibility_value !== null
@@ -299,11 +339,14 @@ function astResource(
  *  as a second coding so nothing is lost, but LOINC comes first — CE's
  *  codeable() reads coding[0] only. */
 function isolateResource(
-  iso: V2Isolate, patientRef: string, rootId: string, specimenId: string | undefined,
+  iso: V2Isolate, patientRef: string, rootId: string, obrId: string,
+  specimenId: string | undefined,
 ): FhirResource {
   return compact({
     resourceType: "Observation",
     id: fhirId(`${rootId}-iso-${iso.isolate_index}`),
+    // isolate ids stay keyed on rootId (isolate_index is lab-unique), but the
+    // ORDER it hangs from is its own OBR's.
     status: "final",  // CE-required
     code: compact({
       coding: [
@@ -314,19 +357,29 @@ function isolateResource(
       text: "Bacteria identified",
     }),
     subject: { reference: patientRef },
-    basedOn: [{ reference: `ServiceRequest/${rootId}` }],
+    basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
     valueCodeableConcept: toCodeableConcept(iso.organism_code) ?? UNKNOWN_CODE,
   });
 }
 
 export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] {
-  const rootId = fhirId(payload.lab_request.request_id);
+  // Every lab_request of a lab shares one request_id — they differ by
+  // obr_set_id — so any of them yields the same rootId.
+  const first = payload.lab_requests[0];
+  if (first === undefined) {
+    throw new Error("payload has no lab_requests — cannot derive a FHIR resource graph");
+  }
+  const rootId = fhirId(first.request_id);
   if (rootId === undefined) {
     throw new Error(
-      `request_id ${JSON.stringify(payload.lab_request.request_id)} sanitises to an empty FHIR id`,
+      `request_id ${JSON.stringify(first.request_id)} sanitises to an empty FHIR id`,
     );
   }
+  // ⚠ The ONLY place an OBR-scoped id is derived — everything referencing a
+  // ServiceRequest goes through this, so the logic cannot drift (the property
+  // the previous single-rootId derivation had, preserved).
+  const obrId = (obrSetId: number): string => `${rootId}-obr${obrSetId}`;
   // toV2 sets patient_guid = request_id (v2-transform.ts:197) because DISA has
   // no patient identity — so there is no cross-visit patient dedup.
   const patientId = fhirId(payload.patient.patient_guid) ?? rootId;
@@ -337,7 +390,7 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   const specimenId = fhirId(`${rootId}-spec`);
 
   const observations = payload.lab_results.map((r, i) =>
-    observationResource(r, patientRef, rootId, specimenId, i + 1, opts),
+    observationResource(r, patientRef, rootId, obrId(r.obr_set_id), specimenId, i + 1, opts),
   );
   // isolate_index is V2's join key between isolates and their ASTs. Duplicates
   // would collide on CE's (resource_type, id) upsert: the survivor would be the
@@ -348,15 +401,15 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   for (const iso of payload.isolates) {
     if (byIndex.has(iso.isolate_index)) {
       throw new Error(
-        `duplicate isolate_index ${iso.isolate_index} in ${payload.lab_request.request_id} — cannot map isolates unambiguously`,
+        `duplicate isolate_index ${iso.isolate_index} in ${first.request_id} — cannot map isolates unambiguously`,
       );
     }
-    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, specimenId));
+    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, obrId(iso.obr_set_id), specimenId));
   }
   const isolates = [...byIndex.values()];
 
   const asts = payload.susceptibility_tests.map((s, i) =>
-    astResource(s, patientRef, rootId, specimenId, i + 1),
+    astResource(s, patientRef, rootId, obrId(s.obr_set_id), specimenId, i + 1),
   );
 
   // Hang each AST off its isolate. An AST whose isolate_index matches nothing
@@ -371,18 +424,42 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
 
   const out = [
     patientResource(payload.patient, patientId, opts),
-    ...requestResources(payload.lab_request, patientRef, rootId, specimenId, opts),
+    specimenResource(first, patientRef, specimenId, opts),
+    ...payload.lab_requests.flatMap((lr) =>
+      requestResources(lr, patientRef, obrId(lr.obr_set_id), specimenId, opts),
+    ),
     ...observations,
     ...isolates,
     ...asts,
   ];
 
-  const dr = out.find((res) => res.resourceType === "DiagnosticReport");
-  // The report indexes lab-result Observations and isolates, but NOT ASTs —
-  // those are reachable via their isolate's hasMember (2-tier tree).
-  const indexed = [...observations, ...isolates];
-  if (dr !== undefined && indexed.length > 0) {
-    dr.result = indexed.map((o) => ({ reference: `Observation/${o.id as string}` }));
+  // Each report indexes the lab-result Observations and isolates of ITS OWN OBR,
+  // but NOT ASTs — those are reachable via their isolate's hasMember (2-tier
+  // tree). Previously one report indexed every observation in the lab; with N
+  // reports that would file another panel's results under this one.
+  const indexedByObr = new Map<number, FhirResource[]>();
+  const indexObs = (obr: number, res: FhirResource): void => {
+    const arr = indexedByObr.get(obr) ?? [];
+    arr.push(res);
+    indexedByObr.set(obr, arr);
+  };
+  payload.lab_results.forEach((r, i) => indexObs(r.obr_set_id, observations[i]!));
+  payload.isolates.forEach((iso) => {
+    const res = byIndex.get(iso.isolate_index);
+    if (res !== undefined) indexObs(iso.obr_set_id, res);
+  });
+
+  for (const res of out) {
+    if (res.resourceType !== "DiagnosticReport") continue;
+    const obr = Number(
+      (res.identifier as { system: string; value: string }[]).find(
+        (i) => i.system === "urn:openldr:obr-set-id",
+      )!.value,
+    );
+    const indexed = indexedByObr.get(obr) ?? [];
+    if (indexed.length > 0) {
+      res.result = indexed.map((o) => ({ reference: `Observation/${o.id as string}` }));
+    }
   }
   return out;
 }

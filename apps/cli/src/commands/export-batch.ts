@@ -613,7 +613,13 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // record has empty lab_results AND a null panel_code — v2 storage would
     // reject it, and it belongs on the forms feed, not the lab feed.
     let post: Awaited<ReturnType<typeof postLabRequest>> | null = null;
-    if (payload.lab_results.length > 0 || payload.lab_request.panel_code !== null) {
+    // Each lab_request is an ORDERED panel and names itself, so a lab with any
+    // ordered panel now has a panel_code — the "documentation-only" case is a
+    // lab whose every request lacks one.
+    if (
+      payload.lab_results.length > 0 ||
+      payload.lab_requests.some((r) => r.panel_code !== null)
+    ) {
       const extraHeaders: Record<string, string> = {};
       if (ctx.postConfig.dataFeedId !== undefined) {
         extraHeaders["X-DataFeed-Id"] = ctx.postConfig.dataFeedId;

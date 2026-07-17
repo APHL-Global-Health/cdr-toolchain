@@ -29,6 +29,20 @@ export interface V2Patient {
 
 export interface V2LabRequest {
   request_id: string;
+  /**
+   * HL7 OBR-1. v1's grain is (RequestID, OBRSetID) — one row per ORDERED PANEL —
+   * and v2 agrees: UNIQUE (request_id, obr_set_id, facility_id).
+   *
+   * ⛔ REQUIRED, never optional. v2's ingest does `request?.obr_set_id ?? 1`
+   * (openldr-v2 external-persistence.service.ts:632) under
+   * `ON CONFLICT (request_id, obr_set_id, facility_id) DO UPDATE` (:586), so an
+   * absent id pins every panel of a lab to 1 and silently overwrites N-1 of them
+   * — arriving as a SUCCESSFUL ingest. The type is the enforcement.
+   *
+   * Source: the 1-based position in SpecimenRecpt.TestOrders[] — NOT TESTINDEX.
+   * See export/obr-sets.ts.
+   */
+  obr_set_id: number;
   facility_code: V2ConceptCode | null;
   panel_code: V2ConceptCode | null;
   specimen_code: V2ConceptCode | null;
@@ -58,6 +72,10 @@ export interface V2LabRequest {
 
 export interface V2LabResult {
   source_test_code: string;
+  /** The OBR this observation belongs to — v1's LabResults.OBRSetID. Binds the
+   *  result to one of the payload's lab_requests. Linked via base(TESTINDEX),
+   *  NOT the raw index: see export/obr-sets.ts. */
+  obr_set_id: number;
   /** HL7 OBX-1: 1-based position of this observation within its panel
    *  (resets per (panelCode, panelIndex)). */
   obx_set_id: number;
@@ -83,6 +101,11 @@ export interface V2LabResult {
 
 export interface V2Isolate {
   isolate_index: number;
+  /** The OBR this isolate was cultured under. Required for the same reason as
+   *  V2LabResult.obr_set_id: FHIR hangs the isolate Observation off its OBR's
+   *  ServiceRequest, and with N ServiceRequests per lab there is no single
+   *  "the" request to reference. Linked via export/obr-sets.ts. */
+  obr_set_id: number;
   source_test_code: string;
   organism_code: V2ConceptCode;
   organism_type: "bacteria" | "fungus" | "parasite" | "none";
@@ -104,6 +127,8 @@ export interface V2Isolate {
 
 export interface V2SusceptibilityTest {
   isolate_index: number | null;
+  /** The OBR this AST ran under — see V2Isolate.obr_set_id. */
+  obr_set_id: number;
   source_test_code: string;
   antibiotic_code: V2ConceptCode;
   test_method: "DISK" | "MIC" | null;
@@ -138,7 +163,15 @@ export interface V2DataQuality {
 
 export interface V2Payload {
   patient: V2Patient;
-  lab_request: V2LabRequest;
+  /**
+   * One entry per ORDERED PANEL (OBR), in TestOrders sequence. A multi-panel
+   * DISA request produces N — 61.2% of TDS requests carry 2+ distinct panels.
+   *
+   * ⚠ Was `lab_request: V2LabRequest` (one per lab), which is what made CDR
+   * unable to represent a multi-panel request. Consumers must not assume [0]
+   * is "the" request; there is no primary any more.
+   */
+  lab_requests: V2LabRequest[];
   lab_results: V2LabResult[];
   isolates: V2Isolate[];
   susceptibility_tests: V2SusceptibilityTest[];

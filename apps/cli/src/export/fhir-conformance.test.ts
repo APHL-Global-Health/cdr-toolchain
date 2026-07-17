@@ -21,7 +21,7 @@ const TZ = { tzOffset: "+02:00" };
 
 function labResult(over: Partial<V2LabResult> = {}): V2LabResult {
   return {
-    source_test_code: "CULT", obx_set_id: 1, obx_sub_id: 0,
+    source_test_code: "CULT", obr_set_id: 1, obx_set_id: 1, obx_sub_id: 0,
     observation_code: {
       concept_code: "WBC", display_name: "White Blood Cell Count",
       concept_class: "test", datatype: "numeric", system_id: "DEFAULT_TEST",
@@ -36,7 +36,7 @@ function labResult(over: Partial<V2LabResult> = {}): V2LabResult {
 
 function isolate(over: Partial<V2Isolate> = {}): V2Isolate {
   return {
-    isolate_index: 1, source_test_code: "CULT",
+    isolate_index: 1, obr_set_id: 1, source_test_code: "CULT",
     organism_code: {
       concept_code: "ECO", display_name: "Escherichia coli",
       concept_class: "organism", datatype: "coded",
@@ -51,7 +51,7 @@ function isolate(over: Partial<V2Isolate> = {}): V2Isolate {
 
 function ast(over: Partial<V2SusceptibilityTest> = {}): V2SusceptibilityTest {
   return {
-    isolate_index: 1, source_test_code: "SENS",
+    isolate_index: 1, obr_set_id: 1, source_test_code: "SENS",
     antibiotic_code: {
       concept_code: "AMP", display_name: "Ampicillin",
       concept_class: "antibiotic", datatype: "coded",
@@ -68,8 +68,9 @@ function ast(over: Partial<V2SusceptibilityTest> = {}): V2SusceptibilityTest {
 // ships no hasMember tree, so this is the only conformance cover it gets.
 function richPayload() {
   return basePayload({
-    lab_request: {
+    lab_requests: [{
       request_id: "CONF-2024-00001",
+      obr_set_id: 1,
       facility_code: null,
       panel_code: {
         concept_code: "CULT", display_name: "Blood Culture",
@@ -95,7 +96,7 @@ function richPayload() {
       },
       requesting_doctor: "Dr Mwakasege", tested_by: null,
       authorised_by: null, source_payload: {},
-    },
+    }],
     lab_results: [
       labResult({
         obx_set_id: 1,

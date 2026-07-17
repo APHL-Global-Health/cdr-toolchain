@@ -31,6 +31,29 @@ export interface OpenLdrV1Request {
   TestedBy: string | null;
   AuthorisedBy: string | null;
   /**
+   * HL7 OBR set id. **v1's grain is (RequestID, OBRSetID) — ONE ROW PER ORDERED
+   * PANEL.** Measured on TDS: 76,002 of 174,261 rows are OBRSetID > 1 (43.6%),
+   * and 60,140 of 98,259 requests (61.2%) carry 2+ distinct LIMSPanelCodes.
+   * ⚠ `fetchRequestByRequestId` returns the LOWEST OBRSetID row (see below), so
+   * this is always the FIRST OBR — a fact that was implicit until now.
+   */
+  OBRSetID: number | null;
+  /** ⚠ NOT a duplicate of HL7PriorityCode — measured, they are orthogonal:
+   *  D x R 154,888 / E x R 19,260 / D x U 87 / E x U 14 / D x S 12. */
+  RequestTypeCode: string | null;
+  /** ⚠ The SAME facility as RequestingFacilityCode, WITHOUT v1's "DISA" prefix —
+   *  measured: RequestingFacilityCode 'DISA0JJAA' vs LIMSFacilityCode '0JJAA'. */
+  LIMSFacilityCode: string | null;
+  RegisteredBy: string | null;
+  /** ⚠ NOT free text — measured, the values are numeric codes ('17', '18',
+   *  '2421', '06050100'). Meaning undocumented. */
+  OrderingNotes: string | null;
+  LIMSAnalyzerCode: string | null;
+  LIMSVendorCode: string | null;
+  CollectionVolume: number | null;
+  LIMSRejectionCode: string | null;
+  LIMSRejectionDesc: string | null;
+  /**
    * All non-null LIMSPanelCode values across every OBR-set row for this
    * RequestID, deduplicated. v1 may split DISA's parent panel into several
    * OBR rows (one per sub-test) so the parent panel code can sit on any
@@ -63,6 +86,25 @@ export interface OpenLdrV1LabResult {
   LIMSRptRange: string | null;
   SIValue: number | null;
   SIUnits: string | null;
+  /**
+   * v1's LIMS-NATIVE flag. ⚠ **NOT the same field as HL7AbnormalFlagCodes**: its
+   * value set is L/H/L-/H+ where the HL7 one is N/L/H/LL/HH. They are the
+   * LIMS-native and HL7-normalised flags. **Do NOT map one onto the other.**
+   * Measured on TDS: 8,372 of 643,855 non-empty (1.3%) — L 5,337 / H 2,194 /
+   * L- 666 / H+ 145. v2-transform.ts:497 hardcodes `rpt_flag: null` against it.
+   */
+  LIMSRptFlag: string | null;
+  LIMSRptUnits: string | null;
+  /** ⚠ v1 splits the reference range NUMERICALLY; CDR emits rpt_range as a
+   *  STRING from the codebook. 0 is v1's empty convention for numerics. */
+  SILoRange: number | null;
+  SIHiRange: number | null;
+  /** ⚠ DISTINCT from LIMSCodedValue, which is also fetched. */
+  CodedValue: string | null;
+  /** -1 x 37,185 / 1 x 12,205 / 2 x 9 / 3 x 10 (TDS). Tracks CodedValue's 49,410
+   *  almost exactly, which SUGGESTS a '<' / '>' qualifier — a HYPOTHESIS, not a
+   *  mapping. Measure before mapping it to anything. */
+  ResultSemiquantitive: number | null;
 }
 
 const REQUEST_COLUMNS = `
@@ -76,8 +118,15 @@ const REQUEST_COLUMNS = `
   [HL7PriorityCode], [HL7SexCode], [HL7PatientClassCode],
   [HL7SectionCode], [HL7ResultStatusCode],
   [AgeInYears], [AgeInDays],
-  [AttendingDoctor], [TestedBy], [AuthorisedBy]
+  [AttendingDoctor], [TestedBy], [AuthorisedBy],
+  [OBRSetID], [RequestTypeCode], [LIMSFacilityCode],
+  [RegisteredBy], [OrderingNotes], [LIMSAnalyzerCode], [LIMSVendorCode],
+  [CollectionVolume], [LIMSRejectionCode], [LIMSRejectionDesc]
 `;
+// ⚠ EncryptedPatientID is deliberately ABSENT: PHI, and not_carried
+// (v1-coverage.ts). The gate prints values into diff rows and into committed
+// findings docs, so coverage is not a licence to widen a PHI blast radius.
+// The other 19 not_carried columns are likewise never selected.
 
 function quoteIdent(name: string): string {
   // SQL Server: escape closing brackets in identifiers
@@ -218,8 +267,15 @@ const LAB_RESULT_COLUMNS = `
   lr.[LIMSObservationCode], lr.[LIMSObservationDesc],
   lr.[LIMSRptResult], lr.[LIMSCodedValue],
   lr.[HL7ResultTypeCode], lr.[HL7AbnormalFlagCodes],
-  lr.[LIMSRptRange], lr.[SIValue], lr.[SIUnits]
+  lr.[LIMSRptRange], lr.[SIValue], lr.[SIUnits],
+  lr.[LIMSRptFlag], lr.[LIMSRptUnits],
+  lr.[SILoRange], lr.[SIHiRange],
+  lr.[CodedValue], lr.[ResultSemiquantitive]
 `;
+// ⚠ Every new entry is `lr.` — LIMSPanelCode/LIMSPanelDesc are the ONLY `req.`
+// columns here, joined in from Requests. That asymmetry is load-bearing: it is
+// why they are not LabResults columns and never appear in the schema snapshot.
+// ⚠ CodedValue and LIMSCodedValue are DIFFERENT columns; both are selected.
 
 export function buildLabResultsSql(databaseName: string): string {
   const resultsTable = `${quoteIdent(databaseName)}.[dbo].[LabResults]`;
