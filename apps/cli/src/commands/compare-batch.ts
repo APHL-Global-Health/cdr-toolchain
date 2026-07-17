@@ -15,6 +15,13 @@ import {
 } from "../compare/result-diff.js";
 import { emitMeta } from "../output.js";
 import { loadRuntime } from "./context.js";
+import { toV2 } from "../export/v2-transform.js";
+import type { V2Payload } from "../export/types.js";
+import { loadCodebook, type Codebook } from "../export/codebook.js";
+import { DEFAULT_SITE } from "../export/site-config.js";
+import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
+import { loadCountryDocConfig } from "../config/country-config.js";
+import { auditFromSpecimen } from "../audit/detector.js";
 
 interface BatchOpts {
   where?: string;
@@ -28,6 +35,8 @@ interface BatchOpts {
   includeEmpty?: boolean;
   explain?: boolean;
   pocFormat?: string;
+  v2?: boolean;
+  country?: string;
 }
 
 interface FieldStats {
@@ -63,6 +72,17 @@ interface BatchSummary {
    * so they don't drown out real diffs.
    */
   labs_pending_in_v1?: number;
+  /**
+   * With --v2: labs for which the V2 export payload was built. Nothing grades
+   * it yet (the V2<->v1 field defs are the next task) — this is the wiring
+   * proof, and it pins the sample size the V2 report will be drawn from.
+   */
+  v2?: {
+    payloads_built: number;
+    /** Which config/<country>.yaml drove excludeObs. `null` = none, which means
+     *  an EMPTY documentation-panel set — a materially different payload. */
+    country: string | null;
+  };
 }
 
 interface LabResult {
@@ -113,6 +133,42 @@ async function fetchDisaSpecimen(
   }
 }
 
+/**
+ * Build the V2 export payload for a specimen — the thing that actually ships.
+ *
+ * ⚠ The opts MUST mirror export-batch's real call sites (`export-batch.ts:559`
+ * and `:530`) or the gate would grade a payload that never leaves the building.
+ * Both of those pass prefix/site/codebook/auditReport/excludeObs, so this does
+ * too. Two of them are load-bearing, not decoration:
+ *
+ *  - `auditReport` is NOT audit-only: `hasCorroboratedSpecimenMismatch` feeds
+ *    `buildLabRequest`, which swaps `specimen.system_id` to the site's
+ *    anomaly namespace (`v2-transform.ts:309`). Omitting it would silently
+ *    change a mapped field. Export builds it whenever quarantine is on, and
+ *    quarantine is ON by default (`--no-quarantine` opts out), so the gate
+ *    mirrors the default and always builds it.
+ *  - `excludeObs` drops documentation observations, which changes primary-panel
+ *    selection and therefore request-level fields — not just lab_results.
+ *    It depends on `config/<country>.yaml`, so the gate takes `--country` for
+ *    the same reason export-batch does: with no country the doc-panel set is
+ *    EMPTY and the payload is a different payload.
+ */
+function buildV2Payload(
+  specimen: SpecimenRecpt,
+  prefix: string,
+  codebook: Codebook,
+  docConfig: DocConfig,
+): V2Payload {
+  const auditReport = auditFromSpecimen(specimen, prefix, codebook, docConfig.panels);
+  return toV2(specimen, {
+    prefix,
+    site: DEFAULT_SITE,
+    codebook,
+    auditReport,
+    excludeObs: (o) => isDocumentationObs(o, codebook, docConfig),
+  });
+}
+
 async function fetchLabNumbers(
   where: string,
   limit: number,
@@ -153,6 +209,14 @@ export function registerCompareBatchCommand(program: Command): void {
     .option(
       "--include-empty",
       "With --results: keep DISA OrderItems that are unresulted / empty / stray HL7 status flags. Off by default.",
+    )
+    .option(
+      "--v2",
+      "Also build the V2 export payload per lab (the payload that actually ships) so it can be graded against v1. Off by default: the DISA<->v1 gate's behaviour is unchanged without it.",
+    )
+    .option(
+      "--country <name>",
+      "Country key selecting config/<country>.yaml documentation classifiers (overrides OPENLDR_COUNTRY). With --v2 this changes which observations the export drops, so it changes the payload being graded.",
     )
     .option(
       "--poc-format <fmt>",
@@ -220,6 +284,19 @@ export function registerCompareBatchCommand(program: Command): void {
       let labsPendingInV1 = 0;
       const runResults = opts.results === true;
       const includeEmpty = opts.includeEmpty === true;
+      const runV2 = opts.v2 === true;
+
+      // Load the codebook ONCE for the whole batch — it hits the DB, and the
+      // payload build needs it per lab. Only when --v2: without it the codebook
+      // is unused and the extra query would be pure cost.
+      let codebook: Codebook | null = null;
+      let docConfig: DocConfig | null = null;
+      let v2PayloadsBuilt = 0;
+      if (runV2) {
+        codebook = await loadCodebook(buildServer(config.connectionString));
+        await closePool();
+        docConfig = loadCountryDocConfig(opts.country ?? config.country);
+      }
 
       // One resolver instance for the whole batch — the (CODE1, CODE2)
       // cache amortises across every lab so we don't re-query WARDDICT
@@ -261,6 +338,15 @@ export function registerCompareBatchCommand(program: Command): void {
             const diff = diffRecord(disa, v1, { pocFormat });
             labResult.summary = diff.summary;
             let labPerfect = isPerfectMatch(diff.summary);
+
+            // Build the shipping payload. Nothing grades it yet — the V2<->v1
+            // field defs are the next task. Building it here first proves the
+            // wiring (codebook, site, doc config, audit) works against real
+            // labs before any assertion depends on it.
+            if (runV2 && codebook !== null && docConfig !== null) {
+              buildV2Payload(disa, prefix, codebook, docConfig);
+              v2PayloadsBuilt++;
+            }
 
             for (const row of diff.fields) {
               perField[row.field]![row.status]++;
@@ -327,6 +413,14 @@ export function registerCompareBatchCommand(program: Command): void {
               observations: obsAgg,
               labs_without_v1_results: labsWithoutV1Results,
               labs_pending_in_v1: labsPendingInV1,
+            }
+          : {}),
+        ...(runV2
+          ? {
+              v2: {
+                payloads_built: v2PayloadsBuilt,
+                country: opts.country ?? config.country ?? null,
+              },
             }
           : {}),
       };
