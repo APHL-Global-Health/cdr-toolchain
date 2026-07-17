@@ -8,6 +8,7 @@ import {
   type DisaRejection,
 } from "../compare/result-mapping.js";
 import type { AuditReport } from "../audit/types.js";
+import { deriveObrSets, linkObsToObr, type ObrSet } from "./obr-sets.js";
 import type { Codebook } from "./codebook.js";
 import type { SiteConfig } from "./site-config.js";
 import type {
@@ -214,53 +215,26 @@ export function buildPatient(s: SpecimenRecpt, refIso: string | null, requestId:
 }
 
 // ---------- panel selection ------------------------------------------------
-
-interface PanelGroup {
-  panelCode: string;
-  panelIndex: number;
-  observations: DisaObs[];
-}
-
-function groupByPanel(obs: DisaObs[]): PanelGroup[] {
-  const map = new Map<string, PanelGroup>();
-  for (const o of obs) {
-    const key = `${o.panelCode}#${o.panelIndex}`;
-    let g = map.get(key);
-    if (g === undefined) {
-      g = { panelCode: o.panelCode, panelIndex: o.panelIndex, observations: [] };
-      map.set(key, g);
-    }
-    g.observations.push(o);
-  }
-  return [...map.values()].sort((a, b) => a.panelIndex - b.panelIndex);
-}
-
-/**
- * A panel is "info-only" when EVERY observation under it resolves to a
- * questionnaire / metadata PARMDICT context. PRD §5.1 wants these
- * deprioritised (e.g. VLID accompanying HIVVL) when picking the primary
- * lab_request.panel_code.
- */
-function isInfoOnlyPanel(group: PanelGroup, codebook: Codebook): boolean {
-  if (group.observations.length === 0) return false;
-  for (const obs of group.observations) {
-    if (!codebook.isQuestionnaireParam(obs.paramCode)) return false;
-  }
-  return true;
-}
-
-function selectPrimaryPanel(groups: PanelGroup[], codebook: Codebook): PanelGroup | null {
-  if (groups.length === 0) return null;
-  const real = groups.filter((g) => !isInfoOnlyPanel(g, codebook));
-  const pool = real.length > 0 ? real : groups;
-  return pool.reduce((best, cur) => (cur.panelIndex < best.panelIndex ? cur : best));
-}
+//
+// ⛔ REMOVED: PanelGroup / groupByPanel / isInfoOnlyPanel / selectPrimaryPanel.
+//
+// They existed to pick ONE "primary" panel per lab, because a lab could only
+// carry one panel_code. That is precisely the defect this slice fixes: a lab
+// now emits one lab_request PER ORDERED PANEL (obr-sets.ts), each naming its
+// own panel, so there is no primary to select and nothing to deprioritise.
+//
+// `isInfoOnlyPanel` deprioritised questionnaire panels (e.g. VLID accompanying
+// HIVVL) when choosing that single winner. v1 gives VLID its OWN OBR row
+// (measured: TDS0073356 -> OBR 1 HIVVL, OBR 2 VLID), so ranking panels against
+// each other was always an artifact of the one-panel limit, never a rule about
+// the data. Documentation OBSERVATIONS are still excluded via opts.excludeObs
+// (the forms feed) — that is a separate, still-correct mechanism.
 
 // ---------- lab_request ----------------------------------------------------
 
 function buildLabRequest(
   s: SpecimenRecpt,
-  primary: PanelGroup | null,
+  obr: ObrSet,
   prefix: string,
   site: SiteConfig,
   codebook: Codebook,
@@ -275,17 +249,13 @@ function buildLabRequest(
   // wasn't run — source_payload.ward is then omitted entirely.
   const wardDescription = s.WardClinicResolved ?? null;
 
-  // Primary panel normally comes from the resulted observations. A rejected
-  // request has no observations (sample never tested), so primary is null —
-  // but it still names what was ordered. Source panel_code from the first
-  // ordered panel in that case: v2 storage rejects a request whose panel_code
-  // is null AND lab_results is empty, so a rejected request would otherwise
-  // fail to migrate.
-  const orderedFallback =
-    primary === null && rejection.rejected
-      ? s.TestOrders.map((t) => String(t).trim()).find((t) => t.length > 0) ?? null
-      : null;
-  const panelSourceCode: string | null = primary?.panelCode ?? orderedFallback;
+  // Each OBR names its own panel: it IS an ordered panel (obr-sets.ts). This
+  // dissolves the old `orderedFallback`, which only fired when
+  // `primary === null && rejection.rejected` and took just TestOrders[0] — so a
+  // rejected multi-panel lab lost every panel but the first, and an
+  // observation-less NON-rejected lab lost its panel_code entirely and would
+  // fail to migrate (v2 rejects a request with null panel_code AND no results).
+  const panelSourceCode: string | null = obr.panelCode.length > 0 ? obr.panelCode : null;
   const panel = panelSourceCode === null ? undefined : codebook.panelEntry(panelSourceCode);
   const panelCode: V2ConceptCode | null = panelSourceCode === null
     ? null
@@ -347,6 +317,7 @@ function buildLabRequest(
 
   return {
     request_id: requestId,
+    obr_set_id: obr.obr_set_id,
     facility_code: facilityConcept,
     panel_code: panelCode,
     specimen_code: specimenCode,
@@ -440,6 +411,7 @@ function buildLabResults(
   codebook: Codebook,
   site: SiteConfig,
   isolates: V2Isolate[],
+  obrOf: (panelCode: string, panelIndex: number) => number | null,
 ): V2LabResult[] {
   // flattenDisa returns rows in source iteration order. Sort defensively so
   // obx_set_id increments deterministically: by (panelIndex, panelCode,
@@ -455,6 +427,13 @@ function buildLabResults(
   let prevPanelKey = "";
   let obxSetId = 0;
   for (const o of sorted) {
+    // An observation whose panel was never ordered has no OBR to hang from.
+    // v1 has no row for it either (v1-transform.ts:366 skips the same case).
+    // Dropping is correct; defaulting to 1 would file it under an unrelated
+    // panel and arrive as a successful ingest.
+    const obrSetId = obrOf(o.panelCode, o.panelIndex);
+    if (obrSetId === null) continue;
+
     const panelKey = `${o.panelCode}#${o.panelIndex}`;
     if (panelKey !== prevPanelKey) {
       obxSetId = 0;
@@ -500,6 +479,7 @@ function buildLabResults(
     const parm = codebook.paramEntry(o.paramCode);
     out.push({
       source_test_code: o.panelCode,
+      obr_set_id: obrSetId,
       obx_set_id: obxSetId,
       obx_sub_id: 0,
       observation_code: paramConcept(
@@ -686,28 +666,57 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // surfaces the dropped iterations via `panel_iterations_superseded`.
   const keptAll = supersedePanelIterations(flattenDisa(specimen)).kept;
   const obs = opts.excludeObs ? keptAll.filter((o) => !opts.excludeObs!(o)) : keptAll;
-  const groups = groupByPanel(obs);
-  const primary = selectPrimaryPanel(groups, opts.codebook);
   const rejection = detectDisaRejection(specimen);
   const specimenAnomalous = hasCorroboratedSpecimenMismatch(opts.auditReport);
-  const labRequest = buildLabRequest(specimen, primary, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous);
-  const patient = buildPatient(specimen, labRequest.received_at ?? labRequest.collected_datetime ?? labRequest.taken_datetime, labRequest.request_id);
+
+  // ⛔ The OBR grain comes from TestOrders POSITION, not TESTINDEX (obr-sets.ts;
+  // 99.95% vs v1 at n=3,874 against TESTINDEX's 93.6%). Ordered-but-unresulted
+  // panels are included: they have zero TestResults and still get a v1 row.
+  const obrSets = deriveObrSets(specimen.TestOrders);
+  const obrOf = linkObsToObr(obrSets, obs);
+  const labRequests = obrSets.map((obr) =>
+    buildLabRequest(specimen, obr, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous),
+  );
+
+  // Every OBR carries the same specimen-level timings (they are read off the
+  // SpecimenRecpt, not the panel), so any request serves as the patient's
+  // reference date. A lab with no ordered panels has no request at all — fall
+  // back to the specimen so the patient is still emitted.
+  // ⚠ Measured: labs with EMPTY TestOrders are 0 of 3,874. If one ever appears
+  // it emits no requests, and the gate will show it as unpaired rather than
+  // silently green.
+  const refRequest = labRequests[0] ?? null;
+  const patientRef =
+    refRequest?.received_at ??
+    refRequest?.collected_datetime ??
+    refRequest?.taken_datetime ??
+    disaToIso(specimen.ReceivedInLabDateTime) ??
+    disaToIso(specimen.RegisteredDateTime);
+  const patient = buildPatient(specimen, patientRef, opts.prefix + specimen.LabNumber.trim());
   // Order matters: isolates first so lab_results can attach isolate_index
   // and AST tests can resolve the nearest-isolate linkage.
-  const isolates = buildIsolates(obs, opts.codebook, opts.site, labRequest, patient.date_of_birth);
-  const labResults = buildLabResults(obs, opts.codebook, opts.site, isolates);
+  // buildIsolates reads only specimen-level fields off the request (timings,
+  // ward, sex), which are identical across OBRs — so the first one serves.
+  const isolates =
+    refRequest === null
+      ? []
+      : buildIsolates(obs, opts.codebook, opts.site, refRequest, patient.date_of_birth);
+  const labResults = buildLabResults(obs, opts.codebook, opts.site, isolates, obrOf);
   const susceptibilityTests = buildSusceptibilityTests(obs, opts.codebook, opts.site, isolates, opts.site.default_guideline);
 
-  if (patient.date_of_birth !== null && labRequest.received_at !== null) {
-    labRequest.age_years = ageYearsBetween(patient.date_of_birth, labRequest.received_at);
-    labRequest.age_days = ageDaysBetween(patient.date_of_birth, labRequest.received_at);
+  if (patient.date_of_birth !== null) {
+    for (const r of labRequests) {
+      if (r.received_at === null) continue;
+      r.age_years = ageYearsBetween(patient.date_of_birth, r.received_at);
+      r.age_days = ageDaysBetween(patient.date_of_birth, r.received_at);
+    }
   }
 
   const dataQuality = opts.auditReport ? buildDataQualityBlock(opts.auditReport) : null;
 
   return {
     patient,
-    lab_request: labRequest,
+    lab_requests: labRequests,
     lab_results: labResults,
     isolates,
     susceptibility_tests: susceptibilityTests,
