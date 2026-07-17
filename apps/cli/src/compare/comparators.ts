@@ -208,6 +208,26 @@ function toWallClock(v: unknown): WallClock | null {
     const [, mm, dd, yyyy] = dateOnly;
     return { y: Number(yyyy), mo: Number(mm) - 1, d: Number(dd), h: 0, mi: 0 };
   }
+  // Local-form ISO, no offset — what the V2 export emits ("2018-05-18T09:00:00",
+  // built by disaToIso in v2-transform.ts:42). ECMAScript parses a date-TIME
+  // form without an offset as LOCAL time, so Date.parse + getUTC* below would
+  // shift it by the host's TZ offset: on Africa/Dar_es_Salaam (UTC+3) 09:00
+  // reads back as 06:00 and EVERY V2 datetime field falsely mismatches — while
+  // passing silently on a UTC CI host. Read the components literally instead;
+  // this function compares wall clocks, not instants, so there is nothing to
+  // convert. Forms that DO carry an offset ("...Z", "...+03:00") deliberately
+  // fall through to Date.parse — those name a real instant.
+  const isoLocal = v.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?)?$/);
+  if (isoLocal !== null) {
+    const [, yyyy, mm, dd, hh, mi] = isoLocal;
+    return {
+      y: Number(yyyy),
+      mo: Number(mm) - 1,
+      d: Number(dd),
+      h: hh === undefined ? 0 : Number(hh),
+      mi: mi === undefined ? 0 : Number(mi),
+    };
+  }
   const t = Date.parse(v);
   if (Number.isNaN(t)) return null;
   const dt = new Date(t);
