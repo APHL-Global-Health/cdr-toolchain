@@ -90,33 +90,74 @@ export interface V2FieldException {
 export const V1_REQUEST_BOOKKEEPING: readonly string[] = ["allPanelCodes"];
 
 /**
- * ⛔ GRAIN MISMATCH — read before interpreting ANY request-level number.
+ * ⛔ THE COVERAGE GUARD IS NOT WHAT ITS NAME CLAIMS. Read this before quoting it.
  *
- * v1 and v2 do not agree on what one row IS:
- *  - **v1's grain is (RequestID, OBRSetID)** — one row per ORDERED PANEL. TDS has
- *    174,261 rows for 98,259 distinct requests (~1.77 each), and only **38,119
- *    (38.8%) are single-panel — 60,140 (61.2%) carry 2+ distinct LIMSPanelCodes
- *    across sibling OBR rows.**
- *  - **v2's grain is the REQUEST** — one record, `obr_set_id` defaulted to 1, one
- *    `panel_code` (the primary panel), and every panel's observations carried in
- *    `lab_results` with their own `source_test_code`. Results bind to the request
- *    by a FK to its auto-generated UUID primary key, assigned at ingest.
+ * It asserts every column of `OpenLdrV1Request` has a def or an exception. But
+ * `OpenLdrV1Request` is not v1 — it is the 26-column subset `REQUEST_COLUMNS`
+ * bothers to SELECT (openldr.ts:69-80). **v1's Requests table has 60 columns**
+ * (measured against INFORMATION_SCHEMA, 2026-07-17). So the real coverage is
+ * **26 of 60 (43%)**, and the guard cannot see the other 34 — it grades the
+ * fetch, not the oracle.
  *
- * `fetchRequestByRequestId` returns the LOWEST OBRSetID row (openldr.ts:110), so
- * these defs compare CDR's PRIMARY panel against v1's FIRST OBR. For a
- * multi-panel request those are two different panels and the difference is a
- * GRAIN artifact, not an export defect.
+ * Same class of error as `count(col)`, the blob layer, and the multi-LIMS
+ * population: **trusting a derived artifact instead of the source.** A TS
+ * interface is not a schema.
  *
- * ⚠ This is why the old table made panel_code a CANDIDATE ARRAY (`allPanelCodes`,
+ * **Not covered, and NOT known to be safe** (bookkeeping excluded):
+ *   OBRSetID ← the multi-panel key; see the header on V2_REQUEST_FIELDS
+ *   LOINCPanelCode, AdmitAttendDateTime, CollectionVolume, ReceivingFacilityCode,
+ *   RequestTypeCode, HL7SpecimenSourceCode, HL7SpecimenSiteCode,
+ *   LIMSSpecimenSiteCode, LIMSSpecimenSiteDesc, WorkUnits, CostUnits,
+ *   RegisteredBy, OrderingNotes, EncryptedPatientID, HL7EthnicGroupCode,
+ *   Deceased, Newborn, ReferringRequestID, LIMSAnalyzerCode, TargetTimeDays,
+ *   TargetTimeMins, LIMSRejectionCode, LIMSRejectionDesc, LIMSFacilityCode,
+ *   Repeated, LIMSPreReg_RegistrationDateTime, LIMSPreReg_ReceivedDateTime,
+ *   LIMSPreReg_RegistrationFacilityCode, LIMSVendorCode
+ *
+ * ⚠ `LIMSRejectionCode` / `LIMSRejectionDesc` are conspicuous: `toV2` has a whole
+ * `detectDisaRejection` path (v2-transform.ts:669). Nothing grades it against v1.
+ *
+ * Closing this means widening the SELECT and the row type first. Until then the
+ * gate's honest claim is "every FETCHED v1 column", and T7 must say so.
+ */
+export const V1_REQUEST_UNCOVERED_NOT_FETCHED = 34;
+
+/**
+ * ⛔ CDR CANNOT REPRESENT A MULTI-PANEL REQUEST — a real defect, not a grain
+ * artifact. (Corrected 2026-07-17: an earlier version of this comment called it
+ * an artifact "to discount". That was WRONG — see below.)
+ *
+ * **v1 and v2 AGREE on the grain; CDR is the outlier.**
+ *  - v1's grain: `(RequestID, OBRSetID)` — one row per ORDERED PANEL.
+ *  - v2's grain: `lab_requests (request_id, obr_set_id, facility_id)` — the same
+ *    thing. `02-openldr_external.sql:276` — `obr_set_id INTEGER -- HL7 OBR set ID
+ *    (for multi-panel requests)` — under `UNIQUE (request_id, obr_set_id,
+ *    facility_id)`. The UUID PK is a surrogate for FK joins; the natural key is
+ *    RETAINED. `lab_results.request_id` is the UUID FK — that is the ONLY place
+ *    the key is "switched".
+ *  - **CDR's grain: the DISA lab.** `V2LabRequest` has NO `obr_set_id` field at
+ *    all (types.ts:30-57), and `toV2` emits ONE record carrying ONE primary panel.
+ *
+ * **The consequence, measured.** On TDS only 38,119 of 98,259 requests (38.8%)
+ * are single-panel; **60,140 (61.2%) carry 2+ distinct LIMSPanelCodes** across
+ * sibling OBR rows. v2's ingest does `request?.obr_set_id ?? 1`
+ * (external-persistence.service.ts:632) and upserts `ON CONFLICT (request_id,
+ * obr_set_id, facility_id) DO UPDATE` (:586). So for 61.2% of TDS requests CDR
+ * emits one record, obr_set_id pins to 1, and v1's other OBR rows have no v2
+ * counterpart. Were CDR fixed to emit one record per panel WITHOUT also emitting
+ * obr_set_id, every panel would collide on (request_id, 1, facility_id) and
+ * silently overwrite the previous one.
+ *
+ * ⚠ These defs compare CDR's PRIMARY panel against v1's FIRST OBR, because
+ * `fetchRequestByRequestId` returns the lowest OBRSetID (openldr.ts:110). Where
+ * they disagree that is EVIDENCE OF THE DEFECT ABOVE, not noise to discount.
+ * `panel_code` / `panel_desc` / `section_code` (derived from the panel,
+ * v2-transform.ts:323) all carry it.
+ *
+ * ⚠ The old table hid exactly this behind a CANDIDATE ARRAY (`allPanelCodes`,
  * openldr.ts:33-41: "the parent panel code can sit on any OBRSetID, not just
- * OBR=1"). This table bans candidate arrays on purpose — "a match on either
- * wins" is what stopped the old gate ever learning the real rule. The strict
- * assertion is kept, and where it reds systematically the REPORT derives the
- * rule (D4). Do not reach for a candidate array to make it green.
- *
- * ⚠ Consequence for T7: panel_code / panel_desc / section_code numbers are only
- * interpretable ALONGSIDE the multi-panel rate. `section_code` is derived FROM
- * the panel (v2-transform.ts:323), so it inherits this exactly.
+ * OBR=1") — "a match on either wins" turned a structural defect green. That is
+ * why this table bans them. Do NOT reach for one to make this pass.
  */
 const lr = (p: V2Payload) => p.lab_request;
 
@@ -397,6 +438,27 @@ export const V1_RESULT_BOOKKEEPING: readonly string[] = [
   "LIMSPanelCode",
   "LIMSObservationCode",
 ];
+
+/**
+ * ⛔ Same caveat as V1_REQUEST_UNCOVERED_NOT_FETCHED. `OpenLdrV1LabResult`
+ * declares 15 fields, but two of those (LIMSPanelCode, LIMSPanelDesc) are joined
+ * in from Requests — so it covers **13 of LabResults' 28 real columns (46%)**.
+ *
+ * **Not covered, and NOT known to be safe** (bookkeeping excluded):
+ *   LIMSRptFlag  ← ⚠ REAL, and V2 hardcodes `rpt_flag: null` (v2-transform.ts:497).
+ *                   A SECOND stub of the same shape as abnormal_flag, never graded.
+ *                   ⚠ I previously amended the spec to claim LIMSRptFlag "is not a
+ *                   column — the spec invented it". THAT WAS WRONG: it is not on
+ *                   the fetched TYPE, but it IS a real v1 column.
+ *   LIMSRptUnits ← V2 emits `rpt_units`; nothing grades it.
+ *   DateTimeValue ← ⚠ investigate before believing "v1 has no per-result
+ *                   timestamp". It may be a date-typed VALUE rather than a
+ *                   result time — do not repeat the `issued` mistake by assuming
+ *                   either way. MEASURE it.
+ *   LOINCCode, SILoRange, SIHiRange, CodedValue, ResultSemiquantitive, Note,
+ *   WorkUnits, CostUnits
+ */
+export const V1_RESULT_UNCOVERED_NOT_FETCHED = 11;
 
 export const V2_RESULT_FIELDS: readonly V2ResultFieldDef[] = [
   {
