@@ -300,10 +300,60 @@ test("an Observation with no value at all is still emitted and valid", () => {
   assert.equal("valueCodeableConcept" in o, false);
 });
 
-test("result_timestamp gains the configured offset", () => {
-  const pl = basePayload({ lab_results: [labResult({ result_timestamp: "2024-07-20T10:00:00" })] });
+// ---------------------------------------------------------------------------
+// Observation.effectiveDateTime — the COLLECTION time (R4: "the physiologically
+// relevant time … usually … of specimen collection").
+//
+// This test used to read: "result_timestamp gains the configured offset",
+// asserting effectiveDateTime === r.result_timestamp. It PINNED THE BUG — the
+// result time in the collection field. Rewritten to pin the fix.
+// ---------------------------------------------------------------------------
+
+test("effectiveDateTime is the COLLECTION time, and gains the configured offset", () => {
+  // Mutation this kills: regressing to `r.result_timestamp` (the old bug).
+  const pl = basePayload({ lab_results: [labResult({ result_timestamp: "2099-01-01T00:00:00" })] });
+  pl.lab_requests[0]!.collected_datetime = "2024-07-20T10:00:00";
   const o = findOne(toFhir(pl, TZ), "Observation");
   assert.equal(o.effectiveDateTime, "2024-07-20T10:00:00+02:00");
+});
+
+test("effectiveDateTime prefers COLLECTED over TAKEN — measured, not chosen", () => {
+  // Mutation this kills: `taken ?? collected` (INVERTED). Graded against v1's
+  // SpecimenDateTime: collected??taken 100.0% vs taken??collected 93.9% (n=147).
+  // On the labs where both exist and DIFFER, collected is the one v1 means.
+  const pl = basePayload({ lab_results: [labResult()] });
+  pl.lab_requests[0]!.collected_datetime = "2024-07-20T10:00:00";
+  pl.lab_requests[0]!.taken_datetime = "2024-07-19T08:00:00";
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal(o.effectiveDateTime, "2024-07-20T10:00:00+02:00");
+  // and the DiagnosticReport must agree — ONE rule, no drift
+  assert.equal(findOne(toFhir(pl, TZ), "DiagnosticReport").effectiveDateTime, "2024-07-20T10:00:00+02:00");
+});
+
+test("effectiveDateTime falls back to TAKEN when collected is absent", () => {
+  // Mutation this kills: dropping the fallback. It is load-bearing, not padding:
+  // `collected` alone scores 52.4% against v1; with the fallback, 100.0%.
+  const pl = basePayload({ lab_results: [labResult()] });
+  pl.lab_requests[0]!.collected_datetime = null;
+  pl.lab_requests[0]!.taken_datetime = "2024-07-19T08:00:00";
+  assert.equal(findOne(toFhir(pl, TZ), "Observation").effectiveDateTime, "2024-07-19T08:00:00+02:00");
+});
+
+test("a DATE-ONLY collection date stays date-only — no midnight, no offset", () => {
+  // Mutation this kills: stamping T00:00:00+02:00 onto a date we only know to a
+  // day. RTKNIDX5.TAKENDATE is a date-only column; asserting a collection TIME
+  // we never had is silent and permanent — it looks like data.
+  const pl = basePayload({ lab_results: [labResult()] });
+  pl.lab_requests[0]!.collected_datetime = null;
+  pl.lab_requests[0]!.taken_datetime = "2019-01-17";
+  assert.equal(findOne(toFhir(pl, TZ), "Observation").effectiveDateTime, "2019-01-17");
+});
+
+test("no collection time at all ⇒ the key is OMITTED, never fabricated", () => {
+  const pl = basePayload({ lab_results: [labResult()] });
+  pl.lab_requests[0]!.collected_datetime = null;
+  pl.lab_requests[0]!.taken_datetime = null;
+  assert.equal("effectiveDateTime" in findOne(toFhir(pl, TZ), "Observation"), false);
 });
 
 test("DiagnosticReport.result references every Observation", () => {

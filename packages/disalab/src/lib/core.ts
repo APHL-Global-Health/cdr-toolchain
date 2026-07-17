@@ -292,3 +292,30 @@ export function Trim<T extends string | null | undefined>(value: T): T {
   if (!IsUndefinedOrNull(value)) return value.trim() as T;
   return value;
 }
+
+/**
+ * Render a DATE-ONLY SQL column as `YYYY-MM-DD`.
+ *
+ * The mssql driver returns `datetime` columns as **JS Date objects**, not
+ * strings. Where the column is date-only (stored at midnight), the honest
+ * rendering is the calendar date and nothing more.
+ *
+ * ⚠ Reads the **UTC** components deliberately. The driver builds the Date at
+ * midnight UTC, so `getDate()` on any host west of UTC rolls the date BACK a
+ * day — a silent off-by-one that only shows up in another timezone.
+ *
+ * ⚠ Returns the DATE ONLY — never `T00:00:00`, and never an offset. Midnight
+ * here is an artifact of a date-only column, not a known time; emitting it
+ * would assert a precision the source does not have.
+ *
+ * Anything that is not a valid Date (a string the driver already rendered, an
+ * empty cell) returns null rather than a guess — a caller must not receive a
+ * value it cannot distinguish from a real one.
+ */
+export function DateOnlyIso(value: unknown): string | null {
+  if (IsUndefinedOrNull(value)) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(d.getTime())) return null;
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
+}

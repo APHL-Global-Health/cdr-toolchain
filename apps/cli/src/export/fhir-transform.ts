@@ -140,6 +140,35 @@ const UNKNOWN_CODE = {
 };
 
 /**
+ * The COLLECTION time — R4's `effective[x]` is "the physiologically relevant
+ * time … usually either the time of the procedure or **of specimen collection**"
+ * (https://hl7.org/fhir/R4/observation-definitions.html). ONE rule, shared by
+ * DiagnosticReport and Observation, so the two cannot drift.
+ *
+ * ⛔ THE ORDER IS `collected ?? taken` AND IT IS MEASURED, not chosen. This file
+ * previously used `taken ?? collected` — INVERTED — and the design for the
+ * timestamps slice told us to copy that expression to the Observation. Graded
+ * against v1's SpecimenDateTime (the oracle) on a random spread sample (147 labs
+ * with a v1 counterpart), 2026-07-17:
+ *
+ *   collected ?? taken   100.0%   <- this
+ *   taken ?? collected    93.9%   <- what the design said to copy
+ *   collected alone       52.4%   (so the fallback is load-bearing, not padding)
+ *
+ * The 6.1pp gap is real: on the 9 labs where BOTH are present and DIFFER,
+ * `collected` is the one v1 means, every time. `taken` is never WRONG, only
+ * ABSENT — which is exactly why the fallback must stay.
+ *
+ * ⚠ Those rates are only true because disalab's RTKNIDX5.TAKENDATE cast was
+ * fixed (Core.DateOnlyIso). Before that, `taken` was a raw Date.toString() on
+ * 92.5% of labs, fhirDateTime returned undefined, and this key vanished
+ * silently. Both halves are required: the expression alone scores 52.4%.
+ */
+function collectionTime(lr: V2LabRequest): string | null {
+  return lr.collected_datetime ?? lr.taken_datetime;
+}
+
+/**
  * The Specimen is SPECIMEN-level — one per lab, not per OBR. DISA records one
  * specimen per request (which is why a panel/specimen mismatch is an audit
  * anomaly, not a second Specimen). Built once, outside the per-OBR loop:
@@ -216,7 +245,7 @@ function requestResources(
     subject: { reference: patientRef },
     identifier,
     ...(specimenId !== undefined ? { specimen: [{ reference: `Specimen/${specimenId}` }] } : {}),
-    effectiveDateTime: fhirDateTime(lr.taken_datetime ?? lr.collected_datetime, opts.tzOffset),
+    effectiveDateTime: fhirDateTime(collectionTime(lr), opts.tzOffset),
     issued: fhirDateTime(lr.authorised_at, opts.tzOffset),
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(fhirText(lr.testing_facility_code?.display_name ?? null) !== undefined
@@ -245,6 +274,7 @@ function toReferenceRange(
 
 function observationResource(
   r: V2LabResult, patientRef: string, rootId: string, obrId: string, specimenId: string | undefined,
+  collectionIso: string | null,
   index: number, opts: ToFhirOptions,
 ): FhirResource {
   const unit = fhirText(r.numeric_units) ?? fhirText(r.rpt_units);
@@ -280,7 +310,18 @@ function observationResource(
     identifier: [{ system: "urn:openldr:obx-set-id", value: String(r.obx_set_id) }],
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
-    effectiveDateTime: fhirDateTime(r.result_timestamp, opts.tzOffset),
+    // ⛔ THE BUG THIS SLICE EXISTS TO FIX. This read `r.result_timestamp` — the
+    // RESULT time in the COLLECTION field, the same semantic mismatch this
+    // workstream has been chasing everywhere else, in our own code. R4:
+    // effective[x] is "the physiologically relevant time … usually … of specimen
+    // collection". And result_timestamp is a hardcoded null (v2-transform.ts:501)
+    // ⇒ fhirDateTime(null) ⇒ undefined ⇒ compact() dropped the key ⇒ 0 of 135
+    // ingested CE Observations carried ANY time, which is why q-amr-resistance
+    // and q-amr-facility-summary return ZERO rows for any range, silently.
+    //
+    // ⚠ Date-only stays date-only ("2013-09-20"): fhirDateTime passes it through
+    // unzoned, and CE's DATETIME_RE accepts it. Never stamp midnight.
+    effectiveDateTime: fhirDateTime(collectionIso, opts.tzOffset),
     ...value,
     // The v2 reference nulls these on its FHIR path (:802-805) but populates
     // them on its v2 path (:192-194) — going FHIR-ward we map rather than drop.
@@ -298,7 +339,9 @@ function observationResource(
 function astResource(
   s: V2SusceptibilityTest, patientRef: string, rootId: string, obrId: string,
   specimenId: string | undefined,
+  collectionIso: string | null,
   index: number,
+  opts: ToFhirOptions,
 ): FhirResource {
   // An unknown test_method asserts no measurement type — mirrors how the
   // sibling `method` field omits itself rather than guessing "Zone diameter".
@@ -320,6 +363,19 @@ function astResource(
     subject: { reference: patientRef },
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
+    // ⛔ THE AMR ZERO-ROW BUG LIVED HERE, and the design never looked. An AST
+    // Observation had NO time at all — the field was simply absent, not stubbed.
+    // CE projects `result_timestamp: str(r['effectiveDateTime'])`, so every AST
+    // row landed with a NULL timestamp, and q-amr-resistance /
+    // q-amr-facility-summary filter on `abnormal_flag in ('S','I','R')` — which
+    // is EXACTLY the AST rows. Fixing only observationResource (which the design
+    // pointed at) left all 31 flagged rows timeless and the queries still at
+    // ZERO. Caught by the live re-ingest, not by any test.
+    //
+    // Same collection time as every other observation off this specimen: R4's
+    // effective[x] is the physiologically relevant time, and an AST run on an
+    // isolate from this specimen was collected when the specimen was.
+    effectiveDateTime: fhirDateTime(collectionIso, opts.tzOffset),
     // S/I/R is an interpretation, not a value — inverts hl7-fhir.schema.js:528-553.
     ...(s.susceptibility_value !== null
       ? { interpretation: [{ coding: [{ system: INTERPRETATION_SYSTEM, code: s.susceptibility_value }] }] }
@@ -341,6 +397,8 @@ function astResource(
 function isolateResource(
   iso: V2Isolate, patientRef: string, rootId: string, obrId: string,
   specimenId: string | undefined,
+  collectionIso: string | null,
+  opts: ToFhirOptions,
 ): FhirResource {
   return compact({
     resourceType: "Observation",
@@ -359,6 +417,9 @@ function isolateResource(
     subject: { reference: patientRef },
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
     ...(specimenId !== undefined ? { specimen: { reference: `Specimen/${specimenId}` } } : {}),
+    // Same rule as the AST and lab-result Observations — one collection time per
+    // specimen. An isolate with no time is invisible to every dated AMR report.
+    effectiveDateTime: fhirDateTime(collectionIso, opts.tzOffset),
     valueCodeableConcept: toCodeableConcept(iso.organism_code) ?? UNKNOWN_CODE,
   });
 }
@@ -390,7 +451,9 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
   const specimenId = fhirId(`${rootId}-spec`);
 
   const observations = payload.lab_results.map((r, i) =>
-    observationResource(r, patientRef, rootId, obrId(r.obr_set_id), specimenId, i + 1, opts),
+    // Collection time is SPECIMEN-level (read off the SpecimenRecpt, not the
+    // panel), so it is identical across OBRs — `first` serves for every result.
+    observationResource(r, patientRef, rootId, obrId(r.obr_set_id), specimenId, collectionTime(first), i + 1, opts),
   );
   // isolate_index is V2's join key between isolates and their ASTs. Duplicates
   // would collide on CE's (resource_type, id) upsert: the survivor would be the
@@ -404,12 +467,12 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
         `duplicate isolate_index ${iso.isolate_index} in ${first.request_id} — cannot map isolates unambiguously`,
       );
     }
-    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, obrId(iso.obr_set_id), specimenId));
+    byIndex.set(iso.isolate_index, isolateResource(iso, patientRef, rootId, obrId(iso.obr_set_id), specimenId, collectionTime(first), opts));
   }
   const isolates = [...byIndex.values()];
 
   const asts = payload.susceptibility_tests.map((s, i) =>
-    astResource(s, patientRef, rootId, obrId(s.obr_set_id), specimenId, i + 1),
+    astResource(s, patientRef, rootId, obrId(s.obr_set_id), specimenId, collectionTime(first), i + 1, opts),
   );
 
   // Hang each AST off its isolate. An AST whose isolate_index matches nothing
