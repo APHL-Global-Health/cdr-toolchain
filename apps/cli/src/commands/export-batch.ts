@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { AUDTDATA, REGDAT4, SpecimenRecpt } from "disalab";
 import type { DisaServer } from "disalab";
 import { CliError } from "../errors.js";
+import { enableInsecureTls } from "../insecure-tls.js";
 import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
@@ -252,9 +253,6 @@ interface PostConfig {
 }
 
 async function resolvePostConfig(opts: ExportBatchOpts, config: import("../config.js").LoadedConfig): Promise<PostConfig> {
-  if (opts.insecureTls === true || config.openldrV2InsecureTls) {
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-  }
   const baseUrl = opts.targetApi ?? config.openldrV2Url;
   if (baseUrl === undefined || baseUrl.length === 0) {
     throw new CliError(
@@ -842,6 +840,12 @@ export function registerExportBatchCommand(program: Command): void {
       const ceUrl = opts.ceUrl ?? config.openldrCeUrl;
       assertCeGatesEnabled({ ceUrl, doCheck, doQuarantine });
       const ceTz = requireCeTimezone(ceUrl, opts.ceTz ?? config.openldrCeTimezone);
+
+      // Loosen TLS for self-signed local-dev targets (CE or v2) BEFORE any fetch. Installs an
+      // insecure global fetch dispatcher — a runtime NODE_TLS_REJECT_UNAUTHORIZED mutation is too
+      // late for undici, and the CE branch skips resolvePostConfig (where this used to live), so the
+      // flag was a silent no-op on the CE path.
+      if (opts.insecureTls === true || config.openldrV2InsecureTls) enableInsecureTls();
 
       if (opts.explain === true) {
         const trimmed = where.trim().replace(/^WHERE\s+/i, "");
