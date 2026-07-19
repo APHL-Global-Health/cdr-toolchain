@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { AUDTDATA, REGDAT4, SpecimenRecpt } from "disalab";
 import type { DisaServer } from "disalab";
 import { CliError } from "../errors.js";
+import { enableInsecureTls } from "../insecure-tls.js";
 import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
 import { normalizeLabNumber } from "../compare/lab-number.js";
@@ -347,13 +348,10 @@ export function registerExportCommand(program: Command): void {
           );
         }
 
-        // Self-signed local-dev escape hatch. Process-wide for the rest of
-        // the invocation, but the only outbound HTTPS calls in --post are
-        // to the v2 API + Keycloak (same instance), so the blast radius is
-        // exactly what the operator intended.
-        if (opts.insecureTls === true || config.openldrV2InsecureTls) {
-          process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-        }
+        // Self-signed local-dev escape hatch. Installs an insecure global fetch
+        // dispatcher (a runtime NODE_TLS_REJECT_UNAUTHORIZED mutation is too late for
+        // undici) — covers the v2 API + Keycloak fetches, the operator's intended blast radius.
+        if (opts.insecureTls === true || config.openldrV2InsecureTls) enableInsecureTls();
 
         const baseUrl = opts.targetApi ?? config.openldrV2Url;
         let path = opts.apiPath ?? config.openldrV2Path;
