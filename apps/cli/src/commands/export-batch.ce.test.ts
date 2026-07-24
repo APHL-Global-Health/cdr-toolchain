@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { SpecimenRecpt } from "disalab";
 import { postFhirResources } from "../api/ce-client.js";
 import { toFhir } from "../export/fhir-transform.js";
-import { buildCeResources } from "./export-batch.js";
+import { buildCeResources, ceRouting } from "./export-batch.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import { basePayload } from "../export/fhir-transform.test.js";
 
@@ -96,6 +96,31 @@ test("buildCeResources: documentation-free specimen returns exactly toFhir(paylo
   assert.equal(out.some((r) => (r as { resourceType?: string }).resourceType === "QuestionnaireResponse"), false);
 });
 
+// -------------------------------------------------------------------------
+// Step 2: the CE branch's routing tally (result.routing, which feeds the
+// batch summary's split/forms_posted counters) is derived by ceRouting from
+// two counts — how many documentation resources came out of
+// buildCeResources, and how many lab_results are on the v2 payload. Pin all
+// three outcomes directly against the pure helper so a future edit to the
+// CE branch can't silently swap "split" and "form" without a red test.
+// -------------------------------------------------------------------------
+test("ceRouting: documentation + lab results routes to split", () => {
+  assert.equal(ceRouting(1, 1), "split");
+});
+
+test("ceRouting: documentation with no lab results routes to form", () => {
+  assert.equal(ceRouting(1, 0), "form");
+});
+
+test("ceRouting: no documentation routes to lab, regardless of lab results", () => {
+  assert.equal(ceRouting(0, 0), "lab");
+  assert.equal(ceRouting(0, 1), "lab");
+});
+
+// This fixture pairs a documentation-bearing specimen with basePayload()'s
+// default lab_results: [] — i.e. it is a "form" routing case, NOT "split".
+// The test below only pins buildCeResources' concatenation shape (test leg
+// + documentation leg, in order); it intentionally does not assert routing.
 test("buildCeResources: concatenates the test leg with the documentation leg", () => {
   const payload = basePayload();
   const docConfig = {

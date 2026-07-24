@@ -426,6 +426,19 @@ export function buildCeResources(
   return [...test, ...documentation];
 }
 
+/** Which CE feed(s) a lab's resources route to, given the shape of what
+ *  buildCeResources produced. Extracted as a pure, exported helper — same
+ *  reasoning as buildCeResources — so the three outcomes (split/form/lab)
+ *  are unit-testable without driving the whole processOneLab pipeline. */
+export function ceRouting(
+  documentationCount: number,
+  labResultsCount: number,
+): "split" | "form" | "lab" {
+  return documentationCount > 0
+    ? (labResultsCount > 0 ? "split" : "form")
+    : "lab";
+}
+
 /** Process one lab end-to-end: fetch -> (--check) -> build -> audit ->
  *  (quarantine) -> POST -> (track). Returns a structured LabResult.
  *  Catches all errors internally to keep the batch loop alive. */
@@ -623,9 +636,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       // QuestionnaireResponse — cheaper than re-deriving it separately and
       // keeps buildCeResources the single source of truth for the split.
       const hasDocumentation = resources.some((r) => r.resourceType === "QuestionnaireResponse");
-      result.routing = hasDocumentation
-        ? (payload.lab_results.length > 0 ? "split" : "form")
-        : "lab";
+      result.routing = ceRouting(hasDocumentation ? 1 : 0, payload.lab_results.length);
       result.duration_ms = Date.now() - start;
       return result;
     }
