@@ -15,9 +15,11 @@ import { WardDictResolver } from "../compare/warddict-resolver.js";
 import type { PocFormat } from "../openldr.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
+import type { V2Payload } from "../export/types.js";
 import { DEFAULT_SITE } from "../export/site-config.js";
 import { toV2 } from "../export/v2-transform.js";
 import { toFhir } from "../export/fhir-transform.js";
+import { toDocumentationFhir } from "../export/fhir-documentation-transform.js";
 import { toFormSubmission } from "../export/forms-transform.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
@@ -407,6 +409,36 @@ interface ProcessLabContext {
   wardResolver: WardDictResolver;
 }
 
+/** Assemble the full CE FHIR resource array for one lab: the test leg
+ *  (toFhir, unchanged) plus the documentation leg (toDocumentationFhir),
+ *  concatenated. Extracted as a pure, exported helper so the concatenation
+ *  is unit-testable without driving the whole processOneLab pipeline. When
+ *  the specimen carries no documentation observations, toDocumentationFhir
+ *  returns [] and this is exactly toFhir(payload, opts) — the CE test-only
+ *  path is unchanged. */
+export function buildCeResources(
+  specimen: SpecimenRecpt,
+  payload: V2Payload,
+  opts: { prefix: string; codebook: Codebook; docConfig: DocConfig; tzOffset: string },
+): Record<string, unknown>[] {
+  const test = toFhir(payload, { tzOffset: opts.tzOffset });
+  const documentation = toDocumentationFhir(specimen, payload, opts);
+  return [...test, ...documentation];
+}
+
+/** Which CE feed(s) a lab's resources route to, given the shape of what
+ *  buildCeResources produced. Extracted as a pure, exported helper — same
+ *  reasoning as buildCeResources — so the three outcomes (split/form/lab)
+ *  are unit-testable without driving the whole processOneLab pipeline. */
+export function ceRouting(
+  documentationCount: number,
+  labResultsCount: number,
+): "split" | "form" | "lab" {
+  return documentationCount > 0
+    ? (labResultsCount > 0 ? "split" : "form")
+    : "lab";
+}
+
 /** Process one lab end-to-end: fetch -> (--check) -> build -> audit ->
  *  (quarantine) -> POST -> (track). Returns a structured LabResult.
  *  Catches all errors internally to keep the batch loop alive. */
@@ -587,7 +619,12 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // dry-run (both still operate on the V2 payload/contract unchanged) and
     // before the v2 POST so a CE target never touches the v2 API.
     if (ctx.ceConfig !== undefined) {
-      const resources = toFhir(payload, { tzOffset: ctx.ceConfig.tzOffset });
+      const resources = buildCeResources(specimen, payload, {
+        prefix: ctx.prefix,
+        codebook: ctx.codebook,
+        docConfig: ctx.docConfig,
+        tzOffset: ctx.ceConfig.tzOffset,
+      });
       const post = await postFhirResources(resources, {
         baseUrl: ctx.ceConfig.baseUrl,
         path: ctx.ceConfig.path,
@@ -595,6 +632,11 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       });
       result.http_status = post.status;
       result.status = "posted";
+      // documentation leg present iff toDocumentationFhir emitted a
+      // QuestionnaireResponse — cheaper than re-deriving it separately and
+      // keeps buildCeResources the single source of truth for the split.
+      const hasDocumentation = resources.some((r) => r.resourceType === "QuestionnaireResponse");
+      result.routing = ceRouting(hasDocumentation ? 1 : 0, payload.lab_results.length);
       result.duration_ms = Date.now() - start;
       return result;
     }
