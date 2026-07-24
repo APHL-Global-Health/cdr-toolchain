@@ -3,23 +3,24 @@ import assert from "node:assert/strict";
 import type { SpecimenRecpt } from "disalab";
 import { postFhirResources } from "../api/ce-client.js";
 import { toFhir } from "../export/fhir-transform.js";
+import { toTransactionBundle } from "../export/fhir-bundle.js";
 import { buildCeResources, ceRouting } from "./export-batch.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import { basePayload } from "../export/fhir-transform.test.js";
 
 // -------------------------------------------------------------------------
-// Step 1: this pins the CONTRACT the CE branch relies on — postFhirResources
-// sends exactly the array it is given, so an integration test that stubs
-// fetch can inspect the posted body. (Already covered by ce-client.test.ts;
-// restated here so this file documents the full CE-branch contract in one
-// place.) The concatenation itself (test leg + documentation leg) is
-// exercised directly below via buildCeResources, since export-batch's
-// processOneLab has no other seam to hook into.
+// Step 1: this pins the CONTRACT the CE branch relies on — the resources
+// buildCeResources produces are wrapped into a FHIR transaction Bundle
+// (toTransactionBundle) before postFhirResources sends them, so an
+// integration test that stubs fetch can inspect the posted body. The
+// concatenation itself (test leg + documentation leg) is exercised directly
+// below via buildCeResources, since export-batch's processOneLab has no
+// other seam to hook into.
 // -------------------------------------------------------------------------
-test("posts the exact array it is handed (bare FHIR array contract)", async () => {
+test("posts a FHIR transaction Bundle wrapping the exact resources it is handed", async () => {
   const seen: unknown[] = [];
   const fetchImpl = (async (_url: string, init: { body?: string }) => {
-    seen.push(JSON.parse(init.body ?? "[]"));
+    seen.push(JSON.parse(init.body ?? "{}"));
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -30,10 +31,10 @@ test("posts the exact array it is handed (bare FHIR array contract)", async () =
     { resourceType: "Patient", id: "p1" },
     { resourceType: "QuestionnaireResponse", id: "qr1", status: "completed" },
   ];
-  await postFhirResources(resources, {
+  await postFhirResources(toTransactionBundle(resources), {
     baseUrl: "https://ce", path: "/hooks/x", token: "t", fetchImpl,
   });
-  assert.deepEqual(seen[0], resources);
+  assert.deepEqual(seen[0], toTransactionBundle(resources));
 });
 
 /**

@@ -19,13 +19,18 @@ import { CliError } from "../errors.js";
 //      vanishes silently, no error surfaced to the caller.
 //      (openldr_ce apps/server/src/workflows-routes.ts:417-424)
 //
-//   3. The body must be a BARE JSON ARRAY of FHIR resources, not an
-//      object wrapping the array. The workflow is
+//   3. The legacy split-out webhook wants a BARE JSON ARRAY of FHIR
+//      resources, not an object wrapping the array. The workflow is
 //      webhook -> split-out(field: "body") -> persist-store, and
 //      splitOutHandler does a flat key lookup `item.json[field]`
 //      (not a path expression), so `{ resources: [...] }` would pass
 //      through unexploded and fail validation downstream.
 //      (openldr_ce packages/workflows/src/engine/node-handlers/split-out.ts:9)
+//      The export-batch CE branch no longer targets that webhook — it wraps
+//      resources in a FHIR transaction Bundle (see ../export/fhir-bundle.ts)
+//      for a real `POST /fhir` endpoint. postFhirResources itself stays
+//      body-shape-agnostic: it POSTs whatever `body` it is given, so both
+//      wire contracts share this client.
 
 export interface CePostOptions {
   /** Base URL — e.g. "https://ce.openldr.example.com". Trailing slash trimmed. */
@@ -99,13 +104,15 @@ function backoffMs(attempt: number): number {
 }
 
 /**
- * POST FHIR resources to an OpenLDR CE workflow webhook as a bare JSON
- * array. Returns the parsed response on 2xx. Throws `CliError("API_REJECTED")`
- * on 4xx (excluding 429), and `CliError("API_UNAVAILABLE")` on 5xx / network
- * errors after retries. 429 is honoured transparently via Retry-After.
+ * POST a JSON body (a bare FHIR resource array for the legacy split-out
+ * webhook, or a FHIR transaction Bundle for `/fhir`) to an OpenLDR CE
+ * endpoint. Returns the parsed response on 2xx. Throws
+ * `CliError("API_REJECTED")` on 4xx (excluding 429), and
+ * `CliError("API_UNAVAILABLE")` on 5xx / network errors after retries.
+ * 429 is honoured transparently via Retry-After.
  */
 export async function postFhirResources(
-  resources: unknown[],
+  body: unknown,
   opts: CePostOptions,
 ): Promise<CePostResult> {
   const url = joinUrl(opts.baseUrl, opts.path);
@@ -130,7 +137,7 @@ export async function postFhirResources(
           "Accept": "application/json",
           "x-webhook-token": opts.token,
         },
-        body: JSON.stringify(resources),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
       clearTimeout(timer);

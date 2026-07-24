@@ -27,6 +27,7 @@ import { auditFromSpecimen } from "../audit/detector.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
 import { postFhirResources } from "../api/ce-client.js";
+import { toTransactionBundle } from "../export/fhir-bundle.js";
 import { fetchKeycloakToken } from "../api/keycloak.js";
 import { resolveDataFeedId } from "../api/feed-discovery.js";
 import { trackRun } from "../api/run-tracker.js";
@@ -612,12 +613,14 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       return result;
     }
 
-    // -------- CE target: FHIR POST to the workflow webhook --------
+    // -------- CE target: FHIR transaction Bundle POST --------
     // Takes over from here entirely when a CE target is configured — the v2
     // lab-leg/forms-leg split below does not apply to CE (toFhir builds one
-    // resource bundle from the same v2 payload). Placed after emit-payloads/
-    // dry-run (both still operate on the V2 payload/contract unchanged) and
-    // before the v2 POST so a CE target never touches the v2 API.
+    // flat resource array from the same v2 payload, wrapped into a FHIR
+    // transaction Bundle by toTransactionBundle just before posting).
+    // Placed after emit-payloads/dry-run (both still operate on the V2
+    // payload/contract unchanged) and before the v2 POST so a CE target
+    // never touches the v2 API.
     if (ctx.ceConfig !== undefined) {
       const resources = buildCeResources(specimen, payload, {
         prefix: ctx.prefix,
@@ -625,7 +628,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
         docConfig: ctx.docConfig,
         tzOffset: ctx.ceConfig.tzOffset,
       });
-      const post = await postFhirResources(resources, {
+      const post = await postFhirResources(toTransactionBundle(resources), {
         baseUrl: ctx.ceConfig.baseUrl,
         path: ctx.ceConfig.path,
         token: ctx.ceConfig.token,
