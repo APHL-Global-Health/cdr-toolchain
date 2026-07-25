@@ -70,7 +70,7 @@ export function loadRuntime(
           openldrV2Token: process.env.OPENLDR_V2_TOKEN,
           openldrV2Path: process.env.OPENLDR_V2_PATH ?? "/api/v2/lab-requests",
           openldrCeUrl: process.env.OPENLDR_CE_URL,
-          openldrCeHookPath: process.env.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/cdr-ingest",
+          openldrCeHookPath: process.env.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/ingest",
           openldrCeWebhookToken: process.env.OPENLDR_CE_WEBHOOK_TOKEN,
           openldrCeTimezone: process.env.OPENLDR_CE_TIMEZONE,
           keycloakUrl: process.env.KEYCLOAK_PUBLIC_URL,
