@@ -35,7 +35,7 @@ import { CliError } from "../errors.js";
 export interface CePostOptions {
   /** Base URL — e.g. "https://ce.openldr.example.com". Trailing slash trimmed. */
   baseUrl: string;
-  /** Path appended to baseUrl — e.g. "/api/workflows/hooks/cdr-ingest". */
+  /** Path appended to baseUrl — e.g. "/api/workflows/hooks/ingest". */
   path: string;
   /** Secret sent as the `x-webhook-token` header. */
   token: string;

@@ -27,7 +27,7 @@ export interface LoadedConfig {
   openldrV2Path: string;
   /** OpenLDR CE base URL — the workflow-webhook target. Presence selects the CE target. */
   openldrCeUrl?: string;
-  /** Path of the CE workflow webhook, e.g. /api/workflows/hooks/cdr-ingest. */
+  /** Path of the CE workflow webhook, e.g. /api/workflows/hooks/ingest. */
   openldrCeHookPath: string;
   /** Secret for the CE webhook's `x-webhook-token` header. */
   openldrCeWebhookToken?: string;
@@ -213,7 +213,7 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     openldrV2Token: overrides.openldrV2Token ?? env.data.OPENLDR_V2_TOKEN,
     openldrV2Path: overrides.openldrV2Path ?? env.data.OPENLDR_V2_PATH ?? "/api/v2/lab-requests",
     openldrCeUrl: overrides.openldrCeUrl ?? env.data.OPENLDR_CE_URL,
-    openldrCeHookPath: overrides.openldrCeHookPath ?? env.data.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/cdr-ingest",
+    openldrCeHookPath: overrides.openldrCeHookPath ?? env.data.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/ingest",
     openldrCeWebhookToken: overrides.openldrCeWebhookToken ?? env.data.OPENLDR_CE_WEBHOOK_TOKEN,
     openldrCeTimezone: overrides.openldrCeTimezone ?? env.data.OPENLDR_CE_TIMEZONE,
     keycloakUrl: overrides.keycloakUrl ?? env.data.KEYCLOAK_PUBLIC_URL,

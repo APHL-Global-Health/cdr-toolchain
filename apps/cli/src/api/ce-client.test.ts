@@ -14,18 +14,18 @@ test("posts a bare JSON array with the webhook token header", async () => {
 
   const res = await postFhirResources([{ resourceType: "Patient", id: "p1" }], {
     baseUrl: "https://ce.example.com/",
-    path: "/api/workflows/hooks/cdr-ingest",
+    path: "/api/workflows/hooks/ingest",
     token: "secret-token",
     fetchImpl: fakeFetch as unknown as typeof fetch,
   });
 
-  assert.equal(seenUrl, "https://ce.example.com/api/workflows/hooks/cdr-ingest");
+  assert.equal(seenUrl, "https://ce.example.com/api/workflows/hooks/ingest");
   assert.equal(seenInit.headers["x-webhook-token"], "secret-token");
   // Not application/json => CE diverts the body to blob storage and drops it.
   assert.equal(seenInit.headers["Content-Type"], "application/json");
   // CE's webhook is secret-gated, not Keycloak-gated.
   assert.equal("Authorization" in seenInit.headers, false);
-  // BARE ARRAY: split-out does a flat lookup on `body`.
+  // BARE ARRAY: the unified `ingest` webhook's Switch routes an array to Unwrap FHIR Bundle.
   assert.deepEqual(JSON.parse(seenInit.body), [{ resourceType: "Patient", id: "p1" }]);
   assert.equal(res.status, 200);
   assert.equal((res.body as any).runId, "r1");
