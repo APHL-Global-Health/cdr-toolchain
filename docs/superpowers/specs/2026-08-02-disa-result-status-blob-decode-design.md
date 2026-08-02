@@ -225,8 +225,30 @@ Four layers:
    against byte fixtures: the real `65,80,66` → `"APB"` case, the all-zero case, and a
    non-printable case that must trip the guard. Plus the X/I/R/F precedence table and the
    per-OBR resolution case where supersession's panelCode winner disagrees.
-2. **Phase 1 measurement** — confusion matrix over 176,287 labelled panels, recorded here
-   when produced.
+2. **Phase 1 measurement** — `cdr probe-review --limit 200000`, run against live DISA/v1
+   (2026-08-02). 176,287 labelled panels fetched (join of `DisalabData.TESTDATA` to
+   `<v1>.Requests` on `RequestID = prefix + LABNO AND LIMSPanelCode = TESTCODE`).
+
+   F/R rule (initials slot 77-80 non-zero ⇒ F, else R), n = 169,969 scorable (F/R only):
+   ```
+   F & reviewed  (correct) = 159188
+   R & !reviewed (correct) = 8923
+   F & !reviewed (miss)    = 632
+   R & reviewed  (miss)    = 1226
+   ACCURACY = 98.91%  (n = 169969)
+   ```
+
+   Timestamp search (long-datetime / short-datetime decoders, every offset 0-74,
+   tolerance 60s), n = 160,371 rows scorable (reviewed AND v1 has `AuthorisedDateTime`):
+   ```
+   BEST: kind= offset=-1 hits=0/0 rate=0.00%
+   ```
+   Every offset of both decoder kinds produced a 0% match rate across all 160,371 rows —
+   `best` never left its initial sentinel because no candidate ever beat 0. **GATE: FAIL
+   (0.00%) — `authorised_at` is not derivable from this header via these decoders.**
+   Per the plan's gate rule: proceed with `result_status` only; `authorised_at` stays
+   `null`, and CE's turnaround report will return 0 rows for this field until a working
+   decode is found by other means.
 3. **Gate** — `cdr compare-batch` against live v1, reporting both fields.
 4. **Phase 4** — re-ingest local CE, run CE's turnaround query, assert `issued` populated
    and durations plausible.
