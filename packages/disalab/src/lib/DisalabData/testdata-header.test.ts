@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TestDataHeader, HEADER_LENGTH } from "./testdata-header.js";
+import { TESTDATA } from "./TESTDATA.js";
 
 /** Build a TESTDATA_STATUS blob: 80-byte header + result payload. */
 function blob(mutate: (b: Buffer) => void, payload = "PAYLOAD"): Buffer {
@@ -48,4 +49,18 @@ test("byteAt returns 0 past the end instead of NaN", () => {
 test("initials slot padded with spaces still reads as not-reviewed", () => {
   const h = TestDataHeader.fromBytes(blob((b) => { b[77] = 32; b[78] = 32; b[79] = 32; }));
   assert.equal(h.initialsAt(SLOT), null);
+});
+
+test("TESTDATA.HEADER is populated even without a server, and payload parsing is unchanged", async () => {
+  const b = Buffer.alloc(HEADER_LENGTH + 4, 0);
+  b[77] = 65; b[78] = 80; b[79] = 66;
+  b.write("DATA", HEADER_LENGTH, "latin1");
+
+  // No server ⇒ initialize() returns before OrderItem.Parse, but HEADER must
+  // still be set: the header is a property of the bytes, not of the server.
+  const t = new TESTDATA(null, "TDS0010012", "HIVVL", 1, b);
+  await t.initialize(b);
+
+  assert.equal(t.HEADER?.initialsAt({ start: 77, end: 80 }), "APB");
+  assert.deepEqual(t.ORDER, []);
 });
