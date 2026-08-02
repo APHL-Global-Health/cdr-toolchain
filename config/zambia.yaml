@@ -6,3 +6,8 @@ documentation:
   params: []
   forms:
     VIRAL: hiv_vl_documentation
+
+# Zambia is UNMEASURED. DISA versions vary between deployments, so Tanzania's
+# offsets must NOT be assumed here. Run `cdr probe-review` against Zambia's
+# DISA + v1 and fill this in; until then result_status/authorised_at stay null.
+disa_blob_offsets: {}
