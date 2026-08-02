@@ -58,7 +58,8 @@
 
 **Interfaces:**
 - Consumes: `Core.ConvertToBytes`, `Core.FixString` from `packages/disalab/src/lib/core.ts`.
-- Produces: `HEADER_LENGTH: 80`, `interface HeaderOffsets { reviewerInitials: { start: number; end: number } }`, `DEFAULT_HEADER_OFFSETS`, `class TestDataHeader` with `readonly raw: string`, `readonly reviewerInitials: string | null`, `byteAt(index: number): number`, `static fromDecoded(data: string, offsets?: HeaderOffsets): TestDataHeader`, `static fromBytes(bytes: DisaInput, offsets?: HeaderOffsets): TestDataHeader`.
+- Produces: `HEADER_LENGTH: 80`, `interface HeaderOffsets { reviewerInitials: { start: number; end: number } }`, `DEFAULT_HEADER_OFFSETS`, `class TestDataHeader` with `readonly raw: string`, `initialsAt(slot: { start: number; end: number }): string | null`, `byteAt(index: number): number`, `static fromDecoded(data: string): TestDataHeader`, `static fromBytes(bytes: DisaInput): TestDataHeader`.
+- ⛔ **No `reviewerInitials` property.** Offsets are supplied per call via `initialsAt`, because `TESTDATA` constructs headers inside `disalab` where config is unreachable.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -77,14 +78,24 @@ function blob(mutate: (b: Buffer) => void, payload = "PAYLOAD"): Buffer {
   return b;
 }
 
+/** The measured Tanzania slot. Passed EXPLICITLY — never baked into the header. */
+const SLOT = { start: 77, end: 80 };
+
 test("reviewer initials decode from bytes 77-79 (the observed APB case)", () => {
   const h = TestDataHeader.fromBytes(blob((b) => { b[77] = 65; b[78] = 80; b[79] = 66; }));
-  assert.equal(h.reviewerInitials, "APB");
+  assert.equal(h.initialsAt(SLOT), "APB");
 });
 
 test("an all-zero initials slot means NOT reviewed, decoding to null", () => {
   const h = TestDataHeader.fromBytes(blob(() => {}));
-  assert.equal(h.reviewerInitials, null);
+  assert.equal(h.initialsAt(SLOT), null);
+});
+
+test("a DIFFERENT slot reads different bytes — offsets are honoured per call", () => {
+  // Proves the header does not bake in one layout: byte 10 carries "Z".
+  const h = TestDataHeader.fromBytes(blob((b) => { b[10] = 90; b[77] = 65; }));
+  assert.equal(h.initialsAt({ start: 10, end: 11 }), "Z");
+  assert.equal(h.initialsAt(SLOT), "A");
 });
 
 test("raw stops at the header boundary and never reads result payload", () => {
@@ -104,7 +115,7 @@ test("byteAt returns 0 past the end instead of NaN", () => {
 
 test("initials slot padded with spaces still reads as not-reviewed", () => {
   const h = TestDataHeader.fromBytes(blob((b) => { b[77] = 32; b[78] = 32; b[79] = 32; }));
-  assert.equal(h.reviewerInitials, null);
+  assert.equal(h.initialsAt(SLOT), null);
 });
 ```
 
@@ -159,22 +170,31 @@ function readInitials(raw: string, slot: { start: number; end: number }): string
 export class TestDataHeader {
   /** latin1 string — charCodeAt(i) & 0xff is byte i. Length <= HEADER_LENGTH. */
   readonly raw: string;
-  /** Non-null ⇒ the panel was reviewed. Null ⇒ not reviewed. */
-  readonly reviewerInitials: string | null;
 
-  private constructor(raw: string, reviewerInitials: string | null) {
+  private constructor(raw: string) {
     this.raw = raw;
-    this.reviewerInitials = reviewerInitials;
   }
 
   /** Preferred entry point when the caller has already decoded the blob. */
-  static fromDecoded(data: string, offsets: HeaderOffsets = DEFAULT_HEADER_OFFSETS): TestDataHeader {
-    const raw = Core.FixString(data, 0, HEADER_LENGTH);
-    return new TestDataHeader(raw, readInitials(raw, offsets.reviewerInitials));
+  static fromDecoded(data: string): TestDataHeader {
+    return new TestDataHeader(Core.FixString(data, 0, HEADER_LENGTH));
   }
 
-  static fromBytes(bytes: DisaInput, offsets: HeaderOffsets = DEFAULT_HEADER_OFFSETS): TestDataHeader {
-    return TestDataHeader.fromDecoded(Core.ConvertToBytes(bytes), offsets);
+  static fromBytes(bytes: DisaInput): TestDataHeader {
+    return TestDataHeader.fromDecoded(Core.ConvertToBytes(bytes));
+  }
+
+  /**
+   * Reviewer initials from an EXPLICIT slot. Non-null ⇒ reviewed.
+   *
+   * ⛔ Offsets are a PARAMETER, never baked in at construction. TESTDATA builds
+   * headers deep inside disalab, with no access to config/<country>.yaml — so a
+   * header that decoded initials in its constructor could only ever use the
+   * hardcoded default, silently making the YAML inert. Applying the slot at
+   * READ time is what lets configured offsets actually reach the decode.
+   */
+  initialsAt(slot: { start: number; end: number }): string | null {
+    return readInitials(this.raw, slot);
   }
 
   /** Raw byte at `index`, or 0 past the end. Used by the Phase 1 search. */
@@ -229,7 +249,7 @@ test("TESTDATA.HEADER is populated even without a server, and payload parsing is
   const t = new TESTDATA(null, "TDS0010012", "HIVVL", 1, b);
   await t.initialize(b);
 
-  assert.equal(t.HEADER?.reviewerInitials, "APB");
+  assert.equal(t.HEADER?.initialsAt({ start: 77, end: 80 }), "APB");
   assert.deepEqual(t.ORDER, []);
 });
 ```
@@ -569,6 +589,7 @@ Create `apps/cli/src/commands/probe-review.ts`. Follow `probe-bytes.ts`'s struct
 
 ```ts
 import type { Command } from "commander";
+import mssql from "mssql";
 import { getPool, TestDataHeader } from "disalab";
 import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
@@ -597,16 +618,29 @@ async function fetchLabelled(
   limit: number,
 ): Promise<Row[]> {
   const pool = await getPool(connectionString);
+  // Parameterised: @limit and @prefix are bound, never interpolated. `--limit`
+  // is CLI-supplied and `prefix` comes from .env, so neither belongs in the
+  // SQL text. The database NAME cannot be a bind parameter (it is an
+  // identifier, not a value), so it is whitelisted instead.
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(v1Database)) {
+    throw new CliError(`Refusing to query unsafe database identifier: ${v1Database}`);
+  }
   const sql = `
-    SELECT TOP (${limit})
+    SELECT TOP (@limit)
            t.[TESTDATA_STATUS] AS blob,
            r.[HL7ResultStatusCode] AS status,
            r.[AuthorisedDateTime]  AS authorised
     FROM [DisalabData].[dbo].[TESTDATA] t
     JOIN [${v1Database}].[dbo].[Requests] r
-      ON r.[RequestID] = '${prefix}' + t.[LABNO]
+      ON r.[RequestID] = @prefix + t.[LABNO]
      AND r.[LIMSPanelCode] = t.[TESTCODE]`;
-  const rs = (await pool.request().query(sql)).recordset as Record<string, unknown>[];
+  const rs = (
+    await pool
+      .request()
+      .input("limit", mssql.Int, limit)
+      .input("prefix", mssql.VarChar, prefix)
+      .query(sql)
+  ).recordset as Record<string, unknown>[];
   return rs.map((row) => ({
     header: TestDataHeader.fromBytes(row.blob as Buffer),
     v1Status: String(row.status ?? ""),
@@ -622,6 +656,8 @@ export function registerProbeReview(program: Command): void {
     .option("--tolerance-sec <n>", "timestamp match tolerance in seconds", "60")
     .option("--min-year <n>", "candidate year floor", "2000")
     .option("--max-year <n>", "candidate year ceiling", "2030")
+    .option("--initials-start <n>", "reviewer-initials slot start (hypothesis under test)", "77")
+    .option("--initials-end <n>", "reviewer-initials slot end, EXCLUSIVE", "80")
     .action(async (opts: Record<string, string>) => {
       const rt = await loadRuntime();
       const limit = Number(opts.limit);
@@ -640,8 +676,13 @@ export function registerProbeReview(program: Command): void {
         console.log(`labelled panels fetched: ${rows.length}`);
 
         // ---- (a) F/R rule -------------------------------------------------
+        // ⛔ The probe reads config/<country>.yaml NOT AT ALL — it exists to
+        // MEASURE the offset that later populates that file. Reading config
+        // here would be circular. The slot under test comes from the flag,
+        // defaulting to the 2026-07-16 hypothesis of 77-80.
+        const slot = { start: Number(opts.initialsStart), end: Number(opts.initialsEnd) };
         const frRows: LabelledPanel[] = rows.map((r) => ({
-          initialsPresent: r.header.reviewerInitials !== null,
+          initialsPresent: r.header.initialsAt(slot) !== null,
           v1Status: r.v1Status,
         }));
         const m = scoreFR(frRows);
@@ -654,7 +695,7 @@ export function registerProbeReview(program: Command): void {
 
         // ---- (b) timestamp search ----------------------------------------
         // Only rows that are reviewed AND carry a v1 timestamp are scorable.
-        const tsRows = rows.filter((r) => r.header.reviewerInitials !== null && r.authorisedAt !== null);
+        const tsRows = rows.filter((r) => r.header.initialsAt(slot) !== null && r.authorisedAt !== null);
         console.log(`\n=== timestamp search (n = ${tsRows.length}, tolerance ${tolerance}s) ===`);
 
         const kinds = [
@@ -821,11 +862,20 @@ test("rejects start >= end", () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test("a country with no disa_blob_offsets block yields no reviewedAt and safe defaults", () => {
+test("a country with no disa_blob_offsets block decodes NOTHING — no Tanzania fallback", () => {
   const dir = dirWith("documentation:\n  panels:\n    - VIRAL\n");
   try {
     const o = loadBlobOffsets("tanzania", dir);
     assert.equal(o.reviewedAt, null);
+    // ⛔ The whole point: an unmeasured deployment must NOT inherit 77-80.
+    assert.equal(o.reviewerInitials, null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("an unknown country decodes nothing rather than inheriting Tanzania", () => {
+  const dir = dirWith(GOOD);
+  try {
+    assert.equal(loadBlobOffsets("mozambique", dir).reviewerInitials, null);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -894,26 +944,38 @@ const schema = z.object({
 });
 
 export interface BlobOffsets {
-  reviewerInitials: { start: number; end: number };
+  /** Null ⇒ this deployment is UNMEASURED; do not attempt an F/R decode. */
+  reviewerInitials: { start: number; end: number } | null;
   reviewedAt: { start: number; kind: "long-datetime" | "short-datetime" } | null;
 }
 
-/** Tanzania measured default; every deployment should set its own explicitly. */
-const FALLBACK: BlobOffsets = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null };
+/**
+ * ⛔ NO Tanzania fallback. An unconfigured deployment decodes NOTHING.
+ *
+ * Decided 2026-08-02: inheriting Tanzania's 77-80 would let an unconfigured
+ * Zambia silently decode with the wrong offsets. `null` offsets mean no decode,
+ * so result_status/authorised_at stay null — exactly today's behaviour, which
+ * is fail-safe rather than a plausible wrong answer. This is the plan's
+ * "Never hardcode country-specific values" constraint applied literally.
+ *
+ * disalab's DEFAULT_HEADER_OFFSETS still exists, but as an EXPLICIT opt-in for
+ * tests and direct callers — it is deliberately not used as a config default.
+ */
+const UNCONFIGURED: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
 
 export function loadBlobOffsets(country: string | undefined, dir: string = configDir()): BlobOffsets {
-  if (country === undefined || country.trim().length === 0) return FALLBACK;
+  if (country === undefined || country.trim().length === 0) return UNCONFIGURED;
   const path = resolve(dir, `${country.trim().toLowerCase()}.yaml`);
-  if (!existsSync(path)) return FALLBACK;
+  if (!existsSync(path)) return UNCONFIGURED;
 
   const parsed = schema.safeParse(parse(readFileSync(path, "utf8")) ?? {});
   if (!parsed.success) {
     throw new CliError(`Invalid disa_blob_offsets in ${path}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   }
   const block = parsed.data.disa_blob_offsets;
-  if (block === undefined) return FALLBACK;
+  if (block === undefined) return UNCONFIGURED;
   return {
-    reviewerInitials: block.reviewer_initials ?? FALLBACK.reviewerInitials,
+    reviewerInitials: block.reviewer_initials ?? null,
     reviewedAt: block.reviewed_at ?? null,
   };
 }
@@ -924,13 +986,16 @@ export function loadBlobOffsets(country: string | undefined, dir: string = confi
  * emitting wrong statuses for an entire migration.
  */
 export function assertOffsetsPlausible(headers: readonly TestDataHeader[], offsets: BlobOffsets): void {
+  // Unconfigured deployment: nothing is decoded, so there is nothing to check.
+  if (offsets.reviewerInitials === null) return;
+  const slot = offsets.reviewerInitials;
   const sample = headers.slice(0, DEFAULT_SELF_CHECK_SAMPLE);
   let nonZero = 0;
   let printable = 0;
   for (const h of sample) {
     let any = false;
     let ok = true;
-    for (let i = offsets.reviewerInitials.start; i < offsets.reviewerInitials.end; i++) {
+    for (let i = slot.start; i < slot.end; i++) {
       const b = h.byteAt(i);
       if (b === 0 || b === 32) continue;
       any = true;
@@ -1133,6 +1198,39 @@ test("a missing header is flagged undecodable and falls back to R, never crashes
   assert.equal(s.get(1)?.headerUndecodable, true);
 });
 
+test("an unmeasured deployment yields null status, NOT a defaulted R", () => {
+  const s = buildStatusByObr({
+    iterations: [iter("HIVVL", 1, true)],
+    obrOf: obrOfMap({ "HIVVL:1": 1 }),
+    obsCountByObr: new Map([[1, 3]]),
+    rejected: false,
+    offsets: { reviewerInitials: null, reviewedAt: null },
+  });
+  assert.equal(s.get(1)?.status, null);
+  assert.equal(s.get(1)?.authorisedAt, null);
+});
+
+test("an unmeasured deployment STILL reports X and I, which need no offsets", () => {
+  const unmeasured = { reviewerInitials: null, reviewedAt: null };
+  const rejected = buildStatusByObr({
+    iterations: [iter("HIVVL", 1, true)],
+    obrOf: obrOfMap({ "HIVVL:1": 1 }),
+    obsCountByObr: new Map([[1, 3]]),
+    rejected: true,
+    offsets: unmeasured,
+  });
+  assert.equal(rejected.get(1)?.status, "X");
+
+  const interim = buildStatusByObr({
+    iterations: [iter("HIVVL", 1, true)],
+    obrOf: obrOfMap({ "HIVVL:1": 1 }),
+    obsCountByObr: new Map([[1, 0]]),
+    rejected: false,
+    offsets: unmeasured,
+  });
+  assert.equal(interim.get(1)?.status, "I");
+});
+
 test("an ordered-but-unresulted OBR with no iteration at all is I", () => {
   const s = buildStatusByObr({
     iterations: [],
@@ -1166,7 +1264,8 @@ import type { BlobOffsets } from "../config/blob-offsets.js";
 import { decodeLongDatetime, decodeShortDatetime } from "../compare/disa-datetime-candidates.js";
 
 export interface ObrStatus {
-  status: "X" | "I" | "F" | "R";
+  /** Null ⇒ undeterminable (deployment has no measured initials offset). */
+  status: "X" | "I" | "F" | "R" | null;
   authorisedAt: Date | null;
   headerUndecodable: boolean;
 }
@@ -1243,7 +1342,15 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
       continue;
     }
     const header = winner?.header ?? null;
-    const reviewed = header !== null && header.reviewerInitials !== null;
+    // Unconfigured deployment: X and I are STILL derivable above (rejection and
+    // observation count need no offsets), but F-vs-R is not. Emit null rather
+    // than defaulting to R — null is today's behaviour, R would be a false
+    // claim that the panel was left unverified.
+    if (offsets.reviewerInitials === null) {
+      out.set(obr, { status: null, authorisedAt: null, headerUndecodable });
+      continue;
+    }
+    const reviewed = header !== null && header.initialsAt(offsets.reviewerInitials) !== null;
     out.set(obr, {
       status: reviewed ? "F" : "R",
       authorisedAt: reviewed && header !== null ? decodeReviewedAt(header, offsets) : null,
