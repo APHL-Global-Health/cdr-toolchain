@@ -274,6 +274,46 @@ Phases 1-2 of this project reported **100.0000%** match, and that is the house s
 and `A` underivable. **Success means matching the measured ceiling, not going green.**
 State the achieved number so a non-100% field does not read as a regression.
 
+## Phase 4 results — CE re-ingest and live verification (2026-08-02)
+
+Ingested 150 labs into the local CE (`export-batch --country tanzania --ce-url http://localhost:3000
+--ce-tz +03:00`): **127 posted**, 22 quarantined by the pre-existing `specimen_missing` audit gate,
+1 check-failed, 0 errored.
+
+**`DiagnosticReport.issued`: 0 → 152.** The original defect is fixed.
+
+| status | reports | with `issued` |
+|---|---:|---:|
+| `final` | 152 | **152** |
+| `registered` | 115 | 0 |
+| `cancelled` | 41 | 0 |
+| `partial` | 2 | 0 |
+| `unknown` | 921 | 0 |
+
+`unknown` are pre-existing rows never re-ingested. The mapping is self-consistent: every `final`
+report carries an authorisation time and no non-final report does — which also resolves the review
+concern that `R` → `registered` might contradict `ServiceRequest.status`.
+
+**The turnaround query returns 152 rows (was 0).** Statistics, reported as measured:
+
+| rows | avg | median | min | max | negative |
+|---:|---:|---:|---:|---:|---:|
+| 152 | 6536 h | 8209 h | 1.6 h | 20302 h | **0** |
+
+⚠ **The durations are dominated by a bulk-review artefact in the source data, not by lab
+performance.** All 152 specimens were received in **2013**, but authorisation clusters in a later
+year: 36 issued in 2013, **113 in 2014**, 3 in 2015. Only **25 of 152** fall under 48 h. This is a
+genuine property of this DISA extract — someone worked a backlog of 2013 labs during 2014 — and NOT
+a decoding error: `issued` was independently validated at 99.36% minute-exact against v1's
+`AuthorisedDateTime`, `receivedTime` predates this branch and is 565/565 populated, and there are
+**zero negative durations**. Spot-check TDS0010015 (received 11:45, issued 13:21 same day, 1.6 h) —
+plausible pairs decode plausibly.
+
+**Consequence:** the report is now functional and its inputs are correct, but a median computed over
+this extract is not a clinical turnaround time. Anyone reading it needs the 2013/2014 split above.
+Re-measure on the full dataset (this is the laptop subset, 1 site of 22, 2013-only) before drawing
+any operational conclusion.
+
 ## Known gaps
 
 - `A` ("some but not all results available") is not derivable — 624 rows in 3.4M.
