@@ -113,6 +113,69 @@ function specimenFixture(): SpecimenRecpt {
   } as unknown) as SpecimenRecpt;
 }
 
+/** Same shape as specimenFixture but with the panels/observations the caller
+ *  asks for, so rejection and exclusion can be exercised end to end. */
+function specimenWith(
+  orders: string[],
+  results: { code: string; index: number; items: ReturnType<typeof makeItem>[] }[],
+): SpecimenRecpt {
+  const base = specimenFixture() as unknown as Record<string, unknown>;
+  return ({
+    ...base,
+    TestOrders: orders,
+    TestResults: results.map((r) => ({
+      TESTCODE: r.code,
+      TESTINDEX: r.index,
+      DATESTAMP: null,
+      HEADER: buildHeader(),
+      ORDER: r.items,
+    })),
+  } as unknown) as SpecimenRecpt;
+}
+
+// ⛔ `I` means "this panel produced NO results", never "we chose not to emit
+// its results". The panel below has exactly one observation and excludeObs
+// drops it (the real HIVPC case: its only observation classifies as
+// documentation via PARMDICT context 77). The panel WAS resulted, so it must
+// keep its reviewed status.
+test("a panel whose only observation is excluded is NOT interim", () => {
+  const payload = toV2(specimenWith(["MRCSW"], [{ code: "MRCSW", index: 1, items: [makeItem("WETP", "1")] }]), {
+    prefix: "",
+    site: DEFAULT_SITE,
+    codebook: stubCodebook({ panels: { MRCSW: "MC&S" } }),
+    blobOffsets: CONFIGURED_OFFSETS,
+    excludeObs: () => true,
+  });
+
+  const req = payload.lab_requests[0]!;
+  assert.equal(payload.lab_results.length, 0, "the observation is still excluded from the payload");
+  assert.equal(req.result_status, "F", "excluded ≠ absent — this panel was resulted and reviewed");
+});
+
+// One rejected panel must not drag its siblings to X. RJREA is an observation,
+// so it belongs to the panel it was recorded on.
+test("a rejected panel does not force X onto a resulted sibling panel", () => {
+  const payload = toV2(
+    specimenWith(
+      ["COL", "MRCSW"],
+      [
+        { code: "COL", index: 1, items: [makeItem("RJREA", "UNSUITABLE")] },
+        { code: "MRCSW", index: 1, items: [makeItem("WETP", "1")] },
+      ],
+    ),
+    {
+      prefix: "",
+      site: DEFAULT_SITE,
+      codebook: stubCodebook({ panels: { COL: "COL", MRCSW: "MC&S" } }),
+      blobOffsets: CONFIGURED_OFFSETS,
+    },
+  );
+
+  const byObr = new Map(payload.lab_requests.map((r) => [r.obr_set_id, r]));
+  assert.equal(byObr.get(1)?.result_status, "X", "COL carries the rejection");
+  assert.equal(byObr.get(2)?.result_status, "F", "MRCSW was tested, resulted and reviewed");
+});
+
 test("toV2 with CONFIGURED offsets emits result_status F and a local-form authorised_at", () => {
   const payload = toV2(specimenFixture(), {
     prefix: "",

@@ -360,7 +360,12 @@ function buildLabRequest(
     // existing rejection signal taking precedence. See export/review-status.ts
     // and docs/superpowers/specs/2026-08-02-disa-result-status-blob-decode-design.md.
     // `A` is NOT derivable (624 rows in 3.4M) and is an accepted gap.
-    result_status: reviewStatus?.status ?? (rejection.rejected ? "X" : null),
+    // ⛔ No `rejection.rejected ? "X"` fallback here any more. `rejection` is a
+    // SPECIMEN-level boolean, and using it per OBR is what forced `X` onto
+    // resulted sibling panels. buildStatusByObr now owns rejection per OBR and
+    // includes every rejected OBR in its output, so an OBR with no entry here
+    // is one nothing is known about — null, not a rejection claim.
+    result_status: reviewStatus?.status ?? null,
     // requesting_facility_code mirrors testing_facility_code — see the
     // comment where facilityConcept is reused for requestingFacilityConcept
     // above. DISA's data model doesn't distinguish them.
@@ -733,13 +738,40 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const obrOf = linkObsToObr(obrSets, iterations);
 
   // Observation count per OBR drives the `I` (interim) branch: an ordered
-  // panel with zero kept observations is exactly v1's "request but no
-  // results" case (compare-batch.ts:60-65).
+  // panel with zero observations is exactly v1's "request but no results" case
+  // (compare-batch.ts:60-65).
+  //
+  // ⛔ Counted from `keptAll`, i.e. BEFORE opts.excludeObs — deliberately, and
+  // it must stay that way. `I` must mean "this panel genuinely produced no
+  // results", never "we chose not to emit its results". Documentation
+  // observations are dropped from the emitted payload but they still prove the
+  // panel was resulted; counting post-exclusion made every panel whose only
+  // observation is documentation look interim (30 of 53 result_status
+  // mismatches, all HIVPC, measured 2026-08-02).
   const obsCountByObr = new Map<number, number>();
-  for (const o of obs) {
+  for (const o of keptAll) {
     const id = obrOf(o.panelCode, o.panelIndex);
     if (id === null) continue;
     obsCountByObr.set(id, (obsCountByObr.get(id) ?? 0) + 1);
+  }
+  // Rejection is recorded PER PANEL, not per specimen: RJREA is an observation
+  // on the panel that was refused. `detectDisaRejection` collapses the whole
+  // specimen to one boolean (correct for the request-level `reason` text it
+  // feeds), but applying that boolean to every OBR forced `X` onto sibling
+  // panels that were tested and resulted — e.g. TDS0010161, where one rejected
+  // panel dragged HIVDR (27 observations, v1 says R) to X.
+  //
+  // Only RJREA counts, matching the project's established rejection rule: the
+  // coded reject REASON is the signal, not the free-text RJREM memo (frequently
+  // padding) and not a header status flag. flattenDisa strips RJREA from the
+  // normal stream, so re-scan with includeEmpty.
+  const rejectedObrs = new Set<number>();
+  for (const o of flattenDisa(specimen, { includeEmpty: true })) {
+    if (o.paramCode !== "RJREA") continue;
+    if (o.valueStr === null || o.valueStr.trim().length === 0) continue;
+    const id = obrOf(o.panelCode, o.panelIndex);
+    if (id === null) continue;
+    rejectedObrs.add(id);
   }
   const statusByObr = buildStatusByObr({
     iterations: specimen.TestResults.map((t) => ({
@@ -750,7 +782,7 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
     })),
     obrOf,
     obsCountByObr,
-    rejected: rejection.rejected,
+    rejectedObrs,
     offsets: opts.blobOffsets,
   });
 

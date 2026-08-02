@@ -25,7 +25,7 @@ test("reviewed panel with results is F", () => {
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "F");
@@ -36,7 +36,7 @@ test("unreviewed panel with results is R", () => {
     iterations: [iter("HIVVL", 1, false)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "R");
@@ -47,7 +47,7 @@ test("zero observations is I, and I beats the review signal", () => {
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 0]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "I");
@@ -58,10 +58,50 @@ test("rejection wins over everything — X beats I and F", () => {
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 0]]),
-    rejected: true,
+    rejectedObrs: new Set([1]),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "X");
+});
+
+// ---- REJECTION IS PER OBR, NOT PER SPECIMEN ------------------------------
+// RJREA is an OBSERVATION, so it belongs to the panel it was recorded on. A
+// specimen-wide boolean forced X onto siblings that were tested and resulted:
+// TDS0010161's HIVDR carries 27 observations and v1 grades it R, but one
+// rejection elsewhere on the specimen made CDR call it X.
+test("a rejected panel does NOT force X onto a resulted sibling OBR", () => {
+  const s = buildStatusByObr({
+    iterations: [iter("COL", 1, false), iter("HIVDR", 1, true)],
+    obrOf: obrOfMap({ "COL:1": 1, "HIVDR:1": 2 }),
+    obsCountByObr: new Map([[2, 27]]),
+    rejectedObrs: new Set([1]),
+    offsets: OFFSETS,
+  });
+  assert.equal(s.get(1)?.status, "X", "OBR 1 is the panel that was rejected");
+  assert.equal(s.get(2)?.status, "F", "OBR 2 has results and must keep its own status");
+});
+
+test("a rejection-only OBR — no iteration, no observations — is still X", () => {
+  const s = buildStatusByObr({
+    iterations: [],
+    obrOf: obrOfMap({}),
+    obsCountByObr: new Map(),
+    rejectedObrs: new Set([3]),
+    offsets: OFFSETS,
+  });
+  assert.equal(s.get(3)?.status, "X", "flattenDisa strips RJREA, so this OBR appears nowhere else");
+});
+
+test("rejecting one OBR leaves an unrelated interim OBR interim", () => {
+  const s = buildStatusByObr({
+    iterations: [iter("COL", 1, false), iter("MAL", 1, false)],
+    obrOf: obrOfMap({ "COL:1": 1, "MAL:1": 2 }),
+    obsCountByObr: new Map([[2, 0]]),
+    rejectedObrs: new Set([1]),
+    offsets: OFFSETS,
+  });
+  assert.equal(s.get(1)?.status, "X");
+  assert.equal(s.get(2)?.status, "I");
 });
 
 // ---- THE GRAIN TRAP ------------------------------------------------------
@@ -73,7 +113,7 @@ test("one panel code across two OBRs resolves each OBR independently", () => {
     iterations: [iter("HIVVL", 1, true), iter("HIVVL", 2, false)],
     obrOf: obrOfMap({ "HIVVL:1": 1, "HIVVL:2": 2 }),
     obsCountByObr: new Map([[1, 2], [2, 2]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "F", "OBR 1 was reviewed");
@@ -87,7 +127,7 @@ test("within one OBR the latest iteration wins by datestamp", () => {
     iterations: [older, newer],
     obrOf: obrOfMap({ "COL:1": 1 }),
     obsCountByObr: new Map([[1, 2]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "F", "the later iteration was reviewed");
@@ -99,7 +139,7 @@ test("with equal datestamps the higher panelIndex wins", () => {
     iterations: [iter("COL", 1, false, d), iter("COL", 101, true, d)],
     obrOf: obrOfMap({ "COL:1": 1 }),
     obsCountByObr: new Map([[1, 2]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "F");
@@ -110,7 +150,7 @@ test("a missing header is flagged undecodable and falls back to R, never crashes
     iterations: [{ panelCode: "HIVVL", panelIndex: 1, datestamp: null, header: null }],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 2]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "R");
@@ -122,7 +162,7 @@ test("an unmeasured deployment yields null status, NOT a defaulted R", () => {
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: { reviewerInitials: null, reviewedAt: null },
   });
   assert.equal(s.get(1)?.status, null);
@@ -135,7 +175,7 @@ test("an unmeasured deployment STILL reports X and I, which need no offsets", ()
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
-    rejected: true,
+    rejectedObrs: new Set([1]),
     offsets: unmeasured,
   });
   assert.equal(rejected.get(1)?.status, "X");
@@ -144,7 +184,7 @@ test("an unmeasured deployment STILL reports X and I, which need no offsets", ()
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 0]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: unmeasured,
   });
   assert.equal(interim.get(1)?.status, "I");
@@ -155,7 +195,7 @@ test("an ordered-but-unresulted OBR with no iteration at all is I", () => {
     iterations: [],
     obrOf: obrOfMap({}),
     obsCountByObr: new Map([[1, 0]]),
-    rejected: false,
+    rejectedObrs: new Set(),
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "I");
