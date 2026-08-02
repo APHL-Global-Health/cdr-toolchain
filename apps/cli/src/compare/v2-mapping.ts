@@ -228,8 +228,11 @@ export const V2_REQUEST_FIELDS: readonly V2FieldDef[] = [
     comparator: datetime,
   },
   {
-    // v2-transform.ts:338 hardcodes null. v1 has it on 91.2% of DISA/TDS.
-    // Expected RED — but only for FINAL results; see the conditional rule.
+    // v2-transform.ts derives authorised_at from the decoded TESTDATA_STATUS
+    // review header (buildStatusByObr / review-status.ts) when the deployment's
+    // disa_blob_offsets are configured; it is no longer a hardcoded null.
+    // v1 has it on 91.2% of DISA/TDS. Only FINAL results are expected to carry
+    // one — see the conditional rule below.
     field: "authorised_at",
     v1Column: "AuthorisedDateTime",
     getV2: (r) => r.authorised_at,
