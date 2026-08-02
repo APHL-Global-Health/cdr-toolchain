@@ -240,15 +240,29 @@ Four layers:
 
    Timestamp search (long-datetime / short-datetime decoders, every offset 0-74,
    tolerance 60s), n = 160,371 rows scorable (reviewed AND v1 has `AuthorisedDateTime`):
+
+   The first run of this measurement was invalidated by a scorer bug (it compared
+   local-vs-UTC `Date` instants, producing a constant 3h skew) and is superseded by the
+   re-measured output below.
    ```
-   BEST: kind= offset=-1 hits=0/0 rate=0.00%
+   labelled panels fetched: 176287
+
+   === F/R rule: initials non-zero => F, else R ===
+     F & reviewed  (correct) = 159188
+     R & !reviewed (correct) = 8923
+     F & !reviewed (miss)    = 632
+     R & reviewed  (miss)    = 1226
+     ACCURACY = 98.91%  (n = 169969)
+
+   === timestamp search (n = 160371, tolerance 60s) ===
+     BEST: kind=long-datetime offset=21 hits=159340/160371 rate=99.36%
+
+   === GATE (spec: >=95% minute-exact) ===
+     PASS (99.36%) — proceed to Phase 2.
    ```
-   Every offset of both decoder kinds produced a 0% match rate across all 160,371 rows —
-   `best` never left its initial sentinel because no candidate ever beat 0. **GATE: FAIL
-   (0.00%) — `authorised_at` is not derivable from this header via these decoders.**
-   Per the plan's gate rule: proceed with `result_status` only; `authorised_at` stays
-   `null`, and CE's turnaround report will return 0 rows for this field until a working
-   decode is found by other means.
+   Per the plan's gate rule: proceed to Phase 2 with both `result_status` and
+   `authorised_at` derivable from this header via the winning decoder (kind=long-datetime,
+   offset=21).
 3. **Gate** — `cdr compare-batch` against live v1, reporting both fields.
 4. **Phase 4** — re-ingest local CE, run CE's turnaround query, assert `issued` populated
    and durations plausible.

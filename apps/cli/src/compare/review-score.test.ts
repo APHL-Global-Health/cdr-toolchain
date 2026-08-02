@@ -1,6 +1,23 @@
+// TZ PIN — see the header of v2-mapping.test.ts / v2-transform-datestamp.test.ts
+// for the full rationale. The tests below construct one side of a timestamp
+// comparison with the LOCAL Date constructor and the other with Date.UTC. On a
+// UTC host those are the same instant, so the OLD instant-comparing
+// implementation would score them a hit and the regression test would pass
+// vacuously — the guard it's meant to enforce would silently evaporate.
+// Africa/Dar_es_Salaam has no DST => a constant -180, so the pin is stable.
+// Node's test runner is process-per-file, so this cannot leak into other suites.
+process.env.TZ = "Africa/Dar_es_Salaam";
+
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { scoreFR, scoreTimestamp } from "./review-score.js";
+
+test("TZ pin is in force (host is not accidentally UTC)", () => {
+  // If this fails, the file's TZ pin didn't take effect and the timezone-trap
+  // regression tests below would pass vacuously even against the old,
+  // instant-comparing implementation.
+  assert.equal(new Date(2017, 4, 18, 9, 0, 0).getTimezoneOffset(), -180);
+});
 
 test("scoreFR reproduces the 2026-07-16 confusion matrix shape", () => {
   const rows = [
