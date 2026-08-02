@@ -24,6 +24,7 @@ import { toFormSubmission } from "../export/forms-transform.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
+import { loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
 import { postFhirResources } from "../api/ce-client.js";
@@ -386,6 +387,9 @@ interface ProcessLabContext {
    *  documentation-vs-test split: which observations are excluded from the lab
    *  payload and routed to the forms feed. */
   docConfig: DocConfig;
+  /** Measured per-deployment TESTDATA_STATUS blob offsets, loaded ONCE at
+   *  startup (below) — never per lab, since loadBlobOffsets does file I/O. */
+  blobOffsets: BlobOffsets;
   prefix: string;
   postConfig: PostConfig;
   /** Present when the CE target is selected (--ce-url / OPENLDR_CE_URL). When
@@ -563,6 +567,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
           codebook: ctx.codebook,
           auditReport,
           excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
+          blobOffsets: ctx.blobOffsets,
         });
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(
@@ -594,6 +599,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       codebook: ctx.codebook,
       auditReport,
       excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
+      blobOffsets: ctx.blobOffsets,
     });
 
     // -------- emit payloads (stdin to `openldr ingest stream`) --------
@@ -1010,6 +1016,10 @@ export function registerExportBatchCommand(program: Command): void {
       // excluded from the lab payload and routed to the forms feed instead.
       const docConfig = loadCountryDocConfig(opts.country ?? config.country);
 
+      // Measured per-deployment TESTDATA_STATUS blob offsets, loaded ONCE for
+      // the whole batch — loadBlobOffsets does file I/O and toV2 runs per lab.
+      const blobOffsets = loadBlobOffsets(opts.country ?? config.country);
+
       // Skip v2 POST config resolution entirely when we won't POST via v2
       // anyway: --dry-run runs the gates without sending, --emit-payloads
       // writes payloads to stdout (intended to pipe into `openldr ingest
@@ -1078,6 +1088,7 @@ export function registerExportBatchCommand(program: Command): void {
         config,
         codebook,
         docConfig,
+        blobOffsets,
         prefix,
         postConfig,
         ceConfig,

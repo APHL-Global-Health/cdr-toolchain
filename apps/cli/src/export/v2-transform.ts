@@ -9,8 +9,10 @@ import {
 } from "../compare/result-mapping.js";
 import type { AuditReport } from "../audit/types.js";
 import { deriveObrSets, linkObsToObr, type ObrSet } from "./obr-sets.js";
+import { buildStatusByObr, type ObrStatus } from "./review-status.js";
 import type { Codebook } from "./codebook.js";
 import type { SiteConfig } from "./site-config.js";
+import type { BlobOffsets } from "../config/blob-offsets.js";
 import type {
   V2ConceptCode,
   V2DataQuality,
@@ -48,6 +50,23 @@ function disaToIso(s: string | null | undefined): string | null {
   const [, mm, dd, yyyy, hh, mi, ss] = dateTime;
   if (hh === undefined) return `${yyyy}-${mm}-${dd}`;
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss ?? "00"}`;
+}
+
+/**
+ * ⛔ Do NOT use Date#toISOString() here. Every other datetime on the payload is
+ * emitted by disaToIso as LOCAL-form ISO with no offset and no milliseconds
+ * (`2018-05-18T09:00:00`, above). toISOString() would emit `...T06:00:00.000Z`
+ * on a UTC+3 host — a silent whole-timezone shift that the gate's comparator
+ * reads as a mismatch, or worse, as a plausible wrong time.
+ *
+ * Uses LOCAL getters deliberately: decodeLongDatetime (compare/disa-datetime-
+ * candidates.ts) builds its Date with `new Date(y, m, d, h, mi, 0)` — the local
+ * constructor — so the wall-clock time is carried in the local components.
+ */
+function dateToLocalIso(d: Date): string {
+  const p = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}` +
+         `T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** True if the OrderItem.Type byte indicates a numeric slot (1=Real, 2=Int). */
@@ -240,6 +259,7 @@ function buildLabRequest(
   codebook: Codebook,
   rejection: DisaRejection,
   specimenAnomalous: boolean,
+  reviewStatus: ObrStatus | null,
 ): V2LabRequest {
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
@@ -326,7 +346,7 @@ function buildLabRequest(
     received_at: disaToIso(s.ReceivedInLabDateTime) ?? disaToIso(s.RegisteredDateTime),
     registered_at: disaToIso(s.RegisteredDateTime),
     analysis_at: null,   // disalab doesn't expose analysis_at on SpecimenRecpt
-    authorised_at: null, // ditto authorised_at
+    authorised_at: reviewStatus?.authorisedAt ? dateToLocalIso(reviewStatus.authorisedAt) : null,
     clinical_info: nz(s.ClinicalDiagnosisText) ?? nz(s.ClinicalDiagnosis),
     icd10_codes: nz(s.ICD10),
     therapy: nz(s.TherapyText) ?? nz(s.Therapy),
@@ -336,11 +356,11 @@ function buildLabRequest(
     sex: nz(s.Sex),
     patient_class: null, // not surfaced on SpecimenRecpt
     section_code: sectionCode,
-    // DISA doesn't surface a per-request status on SpecimenRecpt (v1 carries
-    // it via HL7ResultStatusCode). Synthesise "X" (rejected) when the
-    // specimen was refused — mirrors v1's rejected-request convention so v2
-    // can treat the empty lab_results as expected rather than incomplete.
-    result_status: rejection.rejected ? "X" : null,
+    // Per-OBR result status decoded from the TESTDATA_STATUS header, with the
+    // existing rejection signal taking precedence. See export/review-status.ts
+    // and docs/superpowers/specs/2026-08-02-disa-result-status-blob-decode-design.md.
+    // `A` is NOT derivable (624 rows in 3.4M) and is an accepted gap.
+    result_status: reviewStatus?.status ?? (rejection.rejected ? "X" : null),
     // requesting_facility_code mirrors testing_facility_code — see the
     // comment where facilityConcept is reused for requestingFacilityConcept
     // above. DISA's data model doesn't distinguish them.
@@ -648,6 +668,10 @@ export interface ToV2Opts {
    *  building lab_results / isolates / panel selection — used to route
    *  documentation observations to the forms feed instead. */
   excludeObs?: (o: DisaObs) => boolean;
+  /** Measured per-deployment TESTDATA_STATUS blob offsets, loaded ONCE at
+   *  startup via loadBlobOffsets(country) — never call that inside toV2,
+   *  which runs per specimen and would do file I/O in a hot loop. */
+  blobOffsets: BlobOffsets;
 }
 
 function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
@@ -707,8 +731,34 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
     panelIndex: Number(t.TESTINDEX ?? 0),
   }));
   const obrOf = linkObsToObr(obrSets, iterations);
+
+  // Observation count per OBR drives the `I` (interim) branch: an ordered
+  // panel with zero kept observations is exactly v1's "request but no
+  // results" case (compare-batch.ts:60-65).
+  const obsCountByObr = new Map<number, number>();
+  for (const o of obs) {
+    const id = obrOf(o.panelCode, o.panelIndex);
+    if (id === null) continue;
+    obsCountByObr.set(id, (obsCountByObr.get(id) ?? 0) + 1);
+  }
+  const statusByObr = buildStatusByObr({
+    iterations: specimen.TestResults.map((t) => ({
+      panelCode: String(t.TESTCODE ?? "").trim(),
+      panelIndex: Number(t.TESTINDEX ?? 0),
+      datestamp: t.DATESTAMP instanceof Date ? t.DATESTAMP : null,
+      header: t.HEADER,
+    })),
+    obrOf,
+    obsCountByObr,
+    rejected: rejection.rejected,
+    offsets: opts.blobOffsets,
+  });
+
   const labRequests = obrSets.map((obr) =>
-    buildLabRequest(specimen, obr, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous),
+    buildLabRequest(
+      specimen, obr, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous,
+      statusByObr.get(obr.obr_set_id) ?? null,
+    ),
   );
 
   // Every OBR carries the same specimen-level timings (they are read off the

@@ -4,6 +4,9 @@ import type { SpecimenRecpt } from "disalab";
 import { toV2 } from "./v2-transform.js";
 import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
+import type { BlobOffsets } from "../config/blob-offsets.js";
+
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
 
 /**
  * Build a minimal SpecimenRecpt fixture that flattenDisa will yield two
@@ -101,6 +104,7 @@ test("excludeObs drops documentation observations from lab_results", () => {
     site: DEFAULT_SITE,
     codebook: cb,
     excludeObs: (o) => o.panelCode === "VIRAL",
+    blobOffsets: UNCONFIGURED_OFFSETS,
   });
   const codes = payload.lab_results.map((r) => r.observation_code.concept_code);
   assert.equal(codes.includes("ARTRS"), false);  // documentation obs excluded

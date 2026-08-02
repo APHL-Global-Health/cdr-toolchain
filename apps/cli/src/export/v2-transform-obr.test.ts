@@ -4,6 +4,9 @@ import type { SpecimenRecpt } from "disalab";
 import { toV2 } from "./v2-transform.js";
 import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
+import type { BlobOffsets } from "../config/blob-offsets.js";
+
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
 
 /**
  * OBR cardinality fixtures. Fixture shape mirrors v2-transform-exclude.test.ts —
@@ -76,6 +79,7 @@ const opts = () => ({
   codebook: stubCodebook({
     panels: { COL: "Collection", RNAHF: "RNA HF", ROTEL: "Rotavirus", MRCSW: "MC&S", MICBM: "Ident", MSENS: "Sensitivity" },
   }),
+  blobOffsets: UNCONFIGURED_OFFSETS,
 });
 
 test("a 2-panel lab emits 2 lab_requests with dense obr_set_ids", () => {
