@@ -19,6 +19,7 @@ import { DEFAULT_SITE } from "../export/site-config.js";
 import { toV2 } from "../export/v2-transform.js";
 import { toV1 } from "../export/v1-transform.js";
 import { auditFromSpecimen } from "../audit/detector.js";
+import { loadBlobOffsets } from "../config/blob-offsets.js";
 import { severityAtLeast, type Severity } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
 import { fetchKeycloakToken } from "../api/keycloak.js";
@@ -225,6 +226,7 @@ export function registerExportCommand(program: Command): void {
       const server = buildServer(config.connectionString);
       const codebook = await loadCodebook(server);
       await closePool();
+      const blobOffsets = loadBlobOffsets(config.country);
 
       // v1 needs the audit trail (RegisteredBy/TestedBy/AuthorisedBy +
       // Registered/Analysis/Authorised dates all live in AUDTDATA, not on
@@ -269,6 +271,7 @@ export function registerExportCommand(program: Command): void {
             // may still need the audit for quarantine but not annotate
             // the outgoing payload.
             auditReport: dataQualityEnabled ? auditReport : null,
+            blobOffsets,
           });
 
       // Quarantine: if the audit report's max severity meets the threshold,

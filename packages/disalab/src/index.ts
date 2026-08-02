@@ -53,6 +53,8 @@ export { RSNXIDX4 } from "./lib/DisalabData/RSNXIDX4.js";
 export { RTKNIDX5 } from "./lib/DisalabData/RTKNIDX5.js";
 export { STOADAT5 } from "./lib/DisalabData/STOADAT5.js";
 export { TESTDATA } from "./lib/DisalabData/TESTDATA.js";
+export { TestDataHeader, HEADER_LENGTH, DEFAULT_HEADER_OFFSETS } from "./lib/DisalabData/testdata-header.js";
+export type { HeaderOffsets } from "./lib/DisalabData/testdata-header.js";
 export { TXT1DATA } from "./lib/DisalabData/TXT1DATA.js";
 export { WLSTDAT6 } from "./lib/DisalabData/WLSTDAT6.js";
 

@@ -45,17 +45,19 @@ function statusOf(p: V2LabRequest, r: OpenLdrV1Request, field: string): string {
 // The core assertion: a stub must not be forgiven.
 // ---------------------------------------------------------------------------
 
-// v2-transform.ts:338 hardcodes `authorised_at: null` while v1's
-// AuthorisedDateTime is populated on 91.2% of DISA/TDS requests. The old gate
-// could never see this because it never looked at the export.
-test("a V2 field stubbed null while v1 is populated reports only_v1", () => {
+// Was: "a V2 field stubbed null while v1 is populated reports only_v1".
+// The stub is gone (2026-08-02); a populated authorised_at must now MATCH v1.
+// NOTE the emitted form: local-form ISO, no offset, no milliseconds — the file
+// header explains that Date.parse reads it as LOCAL while the comparator reads
+// v1's Date back with getUTC*, so these two represent the same wall clock.
+test("authorised_at matches v1 when the panel was reviewed", () => {
   assert.equal(
     statusOf(
-      payload({ authorised_at: null }),
+      payload({ authorised_at: "2018-05-18T09:00:00" }),
       v1({ AuthorisedDateTime: new Date(Date.UTC(2018, 4, 18, 9, 0)), HL7ResultStatusCode: "F" }),
       "authorised_at",
     ),
-    "only_v1",
+    "match",
   );
 });
 

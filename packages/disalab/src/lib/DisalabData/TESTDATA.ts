@@ -5,6 +5,7 @@ import type { DisaInput } from "../core.js";
 import { Order } from "../order.js";
 import { OrderItem } from "../orderitem.js";
 import type { DisaServer } from "../types.js";
+import { TestDataHeader } from "./testdata-header.js";
 
 export class TESTDATA {
   readonly #server: DisaServer | undefined;
@@ -12,6 +13,11 @@ export class TESTDATA {
   LABNO: string;
   TESTCODE: string;
   TESTINDEX: unknown;
+  /**
+   * Bytes 0-79 of TESTDATA_STATUS. Carries the review signal (reviewer
+   * initials ⇒ F/R). Null only if initialize() was never called.
+   */
+  HEADER: TestDataHeader | null = null;
   ORDER: Order<OrderItem> | OrderItem[] = [];
 
   constructor(
@@ -30,8 +36,12 @@ export class TESTDATA {
   }
 
   async initialize(bytes: DisaInput): Promise<void> {
-    if (this.#server === undefined) return;
+    // Decode ONCE and share: ConvertToBytes runs iconv over the whole blob,
+    // and this runs per TESTDATA row (191k+ on a full site).
     const _data = Core.ConvertToBytes(bytes);
+    // Set before the server guard — the header is a property of the bytes.
+    this.HEADER = TestDataHeader.fromDecoded(_data);
+    if (this.#server === undefined) return;
     this.ORDER = await OrderItem.Parse(
       this.LABNO,
       this.TESTCODE,

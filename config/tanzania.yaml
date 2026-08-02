@@ -9,3 +9,14 @@ documentation:
     ARTID: hiv_art_documentation
     EIDID: eid_documentation
     VLID: hiv_vl_documentation
+
+# TESTDATA_STATUS blob header layout. Bytes 0-79 are a header; 80+ is the
+# result payload. `end` is EXCLUSIVE. These are MEASURED, not guessed — run
+# `cdr probe-review` against this deployment's DISA + v1 before changing them.
+# Measured 2026-08-02 against 176,287 labelled panels (DisalabData.TESTDATA
+# joined to OpenLDR v1 Requests): the initials rule scores 98.91%, and
+# long-datetime at offset 21 reproduces AuthorisedDateTime to the minute on
+# 159,340/160,371 rows (99.36%).
+disa_blob_offsets:
+  reviewer_initials: { start: 77, end: 80 }
+  reviewed_at: { start: 21, kind: long-datetime }
