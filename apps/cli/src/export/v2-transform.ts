@@ -749,6 +749,15 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // observation is documentation look interim (30 of 53 result_status
   // mismatches, all HIVPC, measured 2026-08-02).
   const obsCountByObr = new Map<number, number>();
+  // Seed every ordered panel at 0 BEFORE counting. obsCountByObr is built by
+  // incrementing per observation, so an OBR with genuinely zero observations
+  // (ordered but never resulted) would otherwise never get a key at all —
+  // absent, not zero. buildStatusByObr treats "absent from every id source"
+  // as undeterminable (null), not "I", so an ordered-but-unresulted panel
+  // silently fell through to null instead of the `I` the rule requires. This
+  // looks redundant with the `?? 0) + 1` below, but it is the only thing that
+  // gives a zero-observation OBR a map entry at all.
+  for (const obr of obrSets) obsCountByObr.set(obr.obr_set_id, 0);
   for (const o of keptAll) {
     const id = obrOf(o.panelCode, o.panelIndex);
     if (id === null) continue;

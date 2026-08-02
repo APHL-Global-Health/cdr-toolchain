@@ -3,7 +3,7 @@ import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { AUDTDATA, REGDAT4, SpecimenRecpt } from "disalab";
-import type { DisaServer } from "disalab";
+import type { DisaServer, TestDataHeader } from "disalab";
 import { CliError } from "../errors.js";
 import { enableInsecureTls } from "../insecure-tls.js";
 import { closePool } from "../db.js";
@@ -24,7 +24,7 @@ import { toFormSubmission } from "../export/forms-transform.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
-import { loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
+import { assertOffsetsPlausible, DEFAULT_SELF_CHECK_SAMPLE, loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
 import { postFhirResources } from "../api/ce-client.js";
@@ -1083,6 +1083,30 @@ export function registerExportBatchCommand(program: Command): void {
       // across the entire batch, so the dictionary is queried at most once
       // per unique pair regardless of concurrency or lab count.
       const wardResolver = new WardDictResolver();
+
+      // -------- blob-offset self-check --------
+      // Wired in ONCE per run, right after loadBlobOffsets above and before
+      // the worker pool (and therefore any POST) starts. A wrong
+      // disa_blob_offsets.reviewer_initials entry does not throw on its own —
+      // it silently decodes to plausible-looking garbage, corrupting
+      // result_status across an entire migration. assertOffsetsPlausible
+      // (config/blob-offsets.ts) is the only barrier against that, and it
+      // needs REAL headers to judge, so it can only run once some specimens
+      // are loaded — sample the first batch of labs this run will touch.
+      // No-op (and no extra fetches) for an unconfigured deployment, per
+      // assertOffsetsPlausible's own early return on reviewerInitials===null.
+      if (blobOffsets.reviewerInitials !== null) {
+        const sampleLabIds = labIds.slice(0, DEFAULT_SELF_CHECK_SAMPLE);
+        const sampleHeaders: TestDataHeader[] = [];
+        for (const labId of sampleLabIds) {
+          const specimen = await fetchDisaSpecimen(labId.trim(), config.connectionString, wardResolver);
+          if (specimen === null) continue;
+          for (const t of specimen.TestResults) {
+            if (t.HEADER !== null) sampleHeaders.push(t.HEADER);
+          }
+        }
+        assertOffsetsPlausible(sampleHeaders, blobOffsets);
+      }
 
       const ctx: ProcessLabContext = {
         config,

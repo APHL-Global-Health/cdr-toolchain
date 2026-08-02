@@ -75,11 +75,18 @@ export function assertOffsetsPlausible(headers: readonly TestDataHeader[], offse
   const sample = headers.slice(0, DEFAULT_SELF_CHECK_SAMPLE);
   let nonZero = 0;
   let printable = 0;
+  // A few offending (non-printable, non-empty) slots, formatted as hex + decimal
+  // bytes, so a failure can be diagnosed from the error message alone — no need
+  // to re-run with a debugger attached to see what the offset actually decoded.
+  const badSamples: string[] = [];
+  const MAX_BAD_SAMPLES = 5;
   for (const h of sample) {
     let any = false;
     let ok = true;
+    const bytes: number[] = [];
     for (let i = slot.start; i < slot.end; i++) {
       const b = h.byteAt(i);
+      bytes.push(b);
       if (b === 0 || b === 32) continue;
       any = true;
       // Printable ASCII letters/digits are what real initials look like ("APB").
@@ -87,7 +94,13 @@ export function assertOffsetsPlausible(headers: readonly TestDataHeader[], offse
     }
     if (any) {
       nonZero++;
-      if (ok) printable++;
+      if (ok) {
+        printable++;
+      } else if (badSamples.length < MAX_BAD_SAMPLES) {
+        const hex = bytes.map((b) => `0x${b.toString(16).padStart(2, "0")}`).join(" ");
+        const dec = bytes.join(",");
+        badSamples.push(`[${hex}] (dec ${dec})`);
+      }
     }
   }
   // An all-not-reviewed sample is legitimate and proves nothing either way.
@@ -98,6 +111,7 @@ export function assertOffsetsPlausible(headers: readonly TestDataHeader[], offse
       "CONFIG_INVALID",
       `disa_blob_offsets.reviewer_initials looks wrong: only ${printable}/${nonZero} sampled non-empty slots ` +
         `(${(rate * 100).toFixed(1)}%) decode to printable ASCII. Expected letters/digits such as "APB". ` +
+        `Sample of offending byte(s) at offset [${slot.start}, ${slot.end}): ${badSamples.join("; ")}. ` +
         `Re-run \`cdr probe-review\` and set the measured offset for this deployment.`,
     );
   }
