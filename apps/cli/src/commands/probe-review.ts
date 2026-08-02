@@ -123,11 +123,28 @@ export function registerProbeReview(program: Command): void {
             if (s.rate > best.rate) best = { name: kind.name, offset, rate: s.rate, hits: s.hits, total: s.total };
           }
         }
-        console.log(`  BEST: kind=${best.name} offset=${best.offset} hits=${best.hits}/${best.total} rate=${(best.rate * 100).toFixed(2)}%`);
+        // best.offset stays -1 only when every candidate/offset scored a flat
+        // 0 (the `s.rate > best.rate` comparison never fires against the
+        // initial 0). That is not "a genuine 0% result" — it usually means
+        // the scorer itself is broken (e.g. comparing incompatible time
+        // frames) rather than the data lacking any correct decode. Report it
+        // as inconclusive instead of printing a confident, misleading FAIL.
+        const noCandidateScored = best.offset === -1;
+        if (noCandidateScored) {
+          console.log(
+            `  BEST: no candidate scored above zero (n=${tsRows.length}) — INCONCLUSIVE: this points at a scorer/harness fault, not a data finding.`,
+          );
+        } else {
+          console.log(`  BEST: kind=${best.name} offset=${best.offset} hits=${best.hits}/${best.total} rate=${(best.rate * 100).toFixed(2)}%`);
+        }
 
         // ---- GATE ---------------------------------------------------------
         console.log("\n=== GATE (spec: >=95% minute-exact) ===");
-        if (best.rate >= 0.95) {
+        if (noCandidateScored) {
+          console.log(
+            "  INCONCLUSIVE — no candidate scored above zero; probable scorer/harness fault. Fix the scorer/harness and re-run before drawing any conclusion; do NOT report this as FAIL.",
+          );
+        } else if (best.rate >= 0.95) {
           console.log(`  PASS (${(best.rate * 100).toFixed(2)}%) — proceed to Phase 2.`);
         } else if (best.rate >= 0.90) {
           console.log(`  BORDERLINE (${(best.rate * 100).toFixed(2)}%) — surface to the user; do NOT proceed unilaterally.`);

@@ -39,11 +39,18 @@ test("scoreFR on zero scorable rows reports 0 accuracy, not NaN", () => {
   assert.equal(m.accuracy, 0);
 });
 
+// `decoded` is built the way decodeLongDatetime actually builds it — the
+// LOCAL Date constructor — and `target` the way mssql actually returns
+// Requests.AuthorisedDateTime — wall-clock components tagged as UTC. Using
+// that construction (rather than two same-instant ISO "Z" strings) is
+// deliberate: it is host-timezone-independent and it exercises the real
+// bug (see "scoreTimestamp compares wall clock, not instant" below), where
+// same-instant fixtures would not.
 test("scoreTimestamp counts a hit inside tolerance and a miss outside", () => {
-  const target = new Date("2017-05-18T09:00:00Z");
+  const target = new Date(Date.UTC(2017, 4, 18, 9, 0, 0));
   const s = scoreTimestamp([
-    { decoded: new Date("2017-05-18T09:00:30Z"), target },
-    { decoded: new Date("2017-05-18T09:05:00Z"), target },
+    { decoded: new Date(2017, 4, 18, 9, 0, 30), target },
+    { decoded: new Date(2017, 4, 18, 9, 5, 0), target },
     { decoded: null, target },
   ], 60);
   assert.equal(s.hits, 1);
@@ -55,4 +62,28 @@ test("scoreTimestamp counts an undecodable row as a miss, never skips it", () =>
   assert.equal(s.hits, 0);
   assert.equal(s.total, 1);
   assert.equal(s.rate, 0);
+});
+
+// Regression test for the timezone trap: decodeLongDatetime builds its Date
+// with the LOCAL constructor while mssql's AuthorisedDateTime is wall-clock
+// components tagged as UTC. The OLD instant-comparing implementation
+// (Math.abs(a.getTime() - b.getTime())) sees these as ~3h apart on any host
+// west of UTC-and-of-Africa/Dar_es_Salaam's offset and scores a correct
+// decode as a miss. This must FAIL under that implementation and PASS once
+// scoreTimestamp compares wall clock instead of instant.
+test("scoreTimestamp matches a local-constructed decode against a UTC-tagged target for the same wall clock (timezone trap)", () => {
+  const decoded = new Date(2017, 4, 18, 9, 0, 0); // decodeLongDatetime's local ctor
+  const target = new Date(Date.UTC(2017, 4, 18, 9, 0, 0)); // mssql's UTC-tagged wall clock
+  const s = scoreTimestamp([{ decoded, target }], 60);
+  assert.equal(s.hits, 1, "same wall clock (09:00) in different frames must be a hit, not a ~3h miss");
+});
+
+// Boundary: a difference exactly equal to the tolerance must count as a
+// HIT — the comparison is inclusive (<=). This catches a regression that
+// changes <= to <.
+test("scoreTimestamp treats a difference exactly equal to the tolerance as a hit", () => {
+  const decoded = new Date(2017, 4, 18, 9, 1, 0); // wall clock 09:01:00
+  const target = new Date(Date.UTC(2017, 4, 18, 9, 0, 0)); // wall clock 09:00:00 — 60s earlier
+  const s = scoreTimestamp([{ decoded, target }], 60);
+  assert.equal(s.hits, 1);
 });
