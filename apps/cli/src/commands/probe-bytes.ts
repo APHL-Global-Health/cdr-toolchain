@@ -5,6 +5,14 @@ import { Core } from "disalab";
 import { CliError } from "../errors.js";
 import { closePool } from "../db.js";
 import { loadRuntime } from "./context.js";
+import {
+  decodeLongDate,
+  decodeLongDatetime,
+  decodeShortDate,
+  decodeShortDatetime,
+  decodeShortTimeOnly,
+  decodeLongTimeOnly,
+} from "../compare/disa-datetime-candidates.js";
 
 interface ProbeOpts {
   target?: string;
@@ -59,82 +67,8 @@ async function fetchBlob(labNo: string, connectionString: string): Promise<Buffe
   }
 }
 
-function plausibleYear(d: Date, min: number, max: number): boolean {
-  const y = d.getFullYear();
-  return y >= min && y <= max;
-}
-
 function bufHex(buf: Buffer, offset: number, size: number): string {
   return buf.subarray(offset, offset + size).toString("hex");
-}
-
-function decodeLongDate(data: string, offset: number, minY: number, maxY: number): Date | null {
-  if (offset + 4 > data.length) return null;
-  const slice = data.substring(offset, offset + 4);
-  const d = Core.FromDisaDate(slice);
-  if (d === null || Number.isNaN(d.getTime())) return null;
-  return plausibleYear(d, minY, maxY) ? d : null;
-}
-
-function decodeLongTime(data: string, offset: number): Date | null {
-  if (offset + 2 > data.length) return null;
-  const slice = data.substring(offset, offset + 2);
-  const mins = slice.charCodeAt(0);
-  const hours = slice.charCodeAt(1);
-  if (hours > 23 || mins > 59) return null;
-  if (hours === 0 && mins === 0) return null; // skip noise — too common
-  const d = new Date();
-  d.setHours(hours, mins, 0, 0);
-  return d;
-}
-
-function decodeLongDatetime(data: string, offset: number, minY: number, maxY: number): Date | null {
-  const date = decodeLongDate(data, offset, minY, maxY);
-  if (date === null) return null;
-  if (offset + 6 > data.length) return null;
-  const time = decodeLongTime(data, offset + 4);
-  if (time === null) return null;
-  return new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate(),
-    time.getHours(),
-    time.getMinutes(),
-    0,
-  );
-}
-
-function decodeShortDate(data: string, offset: number, minY: number, maxY: number): Date | null {
-  if (offset + 2 > data.length) return null;
-  const slice = data.substring(offset, offset + 2);
-  const d = Core.FromDisaDateShort(slice);
-  if (d === null || Number.isNaN(d.getTime())) return null;
-  return plausibleYear(d, minY, maxY) ? d : null;
-}
-
-function decodeShortDatetime(data: string, offset: number, minY: number, maxY: number): Date | null {
-  if (offset + 4 > data.length) return null;
-  const slice = data.substring(offset, offset + 4);
-  // FromDisaDatetimeShort: first 2 bytes = time, next 2 bytes = date
-  const d = Core.FromDisaDatetimeShort(slice);
-  if (d === null || Number.isNaN(d.getTime())) return null;
-  return plausibleYear(d, minY, maxY) ? d : null;
-}
-
-function decodeShortTimeOnly(data: string, offset: number): { hours: number; mins: number } | null {
-  if (offset + 2 > data.length) return null;
-  const slice = data.substring(offset, offset + 2);
-  const dt = Core.FromDisaTimeShort(slice);
-  if (dt === null) return null;
-  return { hours: dt.getHours(), mins: dt.getMinutes() };
-}
-
-function decodeLongTimeOnly(data: string, offset: number): { hours: number; mins: number } | null {
-  if (offset + 2 > data.length) return null;
-  const mins = data.charCodeAt(offset);
-  const hours = data.charCodeAt(offset + 1);
-  if (hours > 23 || mins > 59) return null;
-  return { hours, mins };
 }
 
 function targetMatches(decoded: Date, target: Date | null, toleranceSec: number): boolean {
