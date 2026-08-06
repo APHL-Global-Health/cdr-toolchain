@@ -602,6 +602,107 @@ test("DiagnosticReport.performer is omitted when there is no testing_facility_co
   assert.equal("performer" in dr, false);
 });
 
+// ---------------------------------------------------------------------------
+// Organization — the testing facility a report was performed at. LOCNDIC4 has
+// 5 distinct facility codes whose DESCRIPTION is all exactly "Aga Khan"; an
+// operator mapping facilities sees five rows all reading "Aga Khan" and must
+// look each code up in the source to tell them apart. This resource carries
+// the location facilityProperties() already collected onto the concept's
+// properties (v2-transform.ts:168-179) but that DiagnosticReport.performer
+// (a logical reference) never surfaces.
+// ---------------------------------------------------------------------------
+
+function findAllOf(resources: unknown[], type: string): Record<string, any>[] {
+  return resources.filter((r: any) => r.resourceType === type) as Record<string, any>[];
+}
+
+test("Organization carries the same identifier as DiagnosticReport.performer, so the two join", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const out = toFhir(pl, TZ);
+  const dr = findOne(out, "DiagnosticReport");
+  const org = findOne(out, "Organization");
+  assert.deepEqual(org.identifier[0], dr.performer[0].identifier);
+});
+
+test("Organization.name is the facility's display_name", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const org = findOne(toFhir(pl, TZ), "Organization");
+  assert.equal(org.name, "Aga Khan");
+});
+
+test("Organization.id is deterministic from the facility code — repeat transforms of the same facility upsert onto one id", () => {
+  const facility = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const pl1 = basePayload();
+  pl1.lab_requests[0]!.testing_facility_code = facility;
+  const id1 = findOne(toFhir(pl1, TZ), "Organization").id;
+
+  // A DIFFERENT lab (different request_id, different rootId) referencing the
+  // SAME facility code must still land on the SAME Organization id — that's
+  // the whole point of keying the id on the code, not on the report.
+  const pl2 = basePayload();
+  pl2.patient.patient_guid = "OTHER_REQ-2024-99999";
+  pl2.lab_requests[0]!.request_id = "OTHER_REQ-2024-99999";
+  pl2.lab_requests[0]!.testing_facility_code = facility;
+  const id2 = findOne(toFhir(pl2, TZ), "Organization").id;
+
+  assert.equal(id1, id2);
+  assert.equal(typeof id1, "string");
+  assert.ok((id1 as string).length > 0);
+});
+
+test("Organization.address is built from the facility's properties, absent parts omitted", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+    // Measured against DisaGlobal.dbo.LOCNDIC4 (see cdr-organization-report.md):
+    // properties.street holds a REGION name and properties.postal_address
+    // holds a DISTRICT name — properties.district (facility-type category,
+    // e.g. "Other Hosp") and properties.region (a numeric HFR-style code) are
+    // NOT geography and are deliberately not mapped into Address.
+    properties: { region: "100047-0", district: "Other Hosp", postal_address: "Ilala", street: "Dar es Salaam" },
+  };
+  const org = findOne(toFhir(pl, TZ), "Organization");
+  assert.deepEqual(org.address[0], { district: "Ilala", state: "Dar es Salaam" });
+});
+
+test("Organization has no address at all when the facility carries no location properties", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const org = findOne(toFhir(pl, TZ), "Organization");
+  assert.equal("address" in org, false);
+});
+
+test("no Organization is emitted when there is no testing_facility_code, and the transform doesn't break", () => {
+  const out = toFhir(basePayload(), TZ);
+  assert.equal(findAllOf(out, "Organization").length, 0);
+});
+
+test("performer keeps its logical identifier reference and gains no resource reference from the Organization work", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
+  assert.equal(dr.performer[0].identifier.value, "BAMAA");
+  assert.equal("reference" in dr.performer[0], false);
+});
+
 test("registered_at becomes authoredOn with the configured offset", () => {
   const pl = basePayload();
   pl.lab_requests[0]!.registered_at = "2024-07-20T07:00:00";

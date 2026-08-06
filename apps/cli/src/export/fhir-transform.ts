@@ -271,6 +271,75 @@ function requestResources(
   return out;
 }
 
+/** Read a string-valued property off a V2ConceptCode's `properties` bag.
+ *  `properties` is `Record<string, unknown>` (types.ts:13) — untyped JSON that
+ *  survived the v2 payload round-trip — so this guards the shape rather than
+ *  assuming it. */
+function propText(props: Record<string, unknown> | undefined, key: string): string | undefined {
+  const v = props?.[key];
+  return typeof v === "string" ? fhirText(v) : undefined;
+}
+
+/**
+ * Organization for the facility a report was PERFORMED AT (testing_facility_code
+ * only — requesting_facility_code/facility_code are out of this slice's scope).
+ * Carries the location facilityProperties() already collected onto the concept
+ * (v2-transform.ts:168-179) but that DiagnosticReport.performer — a logical
+ * reference, kept that way deliberately (see the comment on `performer` above:
+ * LOCNDIC4 has 5 codes all described "Aga Khan") — never surfaces. Without
+ * this, an operator mapping facilities sees five identical "Aga Khan" rows and
+ * must look each code up in the source by hand.
+ *
+ * `identifier` is BYTE-FOR-BYTE the same { system, value } performer's logical
+ * reference carries (mirroring the expression right below), so the two join on
+ * the code — this file invents no second identity scheme for the same facility.
+ *
+ * `id` is derived from the CODE ALONE — not from rootId/obrId like every other
+ * resource in this file — so the SAME facility referenced by many different lab
+ * reports (or the same report re-ingested) upserts onto ONE Organization
+ * instead of spawning a duplicate per report.
+ *
+ * ⛔ ADDRESS MAPPING IS MEASURED, NOT GUESSED FROM THE PROPERTY NAMES.
+ * Queried directly against DisaGlobal.dbo.LOCNDIC4 (8754 rows, 2026-08-06 —
+ * see cdr-organization-report.md): the four `properties` keys facilityProperties
+ * writes do NOT hold what their names claim —
+ *   properties.street         <- LOCNDIC4.POSTAL_ADDRESS1 -> a REGION name
+ *                                 ("Dar es Salaam", "Tanga", "Arusha", ...)
+ *   properties.postal_address <- LOCNDIC4.POSTAL_ADDRESS2 -> a DISTRICT name
+ *                                 ("Ilala", "Kinondoni", "Handeni", ...)
+ *   properties.district       <- LOCNDIC4.POSTAL_ADDRESS3 -> a FACILITY-TYPE
+ *                                 category ("Dispensary", "Health Cen",
+ *                                 "Other Hosp") — not geography at all
+ *   properties.region         <- LOCNDIC4.POSTAL_ADDRESS4 -> almost always a
+ *                                 numeric HFR-style code ("103846-2") or a
+ *                                 "999999_N" sentinel (8724/8754 non-empty
+ *                                 rows) — a genuine region name appears in
+ *                                 only 2 of 8754 rows. LOCNDIC4.POST_CODE
+ *                                 (the real postcode column) is 0 for every
+ *                                 one of the 8754 rows — dead.
+ * So only `street` (-> Address.state, Tanzania's region is its top-level
+ * admin unit) and `postal_address` (-> Address.district, the county-level
+ * fit R4 defines) become structured Address fields. `district` and `region`
+ * are OMITTED rather than forced somewhere they don't belong — emitting
+ * "Dispensary" as a FHIR district, or a facility code as a FHIR state, would
+ * be worse than omitting them.
+ */
+function organizationResource(code: V2ConceptCode): FhirResource | undefined {
+  const id = fhirId(`facility-${code.concept_code}`);
+  if (id === undefined) return undefined;
+  const address = compact({
+    district: propText(code.properties, "postal_address"),
+    state: propText(code.properties, "street"),
+  });
+  return compact({
+    resourceType: "Organization",
+    id,
+    identifier: [compact({ system: systemUri(code.system_id), value: code.concept_code })],
+    name: fhirText(code.display_name),
+    ...(Object.keys(address).length > 0 ? { address: [address] } : {}),
+  });
+}
+
 /** "4.0-11.0" -> {low,high}; anything else -> {text}. Never returns undefined
  *  for a non-empty input, so a range is preserved either way. */
 function toReferenceRange(
@@ -501,9 +570,24 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
     host.hasMember = members;
   });
 
+  // Organization — one per DISTINCT testing facility code referenced by any OBR
+  // of this lab, not one per OBR: multiple panels routinely share the same
+  // testing_facility_code, and duplicate entries sharing one id would repeat
+  // the same "N resources, one id" hazard the Specimen/isolate comments above
+  // call out. Keyed on the derived id (== the code), so this also dedupes
+  // against itself if the SAME code appears via two lab_requests.
+  const organizations = new Map<string, FhirResource>();
+  for (const lr of payload.lab_requests) {
+    if (lr.testing_facility_code === null) continue;
+    const org = organizationResource(lr.testing_facility_code);
+    if (org === undefined) continue;
+    organizations.set(org.id as string, org);
+  }
+
   const out = [
     patientResource(payload.patient, patientId, opts),
     specimenResource(first, patientRef, specimenId, opts),
+    ...organizations.values(),
     ...payload.lab_requests.flatMap((lr) =>
       requestResources(lr, patientRef, obrId(lr.obr_set_id), specimenId, opts),
     ),
