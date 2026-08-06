@@ -248,8 +248,24 @@ function requestResources(
     effectiveDateTime: fhirDateTime(collectionTime(lr), opts.tzOffset),
     issued: fhirDateTime(lr.authorised_at, opts.tzOffset),
     basedOn: [{ reference: `ServiceRequest/${obrId}` }],
-    ...(fhirText(lr.testing_facility_code?.display_name ?? null) !== undefined
-      ? { performer: [{ display: fhirText(lr.testing_facility_code!.display_name) }] } : {}),
+    // Reference.identifier is a LOGICAL reference — exactly what R4 defines for
+    // "an identifier for the target resource, used when there is no way to
+    // reference the other resource directly" (DISA emits no Organization for
+    // `reference` to point at). LOCNDIC4 has 5 distinct facility codes whose
+    // DESCRIPTION is all exactly "Aga Khan"; display is a human label only
+    // (R4: "not to be used for matching purposes"), so the code — not the
+    // name — is what must ride the wire.
+    ...(lr.testing_facility_code !== null
+      ? {
+          performer: [compact({
+            identifier: compact({
+              system: systemUri(lr.testing_facility_code.system_id),
+              value: lr.testing_facility_code.concept_code,
+            }),
+            display: fhirText(lr.testing_facility_code.display_name),
+          })],
+        }
+      : {}),
   }));
 
   return out;

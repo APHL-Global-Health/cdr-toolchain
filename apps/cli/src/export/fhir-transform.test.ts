@@ -563,6 +563,45 @@ test("DISA priority maps onto FHIR's enum", () => {
   assert.equal(p("banana"), undefined); // omit, never guess
 });
 
+// ---------------------------------------------------------------------------
+// DiagnosticReport.performer — carries the facility's concept_code as a
+// logical reference (Reference.identifier), not just its display name.
+//
+// LOCNDIC4 has 5 distinct facility codes (BAMAA/BBFAF/CDABE/EAFAE/NDFAM)
+// whose DESCRIPTION is all exactly "Aga Khan" — five labs across four towns.
+// A display-only performer collapses them into one match key downstream;
+// the code is what actually distinguishes them.
+// ---------------------------------------------------------------------------
+
+test("DiagnosticReport.performer carries the facility's concept_code as identifier.value", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: "Aga Khan",
+    concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+  };
+  const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
+  assert.equal(dr.performer[0].identifier.value, "BAMAA");
+  assert.equal(dr.performer[0].identifier.system, "urn:openldr:default_fac");
+  assert.equal(dr.performer[0].display, "Aga Khan");
+});
+
+test("DiagnosticReport.performer is emitted whenever a facility code exists, even with a null display_name", () => {
+  const pl = basePayload();
+  pl.lab_requests[0]!.testing_facility_code = {
+    concept_code: "BAMAA", display_name: null,
+    concept_class: "facility", datatype: "coded",
+  };
+  const dr = findOne(toFhir(pl, TZ), "DiagnosticReport");
+  assert.equal(dr.performer[0].identifier.value, "BAMAA");
+  assert.equal("system" in dr.performer[0].identifier, false);
+  assert.equal("display" in dr.performer[0], false);
+});
+
+test("DiagnosticReport.performer is omitted when there is no testing_facility_code at all", () => {
+  const dr = findOne(toFhir(basePayload(), TZ), "DiagnosticReport");
+  assert.equal("performer" in dr, false);
+});
+
 test("registered_at becomes authoredOn with the configured offset", () => {
   const pl = basePayload();
   pl.lab_requests[0]!.registered_at = "2024-07-20T07:00:00";
