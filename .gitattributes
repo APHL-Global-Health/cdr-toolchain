@@ -1,0 +1,9 @@
+# Shell scripts must keep LF endings even in a Windows working copy. With
+# core.autocrlf=true they would otherwise be checked out with CRLF, and a .sh
+# carrying CRLF fails on Linux with `bad interpreter: /usr/bin/env bash^M` —
+# which matters because these scripts get handed to deployment teams directly,
+# not always via a fresh clone.
+*.sh text eol=lf
+
+# PowerShell is Windows-side; CRLF is the native convention there.
+*.ps1 text eol=crlf
