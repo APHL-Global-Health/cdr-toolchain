@@ -16,6 +16,11 @@ test("accepts either case", () => {
   assert.equal(parseSelectionOrder("Asc"), "asc");
 });
 
+test("accepts a value with surrounding whitespace", () => {
+  assert.equal(parseSelectionOrder(" asc "), "asc");
+  assert.equal(parseSelectionOrder(" desc "), "desc");
+});
+
 test("rejects anything else", () => {
   assert.throws(() => parseSelectionOrder("newest"), /--order must be asc or desc/);
   assert.throws(() => parseSelectionOrder(""), /--order must be asc or desc/);

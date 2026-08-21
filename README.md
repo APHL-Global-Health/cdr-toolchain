@@ -348,7 +348,7 @@ Per-lab POST orchestration for many labs. Both gates (`--check` for v1 fidelity,
 
 ```bash
 cdr export-batch
-  [--where <sql>] [--limit <n>] [--offset <n>] [--prefix <str>]
+  [--where <sql>] [--limit <n>] [--offset <n>] [--order asc|desc] [--prefix <str>]
   [--concurrency <n>]              # default 1; raise to test API rate limit
   [--no-check]                     # skip v1 fidelity check
   [--no-quarantine]                # skip audit-driven quarantine

@@ -48,3 +48,10 @@ test("undefined user clause behaves like an empty one", () => {
     " ORDER BY [LabNo] OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY",
   );
 });
+
+test("orders by the column argument, not a hardcoded one", () => {
+  assert.equal(
+    composeBatchSelection("", "[RequestID]", 10, 0, "asc"),
+    " ORDER BY [RequestID] OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY",
+  );
+});

@@ -844,7 +844,7 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--offset <n>", "labs to skip before starting", "0")
     .option(
       "--order <asc|desc>",
-      "Direction of the lab scan. DISA lab numbers are chronological, so asc (the default) selects the oldest labs and desc selects the newest. Under desc, --offset skips from the newest end.",
+      "Direction of the lab scan. DISA lab numbers are chronological, so asc (the default) selects the oldest labs and desc selects the newest. Under desc, --offset skips from the newest end, so a repeated --offset is not stable while new labs are arriving.",
       "asc",
     )
     .option("--prefix <str>", "Override the OpenLDR labno prefix")
