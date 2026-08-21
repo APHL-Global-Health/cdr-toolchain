@@ -5,6 +5,7 @@ import { createInterface } from "node:readline";
 import { AUDTDATA, REGDAT4, SpecimenRecpt } from "disalab";
 import type { DisaServer, TestDataHeader } from "disalab";
 import { CliError } from "../errors.js";
+import { composeBatchSelection, type SelectionOrder } from "../where.js";
 import { enableInsecureTls } from "../insecure-tls.js";
 import { closePool } from "../db.js";
 import { fetchLabResultsByRequestId, fetchRequestByRequestId } from "../openldr.js";
@@ -39,6 +40,7 @@ interface ExportBatchOpts {
   where?: string;
   limit?: string;
   offset?: string;
+  order?: string;
   prefix?: string;
   concurrency?: string;
   /** `--no-check` arrives here as `false` (commander default-on, --no- inverts). */
@@ -201,11 +203,10 @@ async function fetchLabNumbers(
   where: string,
   limit: number,
   offset: number,
+  order: SelectionOrder,
   connectionString: string,
 ): Promise<string[]> {
-  const trimmed = where.trim().replace(/^WHERE\s+/i, "");
-  const userClause = trimmed.length > 0 ? `WHERE ${trimmed}` : "";
-  const composedWhere = `${userClause} ORDER BY [LabNo] OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
+  const composedWhere = composeBatchSelection(where, "[LabNo]", limit, offset, order);
   try {
     const server = buildServer(connectionString);
     return await REGDAT4.LabNumbers(composedWhere, server);
@@ -785,6 +786,14 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
   }
 }
 
+/** Validate --order. Exported so the guard can be unit-tested without a database. */
+export function parseSelectionOrder(raw: string | undefined): SelectionOrder {
+  if (raw === undefined) return "asc";
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "asc" || normalized === "desc") return normalized;
+  throw new CliError("USAGE", `--order must be asc or desc (got ${JSON.stringify(raw)}).`);
+}
+
 /** CE has no storage-level backstop: its Specimen schema requires only
  *  resourceType, so a specimen-less record persists silently. v2's storage
  *  rejected those. On the CE path the audit gate is the ONLY protection, so
@@ -833,6 +842,11 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--where <sql>", "WHERE clause applied to REGDAT4 when selecting labs", "")
     .option("--limit <n>", "max labs to process", "100")
     .option("--offset <n>", "labs to skip before starting", "0")
+    .option(
+      "--order <asc|desc>",
+      "Direction of the lab scan. DISA lab numbers are chronological, so asc (the default) selects the oldest labs and desc selects the newest. Under desc, --offset skips from the newest end.",
+      "asc",
+    )
     .option("--prefix <str>", "Override the OpenLDR labno prefix")
     .option("--concurrency <n>", "Number of labs in flight at once. Defaults to 1 — raise to test the API's rate limit.", "1")
     .option("--no-check", "Skip the v1 fidelity check (faster, less safe)")
@@ -872,6 +886,7 @@ export function registerExportBatchCommand(program: Command): void {
       const prefix = opts.prefix ?? config.openldrLabnoPrefix;
       const limit = Number(opts.limit ?? "100");
       const offset = Number(opts.offset ?? "0");
+      const order = parseSelectionOrder(opts.order);
       const where = opts.where ?? "";
       const concurrency = Math.max(1, Number(opts.concurrency ?? "1"));
       if (!Number.isFinite(concurrency) || concurrency < 1) {
@@ -899,13 +914,12 @@ export function registerExportBatchCommand(program: Command): void {
       if (opts.insecureTls === true || config.openldrV2InsecureTls) enableInsecureTls();
 
       if (opts.explain === true) {
-        const trimmed = where.trim().replace(/^WHERE\s+/i, "");
-        const userClause = trimmed.length > 0 ? `WHERE ${trimmed}` : "";
         process.stdout.write(JSON.stringify({
           operation: "export-batch",
           lab_selection: {
             method: "REGDAT4.LabNumbers",
-            where: `${userClause} ORDER BY [LabNo] OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`,
+            order,
+            where: composeBatchSelection(where, "[LabNo]", limit, offset, order),
           },
           prefix,
           concurrency,
@@ -1077,7 +1091,7 @@ export function registerExportBatchCommand(program: Command): void {
         }) + "\n");
       }
 
-      const labIds = await fetchLabNumbers(where, limit, offset, config.connectionString);
+      const labIds = await fetchLabNumbers(where, limit, offset, order, config.connectionString);
 
       // One WARDDICT resolver per run: caches (LOCATION, WARD) → description
       // across the entire batch, so the dictionary is queried at most once
