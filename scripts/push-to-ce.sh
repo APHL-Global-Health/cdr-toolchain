@@ -17,6 +17,7 @@ set -euo pipefail
 LIMIT="${LIMIT:-5000000}"        # upper bound on labs; the WHERE clause is the real filter
 CONCURRENCY="${CONCURRENCY:-4}"  # labs in flight; raise once the CE target proves stable
 WHERE="${WHERE:-}"               # e.g. "LabNo BETWEEN '0061300000' AND '0061399999'"
+ORDER="${ORDER:-asc}"            # asc = oldest labs first (default), desc = newest first
 OUTDIR="${OUTDIR:-./temp/ce-push}"
 
 # Invoke the CLI through tsx directly. `pnpm dev -- <cmd>` passes a literal `--`
@@ -90,6 +91,7 @@ SUMMARY="$OUTDIR/summary.log"
 common=(export-batch
   --limit "$LIMIT"
   --concurrency "$CONCURRENCY"
+  --order "$ORDER"
   --country "$OPENLDR_COUNTRY"
   --ce-url "$OPENLDR_CE_URL"
   --ce-tz "$OPENLDR_CE_TIMEZONE")
@@ -110,6 +112,7 @@ case "$MODE" in
     # Build as an array: an unquoted ${WHERE:+--where "$WHERE"} word-splits a
     # SQL clause on its spaces and passes fragments as separate arguments.
     smoke=(export-batch --limit 10 --concurrency 1
+      --order "$ORDER"
       --country "$OPENLDR_COUNTRY"
       --ce-url "$OPENLDR_CE_URL" --ce-tz "$OPENLDR_CE_TIMEZONE"
       --dry-run)
