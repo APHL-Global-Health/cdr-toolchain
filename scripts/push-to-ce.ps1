@@ -13,6 +13,7 @@ $ErrorActionPreference = 'Stop'
 $Limit       = if ($env:LIMIT)       { $env:LIMIT }       else { '5000000' }
 $Concurrency = if ($env:CONCURRENCY) { $env:CONCURRENCY } else { '4' }
 $Where       = $env:WHERE
+$Order       = if ($env:ORDER)       { $env:ORDER }       else { 'asc' }
 $OutDir      = if ($env:OUTDIR)      { $env:OUTDIR }      else { './temp/ce-push' }
 
 if (-not (Test-Path 'package.json') -or -not (Test-Path 'apps/cli')) {
@@ -72,7 +73,7 @@ $summary = Join-Path $OutDir 'summary.log'
 # defaults used instead, which does not show up anywhere in the output.
 $cdr = 'apps/cli/node_modules/.bin/tsx apps/cli/src/index.ts'
 
-$args = "export-batch --limit $Limit --concurrency $Concurrency " +
+$args = "export-batch --limit $Limit --concurrency $Concurrency --order $Order " +
         "--country $($env:OPENLDR_COUNTRY) --ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE)"
 if ($Where) { $args += " --where `"$Where`"" }
 
@@ -83,7 +84,7 @@ switch ($Mode) {
   'verify' { cmd /c "$cdr $args --explain" }
   'smoke'  {
     Write-Host 'Smoke: 10 labs, --dry-run (nothing is POSTed)'
-    $s = "export-batch --limit 10 --concurrency 1 --country $($env:OPENLDR_COUNTRY) " +
+    $s = "export-batch --limit 10 --concurrency 1 --order $Order --country $($env:OPENLDR_COUNTRY) " +
          "--ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE) --dry-run"
     if ($Where) { $s += " --where `"$Where`"" }
     cmd /c "$cdr $s"
