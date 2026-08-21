@@ -51,3 +51,29 @@ export function composeWhereWithCursor(
 
   return parts.length === 0 ? "" : `WHERE ${parts.join(" AND ")}`;
 }
+
+/** Direction for a batch lab-selection scan. */
+export type SelectionOrder = "asc" | "desc";
+
+/**
+ * Compose the lab-selection clause used by the batch commands: the user's
+ * WHERE, then a deterministic ORDER BY, then OFFSET/FETCH paging.
+ *
+ * `export-batch` builds this clause twice, once for the query and once for
+ * --explain. Both call this function so --explain can never describe an order
+ * the query does not use.
+ *
+ * DISA lab numbers are chronological, so the order decides which era of data a
+ * bounded run selects. Ascending is oldest first and stays the default.
+ */
+export function composeBatchSelection(
+  userWhere: string | undefined,
+  column: string,
+  limit: number,
+  offset: number,
+  order: SelectionOrder,
+): string {
+  const userClause = normalizeWhere(userWhere);
+  const direction = order === "desc" ? " DESC" : "";
+  return `${userClause} ORDER BY ${column}${direction} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
+}
