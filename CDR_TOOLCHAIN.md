@@ -702,7 +702,21 @@ cdr export-batch
 
 **Token freshness.** Keycloak access tokens are short-lived (default 5 min). The batch resolves a token resolver at startup (not the token itself) and calls it before every POST, so multi-hour runs don't fail with stale-token 401s. Resolver is the cached `fetchKeycloakToken` from [`apps/cli/src/api/keycloak.ts`](apps/cli/src/api/keycloak.ts) — refreshes ~30s before expiry, otherwise returns the cached value (essentially free).
 
-**Concurrency.** A DB-only mutex serialises the fetch + check phases (mssql exposes one shared pool that doesn't tolerate concurrent connection-string switching), but the **POST runs free**. Real parallelism shows up at the API tier — exactly what you want for rate-limit testing. Default `--concurrency 1` is the safe starting point.
+**Concurrency.** Every phase runs in parallel — DISA fetch, the v1 fidelity check, and the POST. There is no mutex. The worker pool ([`export-batch.ts:1186`](apps/cli/src/commands/export-batch.ts)) hands each of `--concurrency` workers the next lab from a shared cursor, and each worker runs a whole lab end to end. Connections come from a registry keyed by connection string ([`pool.ts:13`](packages/disalab/src/lib/pool.ts)), so DISA and v1 get one long-lived `ConnectionPool` each and the two don't race.
+
+> Earlier revisions of this document said a "DB-only mutex serialises the fetch + check phases" and that only the POST ran free. That stopped being true when the pool registry landed. If you are tuning against that claim, ignore it — the DB phase parallelises.
+
+**The ceiling is the pool, not the code.** `getPool` constructs `new mssql.ConnectionPool(connectionString)` with no pool options, so mssql's defaults apply: **`max: 10`**, `min: 0` (mssql 9.3.2, `packages/disalab/node_modules/mssql/lib/base/connection-pool.js:467`). A lab is internally sequential and holds one connection at a time, so concurrency scales cleanly to about 10 per server and then queues on connection acquisition rather than going faster.
+
+Past 10 you do **not** need a code change — append `Max Pool Size=N` to the connection string and mssql merges it over the default (`connection-pool.js:234`). Applies to the ADO `key=value` form:
+
+```bash
+DISA_CONNECTION_STRING="Server=disa;Database=DisalabData;User=...;Password=...;Encrypt=false;Max Pool Size=32"
+```
+
+Raise the v1 string too when `--check` is on, or v1 becomes the new ceiling.
+
+**Defaults differ by entry point.** The CLI defaults `--concurrency` to 1 ([`export-batch.ts:851`](apps/cli/src/commands/export-batch.ts)); `scripts/push-to-ce.sh` and `push-to-ce.ps1` default it to **4**. So a push driven by the script is already running four labs in flight even though this reference says 1.
 
 **Resume.** Each lab gets one NDJSON line on stdout. To resume after an interruption, point `--resume-from <path>` at the previous run's stdout file — labs that already appear (any status) are skipped. The same file works as journal + checkpoint.
 
@@ -1283,12 +1297,12 @@ Confirmed done:
 - `OPENLDR_V2_INSECURE_TLS` for self-signed local dev.
 - Audit subsystem (Phase 4): single + batch commands, DISA + OpenLDR-v1 sources, 14 anomaly classes, `data_quality` annotation in v2 payloads, `--quarantine-on-anomaly` gating in `cdr export --post`.
 - Audit reports (Phase 4 cont.): `cdr audit-report` + `audit-batch --report-out` render PDF / DOCX / Markdown / HTML stakeholder deliverables, with optional forecast section (`--total-labs`) for previewing full-deployment scale from a sample.
-- Batch export (`cdr export-batch`): per-lab POST orchestration with both gates on by default, `--concurrency` worker pool (parallel POSTs, serialised DB), `--resume-from` journaling via stdout, heartbeat progress, fatal-handler safety net.
+- Batch export (`cdr export-batch`): per-lab POST orchestration with both gates on by default, `--concurrency` worker pool, `--resume-from` journaling via stdout, heartbeat progress, fatal-handler safety net.
+- Per-connection-string mssql pool registry ([`pool.ts`](packages/disalab/src/lib/pool.ts)) — `export-batch --concurrency` parallelises the DB phase as well as the POST. Practical ceiling is mssql's default `max: 10` per pool; raise with `Max Pool Size=` in the connection string.
 
 Likely soon:
 - Country-pluggable `system_id` values in `site-config.ts`.
 - Fix the SQL-escape bug in `REGDAT4.LabNumbers` that errors on lab numbers containing single-quote / NULL chars (~0.1% of the Tanzania dataset).
-- Per-connection-string mssql pool registry so `export-batch --concurrency` can parallelise the DB phase too (current implementation serialises DB and parallelises only POST).
 
 Maybe later:
 - Move v2 schema TypeScript types into a shared package consumed by both CLI and the v2 API repo.
