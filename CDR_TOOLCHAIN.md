@@ -66,6 +66,11 @@ cdr-toolchain/
 │   └── disalab/            # DISA blob decoder (PARMDICT/COMMDICT/SpecimenRecpt/...)
 ├── docs/
 │   └── PRD.md              # original product spec (sections 1-16 pre-date Phase 1)
+├── scripts/                # operator-facing, not imported by any package
+│   ├── push-to-ce.sh       # CE push driver (+ .ps1 twin, .env.ce.example)
+│   ├── DIAGNOSTICS.md      # throughput diagnosis runbook
+│   ├── diagnose-rtt.mjs    # per-query RTT probe (read-only)
+│   └── diagnose-sql-health.sql  # sizes, indexes, query cost, waits (read-only)
 ├── temp/                   # gitignored; output dumps, throwaway probes
 ├── CDR_TOOLCHAIN.md       # this file
 └── pnpm-workspace.yaml
@@ -1250,6 +1255,9 @@ pnpm dev compare-batch --where "WHERE [LabNo] LIKE 'TDS013%'" --limit 100 --resu
 | disalab decoders (per dictionary / form / data table) | [`packages/disalab/src/lib/`](packages/disalab/src/lib/) |
 | Express API scaffold (stub) | [`apps/api/src/`](apps/api/src/) |
 | Original product spec | [`docs/PRD.md`](docs/PRD.md) |
+| Throughput diagnosis runbook (read-only, run before tuning anything) | [`scripts/DIAGNOSTICS.md`](scripts/DIAGNOSTICS.md) |
+| Per-query RTT probe | [`scripts/diagnose-rtt.mjs`](scripts/diagnose-rtt.mjs) |
+| SQL Server sizes / indexes / query cost / waits | [`scripts/diagnose-sql-health.sql`](scripts/diagnose-sql-health.sql) |
 | Example v2 schema (canonical reference) | [`temp/default.schema.example.json`](temp/default.schema.example.json) |
 
 ---
