@@ -42,8 +42,19 @@ fi
 if [ -n "$ENV_FILE" ] && [ -f "$ENV_FILE" ]; then
   echo "Config: $ENV_FILE"
   while IFS='=' read -r k v; do
-    case "$k" in ''|\#*) continue ;; esac
+    # Normalise the key BEFORE testing it for empty/comment. A blank line in a
+    # .env saved with CRLF arrives here as a bare CR: non-empty at this point,
+    # so it survives the test below, but it strips to empty — and `${!k}` on an
+    # empty name aborts the whole run under `set -e` with the near-useless
+    # "line 47: : invalid variable name". Deployment teams edit .env by hand on
+    # Windows and copy it to a Linux box, so CRLF here is routine, not exotic.
     k="$(printf '%s' "$k" | tr -d '[:space:]')"
+    case "$k" in ''|\#*) continue ;; esac
+    # Strip only a trailing CR from the value, never all whitespace: connection
+    # strings legitimately contain spaces ("Max Pool Size=32"). Left in place, a
+    # CR rides along invisibly and OPENLDR_CE_TIMEZONE fails its format check
+    # while looking correct in every error message that prints it.
+    v="${v%$'\r'}"
     [ -n "${!k:-}" ] || export "$k=$(printf '%s' "$v" | sed 's/^"//;s/"$//')"
   done < "$ENV_FILE"
 else

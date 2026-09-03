@@ -13,3 +13,13 @@
 # fails with `bad interpreter: /usr/bin/env node^M` the moment anyone runs it
 # directly instead of via `node <file>`.
 *.mjs text eol=lf
+
+# scripts/.env.ce.example is copied to apps/cli/.env by deployment teams, and
+# push-to-ce.sh parses that file. A CRLF copy used to abort the run at the
+# first blank line with "line 47: : invalid variable name" (a bare CR reads as
+# a non-empty key that normalises to empty). The parser tolerates CRLF now, but
+# a CR also rides invisibly on every VALUE — enough to fail the
+# OPENLDR_CE_TIMEZONE format check while the error prints a correct-looking
+# "+02:00". Keep the template LF so a Windows clone under core.autocrlf=true
+# cannot seed the problem in the first place.
+*.example text eol=lf
