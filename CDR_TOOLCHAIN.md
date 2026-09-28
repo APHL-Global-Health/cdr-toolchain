@@ -1022,8 +1022,12 @@ All env vars live in `apps/cli/.env` (or override via global flags). See `apps/c
 | `OPENLDR_CE_HOOK_PATH` | no | `export-batch` | Path of the CE workflow webhook, appended to `OPENLDR_CE_URL`. Default `/api/workflows/hooks/ingest`, which already matches the webhook seeded by CE's built-in "Ingest" workflow — leave unset unless that path was changed. Overridable with `--ce-hook-path`. |
 | `OPENLDR_CE_WEBHOOK_TOKEN` | only for the CE target | `export-batch` | Sent as the `x-webhook-token` header. A random UUID minted when that CE install was seeded — per-install, not a shared constant, and not transferable between deployments. Read it from Studio → Workflows → Ingest → the webhook trigger node. Overridable with `--ce-token`. |
 | `OPENLDR_CE_TIMEZONE` | **yes, for the CE target** | `export-batch` | UTC offset for DISA's unzoned local timestamps, e.g. `+02:00`. **No default and no fallback** — DISA stores local wall-clock, so assuming UTC would shift every clinical timestamp with no error. Tanzania `+03:00`; Zambia and Mozambique `+02:00`. Overridable with `--ce-tz`. |
+| `OPENLDR_LAB_CODE` | **yes, for the CE target** | `export-batch` | Code of the testing laboratory this DISA installation is, e.g. `TDS`. DISA records no lab code, so this is required to send it on every report. No default. Overridable with `--lab-code`. Set this only for a CE push. A v2 push that carries it sends the lab under system id `DEFAULT_LAB`, which v2 has not been shown to recognise. |
+| `OPENLDR_LAB_NAME` | no | `export-batch` | Display name of the testing laboratory. Defaults to the code. Overridable with `--lab-name`. |
 
 **CE target gates.** `export-batch` **refuses** `--no-check` and `--no-quarantine` whenever `--ce-url` is set, so `OPENLDR_V1_CONNECTION_STRING` is required on this path even though it is optional for v2. CE's FHIR schemas are passthrough with nearly everything optional, so the v1 fidelity gate and the audit quarantine are the only checks between bad source data and the store.
+
+**Lab-prefix mismatch.** When `OPENLDR_LAB_CODE` is set, the run summary's `lab_prefix_mismatch` counts labs whose lab number does not start with that code, with up to five examples in `lab_prefix_mismatch_examples`. This is reported only, never refused, since nothing guarantees the prefix convention outside Tanzania.
 
 **Connection-string secret hygiene:** `cdr config show` redacts passwords (`pwd=***` and `://user:***@host`). Logs follow the same convention.
 

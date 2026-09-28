@@ -89,10 +89,14 @@ function richPayload() {
       clinical_info: "suspected sepsis",
       icd10_codes: null, therapy: null, priority: null,
       age_years: 34, age_days: null, sex: "F", patient_class: null,
-      section_code: null, result_status: "F", requesting_facility_code: null,
+      section_code: null, result_status: "F",
+      requesting_facility_code: {
+        concept_code: "IBPAA", display_name: "KCMC",
+        concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+      },
       testing_facility_code: {
         concept_code: "LAB1", display_name: "Central Reference Lab",
-        concept_class: "facility", datatype: "coded", system_id: "DEFAULT_FAC",
+        concept_class: "facility", datatype: "coded", system_id: "DEFAULT_LAB",
       },
       requesting_doctor: "Dr Mwakasege", tested_by: null,
       authorised_by: null, source_payload: {},

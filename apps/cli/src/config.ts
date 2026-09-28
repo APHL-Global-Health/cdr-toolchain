@@ -35,6 +35,12 @@ export interface LoadedConfig {
    *  targeting CE: DISA stores local wall-clock (v2-transform.ts:38-50) and assuming
    *  UTC would shift Moz/Zambia (UTC+2) timestamps 2h earlier with no error. NO DEFAULT. */
   openldrCeTimezone?: string;
+  /** Code of the testing laboratory this DISA installation is, e.g. TDS. REQUIRED when
+   *  targeting CE: DISA records no lab code, so a push would send every report without
+   *  its testing laboratory. NO DEFAULT. */
+  openldrLabCode?: string;
+  /** Display name of the testing laboratory. Optional; defaults to the code. */
+  openldrLabName?: string;
   /** Keycloak base URL (no trailing slash), e.g. https://kc.example.com/keycloak. */
   keycloakUrl?: string;
   /** Keycloak realm hosting the OpenLDR client. */
@@ -79,6 +85,8 @@ export interface ConfigOverrides {
   openldrCeHookPath?: string;
   openldrCeWebhookToken?: string;
   openldrCeTimezone?: string;
+  openldrLabCode?: string;
+  openldrLabName?: string;
   keycloakUrl?: string;
   keycloakRealm?: string;
   keycloakClientId?: string;
@@ -120,6 +128,8 @@ const EnvSchema = z.object({
   OPENLDR_CE_HOOK_PATH: z.string().optional(),
   OPENLDR_CE_WEBHOOK_TOKEN: z.string().min(1).optional(),
   OPENLDR_CE_TIMEZONE: z.string().optional(),
+  OPENLDR_LAB_CODE: z.string().optional(),
+  OPENLDR_LAB_NAME: z.string().optional(),
 });
 
 function parseBool(v: string | undefined): boolean {
@@ -216,6 +226,8 @@ export function loadConfig(overrides: ConfigOverrides = {}): LoadedConfig {
     openldrCeHookPath: overrides.openldrCeHookPath ?? env.data.OPENLDR_CE_HOOK_PATH ?? "/api/workflows/hooks/ingest",
     openldrCeWebhookToken: overrides.openldrCeWebhookToken ?? env.data.OPENLDR_CE_WEBHOOK_TOKEN,
     openldrCeTimezone: overrides.openldrCeTimezone ?? env.data.OPENLDR_CE_TIMEZONE,
+    openldrLabCode: overrides.openldrLabCode ?? env.data.OPENLDR_LAB_CODE,
+    openldrLabName: overrides.openldrLabName ?? env.data.OPENLDR_LAB_NAME,
     keycloakUrl: overrides.keycloakUrl ?? env.data.KEYCLOAK_PUBLIC_URL,
     keycloakRealm: overrides.keycloakRealm ?? env.data.KEYCLOAK_REALM,
     keycloakClientId: overrides.keycloakClientId ?? env.data.KEYCLOAK_CLIENT_ID,

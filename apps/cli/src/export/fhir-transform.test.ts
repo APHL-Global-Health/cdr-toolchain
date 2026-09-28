@@ -203,13 +203,16 @@ test("absent dates are omitted, not emitted as null", () => {
   assert.equal("issued" in dr, false);
 });
 
-test("clinical_info and requesting_doctor ride the ServiceRequest", () => {
+test("clinical_info rides the ServiceRequest; requesting_doctor becomes the contained requester", () => {
+  // Before this change requester was { display }. Now the doctor travels in a
+  // contained PractitionerRole, with requester a local reference to it.
   const pl = basePayload();
   pl.lab_requests[0]!.clinical_info = "suspected sepsis";
   pl.lab_requests[0]!.requesting_doctor = "Dr Mwakasege";
   const sr = findOne(toFhir(pl, TZ), "ServiceRequest");
   assert.equal(sr.note[0].text, "suspected sepsis");
-  assert.equal(sr.requester.display, "Dr Mwakasege");
+  assert.deepEqual(sr.requester, { reference: "#requester" });
+  assert.deepEqual(sr.contained[0].practitioner, { display: "Dr Mwakasege" });
 });
 
 test("every emitted id satisfies CE's ID_RE", () => {
@@ -808,4 +811,71 @@ test("each report indexes only ITS OWN OBR's results", () => {
   assert.deepEqual(byObr.get("4").result.map((x: any) => x.reference), ["Observation/DEFAULT-REQ-2024-00456-obs-2"]);
   // superseded reruns (1,2) and the never-resulted panel (5): order kept, no results
   for (const obr of ["1", "2", "5"]) assert.equal("result" in byObr.get(obr), false);
+});
+
+// ---------------------------------------------------------------------------
+// Task 6: performer is the lab, requester is a contained PractitionerRole
+// pairing the doctor with the requesting clinic.
+// ---------------------------------------------------------------------------
+
+const LAB = { system_id: "DEFAULT_LAB", concept_code: "TDS", display_name: "Dar DISA lab", concept_class: "facility", datatype: "coded" };
+const CLINIC = { system_id: "DEFAULT_FAC", concept_code: "IBPAA", display_name: "KCMC", concept_class: "facility", datatype: "coded" };
+
+function withFacilities(over: Record<string, unknown>) {
+  const pl = basePayload();
+  Object.assign(pl.lab_requests[0]!, over);
+  return pl;
+}
+
+test("performer is the lab, under the lab system", () => {
+  const dr = findOne(toFhir(withFacilities({ testing_facility_code: LAB, requesting_facility_code: CLINIC }), TZ), "DiagnosticReport");
+  assert.deepEqual(dr.performer, [{ identifier: { system: "urn:openldr:default_lab", value: "TDS" }, display: "Dar DISA lab" }]);
+});
+
+test("the lab Organization is keyed lab-<code>, the clinic facility-<code>", () => {
+  const orgs = toFhir(withFacilities({ testing_facility_code: LAB, requesting_facility_code: CLINIC }), TZ)
+    .filter((r: any) => r.resourceType === "Organization").map((r: any) => r.id).sort();
+  assert.deepEqual(orgs, ["facility-IBPAA", "lab-TDS"]);
+});
+
+test("a lab and a clinic sharing a code give two Organizations", () => {
+  const lab = { ...LAB, concept_code: "PAN" };
+  const clinic = { ...CLINIC, concept_code: "PAN" };
+  const orgs = toFhir(withFacilities({ testing_facility_code: lab, requesting_facility_code: clinic }), TZ)
+    .filter((r: any) => r.resourceType === "Organization").map((r: any) => r.id).sort();
+  assert.deepEqual(orgs, ["facility-PAN", "lab-PAN"]);
+});
+
+test("requester is a contained PractitionerRole with the doctor and the clinic", () => {
+  const sr = findOne(toFhir(withFacilities({ requesting_facility_code: CLINIC, requesting_doctor: "Dr Mushi" }), TZ), "ServiceRequest");
+  assert.deepEqual(sr.requester, { reference: "#requester" });
+  assert.deepEqual(sr.contained, [{
+    resourceType: "PractitionerRole", id: "requester",
+    practitioner: { display: "Dr Mushi" },
+    organization: { identifier: { system: "urn:openldr:default_fac", value: "IBPAA" }, display: "KCMC" },
+  }]);
+});
+
+test("no doctor: the PractitionerRole carries only the clinic", () => {
+  const sr = findOne(toFhir(withFacilities({ requesting_facility_code: CLINIC }), TZ), "ServiceRequest");
+  assert.equal("practitioner" in sr.contained[0], false);
+  assert.equal(sr.contained[0].organization.identifier.value, "IBPAA");
+});
+
+test("no clinic: the PractitionerRole carries only the doctor", () => {
+  const sr = findOne(toFhir(withFacilities({ requesting_doctor: "Dr Mushi" }), TZ), "ServiceRequest");
+  assert.equal("organization" in sr.contained[0], false);
+  assert.deepEqual(sr.contained[0].practitioner, { display: "Dr Mushi" });
+});
+
+test("neither: no contained and no requester", () => {
+  const sr = findOne(toFhir(basePayload(), TZ), "ServiceRequest");
+  assert.equal("contained" in sr, false);
+  assert.equal("requester" in sr, false);
+});
+
+test("without a configured lab the clinic still becomes one Organization", () => {
+  const orgs = toFhir(withFacilities({ testing_facility_code: CLINIC, requesting_facility_code: CLINIC }), TZ)
+    .filter((r: any) => r.resourceType === "Organization").map((r: any) => r.id);
+  assert.deepEqual(orgs, ["facility-IBPAA"]);
 });

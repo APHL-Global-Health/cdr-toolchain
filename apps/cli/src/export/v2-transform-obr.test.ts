@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SpecimenRecpt } from "disalab";
 import { toV2 } from "./v2-transform.js";
-import { DEFAULT_SITE } from "./site-config.js";
+import { DEFAULT_SITE, siteWithLab } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
 
@@ -165,4 +165,35 @@ test("a +100 second slot does NOT create an extra request", () => {
   );
   assert.deepEqual(payload.lab_requests.map((r) => r.obr_set_id), [1, 2]);
   assert.deepEqual(payload.lab_requests.map((r) => r.panel_code?.concept_code), ["COL", "RNAHF"]);
+});
+
+test("a configured lab replaces testing_facility_code on every lab request", () => {
+  const payload = toV2(
+    specimenFixture({
+      TestOrders: ["COL", "RNAHF"],
+      TestResults: [
+        { TESTCODE: "COL", TESTINDEX: 1, DATESTAMP: null, ORDER: [makeItem("COLST", "1")] },
+        { TESTCODE: "RNAHF", TESTINDEX: 2, DATESTAMP: null, ORDER: [makeItem("HCBFL", "2")] },
+      ],
+    }),
+    { ...opts(), site: siteWithLab({ code: "TDS", name: null }) },
+  );
+  for (const r of payload.lab_requests) {
+    assert.deepEqual(r.testing_facility_code, {
+      system_id: "DEFAULT_LAB", concept_code: "TDS", display_name: "TDS",
+      concept_class: "facility", datatype: "coded",
+    });
+    assert.deepEqual(r.requesting_facility_code, r.facility_code);
+  }
+});
+
+test("with no configured lab, testing_facility_code still mirrors requesting_facility_code", () => {
+  const payload = toV2(
+    specimenFixture({
+      TestOrders: ["COL"],
+      TestResults: [{ TESTCODE: "COL", TESTINDEX: 1, DATESTAMP: null, ORDER: [makeItem("COLST", "1")] }],
+    }),
+    opts(),
+  );
+  assert.deepEqual(payload.lab_requests[0]!.testing_facility_code, payload.lab_requests[0]!.requesting_facility_code);
 });
