@@ -304,7 +304,7 @@ function buildLabRequest(
       };
 
   const facilityConcept = buildFacilityConcept(facility, site);
-  // The requesting facility is DISA's Facility — the clinic that ordered the test.
+  // The requesting facility is DISA's Facility, the clinic that ordered the test.
   // The testing lab is the configured site.testing_facility when set (slice B,
   // 2026-09-28-testing-lab-on-the-wire-design.md), else the old fallback below,
   // which repeats the requesting facility for testing_facility_code.
@@ -351,7 +351,7 @@ function buildLabRequest(
     // includes every rejected OBR in its output, so an OBR with no entry here
     // is one nothing is known about — null, not a rejection claim.
     result_status: reviewStatus?.status ?? null,
-    // requesting_facility_code is DISA's Facility — see the comment where
+    // requesting_facility_code is DISA's Facility. See the comment where
     // facilityConcept is reused for requestingFacilityConcept above.
     requesting_facility_code: requestingFacilityConcept,
     testing_facility_code: buildLabConcept(site) ?? facilityConcept,
