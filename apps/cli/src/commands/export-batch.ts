@@ -17,7 +17,7 @@ import type { PocFormat } from "../openldr.js";
 import { diffResults, isResultPerfectMatch } from "../compare/result-diff.js";
 import { loadCodebook, type Codebook } from "../export/codebook.js";
 import type { V2Payload } from "../export/types.js";
-import { DEFAULT_SITE } from "../export/site-config.js";
+import { siteWithLab, type SiteConfig } from "../export/site-config.js";
 import { toV2 } from "../export/v2-transform.js";
 import { toFhir } from "../export/fhir-transform.js";
 import { toDocumentationFhir } from "../export/fhir-documentation-transform.js";
@@ -74,6 +74,8 @@ interface ExportBatchOpts {
   ceHookPath?: string;
   ceToken?: string;
   ceTz?: string;
+  labCode?: string;
+  labName?: string;
 }
 
 type LabStatus =
@@ -151,6 +153,11 @@ interface BatchSummary {
   elapsed_ms: number;
   avg_ms_per_lab: number | null;
   concurrency: number;
+  /** Labs whose lab number does not start with the configured lab code. Null when no lab code is
+   *  configured. Reported, never refused. */
+  lab_prefix_mismatch: number | null;
+  /** Up to five of those lab numbers. */
+  lab_prefix_mismatch_examples: string[];
 }
 
 function buildServer(connectionString: string): DisaServer {
@@ -392,6 +399,9 @@ interface ProcessLabContext {
    *  startup (below) — never per lab, since loadBlobOffsets does file I/O. */
   blobOffsets: BlobOffsets;
   prefix: string;
+  /** Site config carrying the configured testing laboratory (siteWithLab), used for every
+   *  toV2 call in place of the old hardcoded DEFAULT_SITE. */
+  site: SiteConfig;
   postConfig: PostConfig;
   /** Present when the CE target is selected (--ce-url / OPENLDR_CE_URL). When
    *  set, processOneLab sends resources to CE's workflow webhook instead of
@@ -564,7 +574,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
         const target = resolve(ctx.quarantineDir, `${norm.disaLabNo}.json`);
         const payload = toV2(specimen, {
           prefix: ctx.prefix,
-          site: DEFAULT_SITE,
+          site: ctx.site,
           codebook: ctx.codebook,
           auditReport,
           excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
@@ -596,7 +606,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // -------- build payload --------
     const payload = toV2(specimen, {
       prefix: ctx.prefix,
-      site: DEFAULT_SITE,
+      site: ctx.site,
       codebook: ctx.codebook,
       auditReport,
       excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
@@ -728,7 +738,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
     // record; the form references the lab request id via related_request_id.
     const formPayload = toFormSubmission(specimen, {
       prefix: ctx.prefix,
-      site: DEFAULT_SITE,
+      site: ctx.site,
       codebook: ctx.codebook,
       docConfig: ctx.docConfig,
       relatedRequestId: post !== null ? norm.openldrRequestId : null,
@@ -833,6 +843,27 @@ export function requireCeTimezone(ceUrl: string | undefined, tz: string | undefi
   return t;
 }
 
+/** The testing laboratory this DISA installation is. DISA records no lab code, so a CE push must
+ *  be told (spec 2026-09-28-testing-lab-on-the-wire, D2). Required with --ce-url, like the
+ *  timezone. Without a CE target it is optional, and when absent the payload is unchanged. */
+export function requireLabCode(ceUrl: string | undefined, code: string | undefined): string | undefined {
+  const c = (code ?? "").trim();
+  if (ceUrl !== undefined && ceUrl.length > 0 && c.length === 0) {
+    throw new CliError(
+      "CONFIG_MISSING",
+      "A lab code is required when the target is OpenLDR CE. DISA records no lab code, so every report would be sent without its testing laboratory. Set OPENLDR_LAB_CODE or pass --lab-code, e.g. TDS.",
+    );
+  }
+  return c.length > 0 ? c : undefined;
+}
+
+/** Whether a DISA lab number starts with the configured lab code. v1 derived the receiving lab
+ *  from this prefix in Tanzania (3,437,966 of 3,437,966 rows), but nothing guarantees it for
+ *  another country, so a mismatch is counted and reported, never refused. */
+export function labNumberMatchesLab(labNumber: string, labCode: string): boolean {
+  return labNumber.trim().toUpperCase().startsWith(labCode.trim().toUpperCase());
+}
+
 export function registerExportBatchCommand(program: Command): void {
   program
     .command("export-batch")
@@ -861,6 +892,8 @@ export function registerExportBatchCommand(program: Command): void {
     .option("--ce-hook-path <path>", "CE workflow webhook path (overrides OPENLDR_CE_HOOK_PATH env)")
     .option("--ce-token <secret>", "CE webhook token for the x-webhook-token header (overrides OPENLDR_CE_WEBHOOK_TOKEN env)")
     .option("--ce-tz <offset>", "UTC offset for DISA's unzoned local timestamps, e.g. +02:00. REQUIRED with --ce-url (overrides OPENLDR_CE_TIMEZONE env)")
+    .option("--lab-code <code>", "Code of the testing laboratory this DISA installation is, e.g. TDS. REQUIRED with --ce-url (overrides OPENLDR_LAB_CODE env)")
+    .option("--lab-name <name>", "Display name of the testing laboratory (overrides OPENLDR_LAB_NAME env; default: the code)")
     .option("--data-feed-id <uuid>", "Pre-resolved X-DataFeed-Id (skips discovery)")
     .option("--project-name <name>", "OpenLDR project for X-DataFeed-Id discovery")
     .option("--use-case-name <name>", "OpenLDR use case for X-DataFeed-Id discovery")
@@ -906,6 +939,9 @@ export function registerExportBatchCommand(program: Command): void {
       const ceUrl = opts.ceUrl ?? config.openldrCeUrl;
       assertCeGatesEnabled({ ceUrl, doCheck, doQuarantine });
       const ceTz = requireCeTimezone(ceUrl, opts.ceTz ?? config.openldrCeTimezone);
+      const labCode = requireLabCode(ceUrl, opts.labCode ?? config.openldrLabCode);
+      const labNameRaw = (opts.labName ?? config.openldrLabName ?? "").trim();
+      const site = siteWithLab(labCode === undefined ? null : { code: labCode, name: labNameRaw.length > 0 ? labNameRaw : null });
 
       // Loosen TLS for self-signed local-dev targets (CE or v2) BEFORE any fetch. Installs an
       // insecure global fetch dispatcher — a runtime NODE_TLS_REJECT_UNAUTHORIZED mutation is too
@@ -964,6 +1000,8 @@ export function registerExportBatchCommand(program: Command): void {
       let errored = 0;
       let formsPosted = 0;
       let split = 0;
+      let labPrefixMismatch = 0;
+      const labPrefixExamples: string[] = [];
       let currentLab: string | null = null;
 
       const makeSummary = (): BatchSummary => {
@@ -977,6 +1015,8 @@ export function registerExportBatchCommand(program: Command): void {
           elapsed_ms: elapsed,
           avg_ms_per_lab: attempted > 0 ? Math.round(elapsed / attempted) : null,
           concurrency,
+          lab_prefix_mismatch: labCode === undefined ? null : labPrefixMismatch,
+          lab_prefix_mismatch_examples: labPrefixExamples,
         };
       };
 
@@ -1128,6 +1168,7 @@ export function registerExportBatchCommand(program: Command): void {
         docConfig,
         blobOffsets,
         prefix,
+        site,
         postConfig,
         ceConfig,
         doCheck,
@@ -1143,6 +1184,10 @@ export function registerExportBatchCommand(program: Command): void {
       };
 
       const tally = (r: LabResult): void => {
+        if (labCode !== undefined && !labNumberMatchesLab(r.lab_number, labCode)) {
+          labPrefixMismatch++;
+          if (labPrefixExamples.length < 5) labPrefixExamples.push(r.lab_number);
+        }
         switch (r.status) {
           case "posted": posted++; break;
           case "deduplicated": deduplicated++; break;

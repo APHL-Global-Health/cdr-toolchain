@@ -75,6 +75,7 @@ need OPENLDR_V1_CONNECTION_STRING "OpenLDR v1 mirror — the fidelity gate is NO
 need OPENLDR_CE_URL              "base URL of the target CE, no trailing slash"
 need OPENLDR_CE_WEBHOOK_TOKEN    "Studio -> Workflows -> Ingest -> webhook node -> secret"
 need OPENLDR_CE_TIMEZONE         "Zambia is +02:00 — there is no default and no fallback"
+need OPENLDR_LAB_CODE            "the testing laboratory this DISA installation is, e.g. TDS"
 need OPENLDR_COUNTRY             "must be 'zambia' to load config/zambia.yaml"
 
 # DISA stores unzoned local wall-clock. A missing/By-UTC offset shifts every
@@ -105,10 +106,12 @@ common=(export-batch
   --order "$ORDER"
   --country "$OPENLDR_COUNTRY"
   --ce-url "$OPENLDR_CE_URL"
-  --ce-tz "$OPENLDR_CE_TIMEZONE")
+  --ce-tz "$OPENLDR_CE_TIMEZONE"
+  --lab-code "$OPENLDR_LAB_CODE")
 # An `[ -n ... ] && arr+=(...)` one-liner would abort the whole script under
 # `set -e` whenever WHERE is empty, because the list's exit status is then 1.
 if [ -n "$WHERE" ]; then common+=(--where "$WHERE"); fi
+if [ -n "${OPENLDR_LAB_NAME:-}" ]; then common+=(--lab-name "$OPENLDR_LAB_NAME"); fi
 
 case "$MODE" in
   verify)
@@ -126,8 +129,10 @@ case "$MODE" in
       --order "$ORDER"
       --country "$OPENLDR_COUNTRY"
       --ce-url "$OPENLDR_CE_URL" --ce-tz "$OPENLDR_CE_TIMEZONE"
+      --lab-code "$OPENLDR_LAB_CODE"
       --dry-run)
     if [ -n "$WHERE" ]; then smoke+=(--where "$WHERE"); fi
+    if [ -n "${OPENLDR_LAB_NAME:-}" ]; then smoke+=(--lab-name "$OPENLDR_LAB_NAME"); fi
     exec $CDR_BIN "${smoke[@]}"
     ;;
   run)

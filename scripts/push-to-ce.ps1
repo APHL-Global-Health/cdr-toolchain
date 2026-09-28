@@ -52,6 +52,7 @@ Need 'OPENLDR_V1_CONNECTION_STRING' 'OpenLDR v1 mirror - the fidelity gate is NO
 Need 'OPENLDR_CE_URL'               'base URL of the target CE, no trailing slash'
 Need 'OPENLDR_CE_WEBHOOK_TOKEN'     'Studio -> Workflows -> Ingest -> webhook node -> secret'
 Need 'OPENLDR_CE_TIMEZONE'          'Zambia is +02:00 - there is no default and no fallback'
+Need 'OPENLDR_LAB_CODE'             'the testing laboratory this DISA installation is, e.g. TDS'
 Need 'OPENLDR_COUNTRY'              "must be 'zambia' to load config/zambia.yaml"
 
 if ($env:OPENLDR_CE_TIMEZONE -and $env:OPENLDR_CE_TIMEZONE -notmatch '^(Z|[+-]\d{2}:\d{2})$') {
@@ -74,8 +75,10 @@ $summary = Join-Path $OutDir 'summary.log'
 $cdr = 'apps/cli/node_modules/.bin/tsx apps/cli/src/index.ts'
 
 $args = "export-batch --limit $Limit --concurrency $Concurrency --order $Order " +
-        "--country $($env:OPENLDR_COUNTRY) --ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE)"
+        "--country $($env:OPENLDR_COUNTRY) --ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE) " +
+        "--lab-code $($env:OPENLDR_LAB_CODE)"
 if ($Where) { $args += " --where `"$Where`"" }
+if ($env:OPENLDR_LAB_NAME) { $args += " --lab-name `"$($env:OPENLDR_LAB_NAME)`"" }
 
 # ⚠ PowerShell's `>` writes UTF-16 with a BOM, which corrupts NDJSON for every
 # downstream consumer (--resume-from, jq, openldr ingest stream). Redirect
@@ -85,8 +88,10 @@ switch ($Mode) {
   'smoke'  {
     Write-Host 'Smoke: 10 labs, --dry-run (nothing is POSTed)'
     $s = "export-batch --limit 10 --concurrency 1 --order $Order --country $($env:OPENLDR_COUNTRY) " +
-         "--ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE) --dry-run"
+         "--ce-url $($env:OPENLDR_CE_URL) --ce-tz $($env:OPENLDR_CE_TIMEZONE) " +
+         "--lab-code $($env:OPENLDR_LAB_CODE) --dry-run"
     if ($Where) { $s += " --where `"$Where`"" }
+    if ($env:OPENLDR_LAB_NAME) { $s += " --lab-name `"$($env:OPENLDR_LAB_NAME)`"" }
     cmd /c "$cdr $s"
   }
   'run' {
