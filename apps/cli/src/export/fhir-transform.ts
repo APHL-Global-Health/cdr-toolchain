@@ -10,6 +10,7 @@ import type {
   V2Payload, V2Patient, V2ConceptCode, V2LabRequest, V2LabResult, V2Isolate, V2SusceptibilityTest,
 } from "./types.js";
 import { fhirId, fhirDateTime, fhirText } from "./fhir-primitives.js";
+import { LAB_SYSTEM_ID } from "./site-config.js";
 
 export type FhirResource = Record<string, unknown>;
 
@@ -233,8 +234,7 @@ function requestResources(
     authoredOn: fhirDateTime(lr.registered_at, opts.tzOffset),
     ...(fhirText(lr.clinical_info) !== undefined
       ? { note: [{ text: fhirText(lr.clinical_info) }] } : {}),
-    ...(fhirText(lr.requesting_doctor) !== undefined
-      ? { requester: { display: fhirText(lr.requesting_doctor) } } : {}),
+    ...requesterFields(lr),
   }));
 
   out.push(compact({
@@ -271,6 +271,31 @@ function requestResources(
   return out;
 }
 
+/** The doctor and the requesting clinic travel together as a contained PractitionerRole: FHIR
+ *  allows one requester, and PractitionerRole is its pairing of a practitioner with an
+ *  organization. The clinic's identifier matches its Organization and CE's facility dimension.
+ *  Spec: openldr_ce docs/superpowers/specs/2026-09-28-testing-lab-on-the-wire-design.md, 5.4. */
+function requesterFields(lr: V2LabRequest): Record<string, unknown> {
+  const doctor = fhirText(lr.requesting_doctor);
+  const clinic = lr.requesting_facility_code;
+  const clinicCode = clinic === null ? undefined : fhirText(clinic.concept_code);
+  if (doctor === undefined && clinicCode === undefined) return {};
+  const role = compact({
+    resourceType: "PractitionerRole",
+    id: "requester",
+    ...(doctor !== undefined ? { practitioner: { display: doctor } } : {}),
+    ...(clinicCode !== undefined
+      ? {
+          organization: compact({
+            identifier: compact({ system: systemUri(clinic!.system_id), value: clinicCode }),
+            display: fhirText(clinic!.display_name),
+          }),
+        }
+      : {}),
+  });
+  return { contained: [role], requester: { reference: "#requester" } };
+}
+
 /** Read a string-valued property off a V2ConceptCode's `properties` bag.
  *  `properties` is `Record<string, unknown>` (types.ts:13) — untyped JSON that
  *  survived the v2 payload round-trip — so this guards the shape rather than
@@ -281,14 +306,15 @@ function propText(props: Record<string, unknown> | undefined, key: string): stri
 }
 
 /**
- * Organization for the facility a report was PERFORMED AT (testing_facility_code
- * only — requesting_facility_code/facility_code are out of this slice's scope).
- * Carries the location facilityProperties() already collected onto the concept
- * (v2-transform.ts:168-179) but that DiagnosticReport.performer — a logical
- * reference, kept that way deliberately (see the comment on `performer` above:
- * LOCNDIC4 has 5 codes all described "Aga Khan") — never surfaces. Without
- * this, an operator mapping facilities sees five identical "Aga Khan" rows and
- * must look each code up in the source by hand.
+ * Organization for a facility referenced by a report — the testing lab
+ * (testing_facility_code) or the requesting clinic (requesting_facility_code);
+ * facility_code is still out of this slice's scope. Carries the location
+ * facilityProperties() already collected onto the concept (v2-transform.ts:168-179)
+ * but that DiagnosticReport.performer — a logical reference, kept that way
+ * deliberately (see the comment on `performer` above: LOCNDIC4 has 5 codes all
+ * described "Aga Khan") — never surfaces. Without this, an operator mapping
+ * facilities sees five identical "Aga Khan" rows and must look each code up in
+ * the source by hand.
  *
  * `identifier` is BYTE-FOR-BYTE the same { system, value } performer's logical
  * reference carries (mirroring the expression right below), so the two join on
@@ -324,8 +350,14 @@ function propText(props: Record<string, unknown> | undefined, key: string): stri
  * "Dispensary" as a FHIR district, or a facility code as a FHIR state, would
  * be worse than omitting them.
  */
-function organizationResource(code: V2ConceptCode): FhirResource | undefined {
-  const id = fhirId(`facility-${code.concept_code}`);
+/** A lab code and a clinic code are separate code spaces (site-config.ts LAB_SYSTEM_ID); the
+ *  Organization id keeps them apart when they share a code. */
+function organizationIdPrefix(code: V2ConceptCode): "facility" | "lab" {
+  return code.system_id === LAB_SYSTEM_ID ? "lab" : "facility";
+}
+
+function organizationResource(code: V2ConceptCode, idPrefix: "facility" | "lab"): FhirResource | undefined {
+  const id = fhirId(`${idPrefix}-${code.concept_code}`);
   if (id === undefined) return undefined;
   const address = compact({
     district: propText(code.properties, "postal_address"),
@@ -570,18 +602,21 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
     host.hasMember = members;
   });
 
-  // Organization — one per DISTINCT testing facility code referenced by any OBR
-  // of this lab, not one per OBR: multiple panels routinely share the same
-  // testing_facility_code, and duplicate entries sharing one id would repeat
-  // the same "N resources, one id" hazard the Specimen/isolate comments above
-  // call out. Keyed on the derived id (== the code), so this also dedupes
-  // against itself if the SAME code appears via two lab_requests.
+  // Organization — one per DISTINCT lab and clinic code referenced by any OBR of
+  // this lab, not one per OBR: multiple panels routinely share the same
+  // testing_facility_code or requesting_facility_code, and duplicate entries
+  // sharing one id would repeat the same "N resources, one id" hazard the
+  // Specimen/isolate comments above call out. Keyed on the derived id, so this
+  // also dedupes a clinic that is both testing and requesting facility (no
+  // configured lab) down to one Organization.
   const organizations = new Map<string, FhirResource>();
   for (const lr of payload.lab_requests) {
-    if (lr.testing_facility_code === null) continue;
-    const org = organizationResource(lr.testing_facility_code);
-    if (org === undefined) continue;
-    organizations.set(org.id as string, org);
+    for (const code of [lr.testing_facility_code, lr.requesting_facility_code]) {
+      if (code === null) continue;
+      const org = organizationResource(code, organizationIdPrefix(code));
+      if (org === undefined) continue;
+      organizations.set(org.id as string, org);
+    }
   }
 
   const out = [
