@@ -11,7 +11,7 @@ import type { AuditReport } from "../audit/types.js";
 import { deriveObrSets, linkObsToObr, type ObrSet } from "./obr-sets.js";
 import { buildStatusByObr, type ObrStatus } from "./review-status.js";
 import type { Codebook } from "./codebook.js";
-import type { SiteConfig } from "./site-config.js";
+import { buildLabConcept, type SiteConfig } from "./site-config.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
 import type {
   V2ConceptCode,
@@ -304,25 +304,10 @@ function buildLabRequest(
       };
 
   const facilityConcept = buildFacilityConcept(facility, site);
-  // ⛔ KNOWN DEFECT — the comment that used to sit here was FALSE, and it is what
-  // made this look intentional. It claimed: "DISA doesn't carry a separate
-  // requesting-facility code distinct from the testing lab ... Emit the same
-  // concept for both; v2 consumers can infer requesting == testing from the
-  // equality." The relationship is BACKWARDS.
-  //
-  // DISA's Facility IS the REQUESTING clinic. The TESTING lab is the DISA
-  // *deployment* itself — one instance is one lab — which is why nothing on
-  // SpecimenRecpt carries it and SiteConfig has no slot for it.
-  //
-  // v1 proves both exist and are distinct (measured 2026-07-17, TDS):
-  //   TestingFacilityCode 'TDS' on 172,092 rows (98.8%) — ONE constant, the lab
-  //   distinct requesting facilities (LIMSFacilityCode): 3,349
-  // i.e. ONE lab serving 3,349 clinics. Emitting facilityConcept for BOTH puts
-  // one of those 3,349 clinics in the testing_facility_code slot. The V2<->v1
-  // gate reports it 195/195 mismatch (docs .../2026-07-17-mapping-gate-findings.md §3.3).
-  //
-  // NOT FIXED HERE: that slice adds `testing_facility_code` to SiteConfig, since
-  // the lab is a property of the deployment, not of a record.
+  // The requesting facility is DISA's Facility — the clinic that ordered the test.
+  // The testing lab is the configured site.testing_facility when set (slice B,
+  // 2026-09-28-testing-lab-on-the-wire-design.md), else the old fallback below,
+  // which repeats the requesting facility for testing_facility_code.
   // ⚠ Do NOT derive it from LabNumber.slice(0,3) — 'TDS' being the LabNo prefix
   // is an undocumented coincidence of this site's numbering, and CDR must also
   // run in Zambia and Mozambique.
@@ -366,11 +351,10 @@ function buildLabRequest(
     // includes every rejected OBR in its output, so an OBR with no entry here
     // is one nothing is known about — null, not a rejection claim.
     result_status: reviewStatus?.status ?? null,
-    // requesting_facility_code mirrors testing_facility_code — see the
-    // comment where facilityConcept is reused for requestingFacilityConcept
-    // above. DISA's data model doesn't distinguish them.
+    // requesting_facility_code is DISA's Facility — see the comment where
+    // facilityConcept is reused for requestingFacilityConcept above.
     requesting_facility_code: requestingFacilityConcept,
-    testing_facility_code: facilityConcept,
+    testing_facility_code: buildLabConcept(site) ?? facilityConcept,
     requesting_doctor: nz(s.Doctor) ?? nz(s.DoctorCode),
     tested_by: nz(s.ReceivedInLabBy) ?? nz(s.TakenBy) ?? nz(s.CollectedBy),
     authorised_by: null,
