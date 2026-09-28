@@ -814,7 +814,7 @@ test("each report indexes only ITS OWN OBR's results", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Task 6 — performer is the lab, requester is a contained PractitionerRole
+// Task 6: performer is the lab, requester is a contained PractitionerRole
 // pairing the doctor with the requesting clinic.
 // ---------------------------------------------------------------------------
 

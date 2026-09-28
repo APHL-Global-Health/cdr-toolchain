@@ -306,13 +306,13 @@ function propText(props: Record<string, unknown> | undefined, key: string): stri
 }
 
 /**
- * Organization for a facility referenced by a report — the testing lab
+ * Organization for a facility referenced by a report: the testing lab
  * (testing_facility_code) or the requesting clinic (requesting_facility_code);
  * facility_code is still out of this slice's scope. Carries the location
  * facilityProperties() already collected onto the concept (v2-transform.ts:168-179)
- * but that DiagnosticReport.performer — a logical reference, kept that way
+ * but that DiagnosticReport.performer, a logical reference, kept that way
  * deliberately (see the comment on `performer` above: LOCNDIC4 has 5 codes all
- * described "Aga Khan") — never surfaces. Without this, an operator mapping
+ * described "Aga Khan"), never surfaces. Without this, an operator mapping
  * facilities sees five identical "Aga Khan" rows and must look each code up in
  * the source by hand.
  *
@@ -602,7 +602,7 @@ export function toFhir(payload: V2Payload, opts: ToFhirOptions): FhirResource[] 
     host.hasMember = members;
   });
 
-  // Organization — one per DISTINCT lab and clinic code referenced by any OBR of
+  // Organization: one per DISTINCT lab and clinic code referenced by any OBR of
   // this lab, not one per OBR: multiple panels routinely share the same
   // testing_facility_code or requesting_facility_code, and duplicate entries
   // sharing one id would repeat the same "N resources, one id" hazard the
