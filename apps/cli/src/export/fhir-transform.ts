@@ -234,9 +234,11 @@ function requestFactExtensions(lr: V2LabRequest, opts: ToFhirOptions): Record<st
   if (rejection.length > 0) out.push({ url: `${EXT}rejection`, extension: rejection });
 
   for (const a of Array.isArray(facts.attributes) ? facts.attributes : []) {
-    const code = fhirText(a?.code ?? null);
+    if (typeof a !== "object" || a === null) continue;
+    const code = fhirText(a.code ?? null);
+    if (code === undefined) continue;
     const value = "valueBoolean" in a ? a.valueBoolean : fhirText(a.valueString ?? null);
-    if (code === undefined || (typeof value !== "boolean" && typeof value !== "string")) continue;
+    if ((typeof value !== "boolean" && typeof value !== "string")) continue;
     out.push({
       url: `${EXT}request-attribute`,
       extension: [

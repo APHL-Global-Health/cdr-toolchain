@@ -964,3 +964,14 @@ test("empty request_facts sends no extension and no locationCode", () => {
   assert.equal("extension" in sr, false);
   assert.equal("locationCode" in sr, false);
 });
+
+test("a malformed attribute entry is skipped, not fatal", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    source_payload: { request_facts: { attributes: [null, { code: "therapy", valueString: "ART" }] } },
+  });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.deepEqual(sr.extension, [
+    { url: "urn:openldr:ext:request-attribute", extension: [{ url: "code", valueCoding: { system: "urn:openldr:cs:request-attribute", code: "therapy" } }, { url: "value", valueString: "ART" }] },
+  ]);
+});
