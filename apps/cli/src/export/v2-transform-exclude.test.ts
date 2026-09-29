@@ -6,7 +6,7 @@ import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
 
-const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 /**
  * Build a minimal SpecimenRecpt fixture that flattenDisa will yield two

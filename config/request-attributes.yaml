@@ -1,0 +1,8 @@
+# Shared by every deployment (no country switch). Maps a DISA source the exporter
+# knows to a code in urn:openldr:cs:request-attribute, the CE vocabulary in
+# openldr_ce packages/terminology/codesystems/openldr-request-attribute.json.
+# Remove a line to stop sending that attribute.
+request_attributes:
+  therapy: therapy              # TXT1DATA frame 21, else REGDAT4 Therapy
+  folder_number: ordering-notes # REGDAT4 FolderNumber; v1 OrderingNotes matched 136 of 136
+  newborn: newborn              # REGDAT4 newborn bit, sent only when set

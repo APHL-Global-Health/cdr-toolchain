@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { TestDataHeader, HEADER_LENGTH } from "disalab";
 import { buildStatusByObr, type PanelIteration } from "./review-status.js";
 
-const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null };
+const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 function header(reviewed: boolean): TestDataHeader {
   const b = Buffer.alloc(HEADER_LENGTH, 0);
@@ -163,14 +163,14 @@ test("an unmeasured deployment yields null status, NOT a defaulted R", () => {
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
     rejectedObrs: new Set(),
-    offsets: { reviewerInitials: null, reviewedAt: null },
+    offsets: { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null },
   });
   assert.equal(s.get(1)?.status, null);
   assert.equal(s.get(1)?.authorisedAt, null);
 });
 
 test("an unmeasured deployment STILL reports X and I, which need no offsets", () => {
-  const unmeasured = { reviewerInitials: null, reviewedAt: null };
+  const unmeasured = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
   const rejected = buildStatusByObr({
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),

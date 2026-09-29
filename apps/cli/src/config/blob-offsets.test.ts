@@ -2,9 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { TestDataHeader, HEADER_LENGTH } from "disalab";
 import { loadBlobOffsets, assertOffsetsPlausible } from "./blob-offsets.js";
+
+const REAL_CONFIG = resolve(import.meta.dirname, "../../../../config");
 
 function dirWith(yaml: string): string {
   const dir = mkdtempSync(join(tmpdir(), "cdr-offsets-"));
@@ -77,7 +79,7 @@ function header(mut: (b: Buffer) => void): TestDataHeader {
   return TestDataHeader.fromBytes(b);
 }
 
-const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null };
+const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 test("self-check passes on plausible printable initials", () => {
   const hs = Array.from({ length: 10 }, () => header((b) => { b[77] = 65; b[78] = 80; b[79] = 66; }));
@@ -92,4 +94,37 @@ test("self-check REJECTS non-printable initials — the wrong-offset signature",
 test("self-check tolerates an all-zero sample — not-reviewed is legitimate", () => {
   const hs = Array.from({ length: 10 }, () => header(() => {}));
   assert.doesNotThrow(() => assertOffsetsPlausible(hs, OFFSETS));
+});
+
+test("loads the analysis, analyser and tester slots", () => {
+  const dir = dirWith(`disa_blob_offsets:
+  reviewer_initials: { start: 77, end: 80 }
+  analysis_at: { start: 15, kind: long-datetime }
+  analyzer_code: { start: 56, end: 61 }
+  tester_initials: { start: 74, end: 77 }
+`);
+  try {
+    const o = loadBlobOffsets("tanzania", dir);
+    assert.deepEqual(o.analysisAt, { start: 15, kind: "long-datetime" });
+    assert.deepEqual(o.analyzerCode, { start: 56, end: 61 });
+    assert.deepEqual(o.testerInitials, { start: 74, end: 77 });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the new slots are null when the yaml does not name them", () => {
+  const dir = dirWith(GOOD);
+  try {
+    const o = loadBlobOffsets("tanzania", dir);
+    assert.equal(o.analysisAt, null);
+    assert.equal(o.analyzerCode, null);
+    assert.equal(o.testerInitials, null);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the real config/tanzania.yaml carries the measured slots", () => {
+  const o = loadBlobOffsets("tanzania", REAL_CONFIG);
+  assert.deepEqual(o.reviewerInitials, { start: 77, end: 80 });
+  assert.deepEqual(o.analysisAt, { start: 15, kind: "long-datetime" });
+  assert.deepEqual(o.analyzerCode, { start: 56, end: 61 });
+  assert.deepEqual(o.testerInitials, { start: 74, end: 77 });
 });

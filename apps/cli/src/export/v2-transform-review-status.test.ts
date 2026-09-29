@@ -26,6 +26,9 @@ test("TZ pin took effect", () => {
 const CONFIGURED_OFFSETS: BlobOffsets = {
   reviewerInitials: { start: 77, end: 80 },
   reviewedAt: { start: 21, kind: "long-datetime" },
+  analysisAt: null,
+  analyzerCode: null,
+  testerInitials: null,
 };
 
 const numericType = String.fromCharCode(1);

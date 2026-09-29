@@ -7,7 +7,7 @@ import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { AuditReport } from "../audit/types.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
 
-const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 // Minimal SpecimenRecpt with one resulted panel and a recorded specimen "B".
 function specimenFixture(): SpecimenRecpt {

@@ -20,3 +20,32 @@ documentation:
 disa_blob_offsets:
   reviewer_initials: { start: 77, end: 80 }
   reviewed_at: { start: 21, kind: long-datetime }
+  # Measured 2026-09-29 against OpenLDR v1 Requests (TZDISAT%), see openldr_ce
+  # docs/superpowers/specs/2026-09-29-v1-request-facts-disa-sources.md.
+  # analysis_at: 169,844 match, 0 mismatch. analyzer_code: 170,465 agree, 0 mismatch.
+  # tester_initials: initials match; 4% of names differ because USERDIC6 changed.
+  analysis_at: { start: 15, kind: long-datetime }
+  analyzer_code: { start: 56, end: 61 }
+  tester_initials: { start: 74, end: 77 }
+
+# Measured 2026-09-29 against OpenLDR v1 Requests (TZDISAT%), same spec as above.
+disa_registration_offsets:
+  request_type: { offset: 333, values: { 0: D, 8: E } }  # 93,161 D and 5,098 E, no exceptions
+  age_years: { offset: 414 }                             # equals v1 AgeInYears on every row
+  age_days: { offset: 417 }                              # 417-418 little-endian, equals v1 AgeInDays
+  newborn: { offset: 409, mask: 2 }                      # 3 of 3 v1 newborns; thin base
+
+# TESTDICT.SECTION letter to v1 HL7SectionCode. "" is a blank section.
+hl7_section_codes:
+  V: VR
+  S: SR
+  C: CH
+  M: MB
+  H: HM
+  P: PAR
+  B: BLB
+  L: OTH
+  G: OTH
+  HT: OTH
+  TB: OTH
+  "": OTH
