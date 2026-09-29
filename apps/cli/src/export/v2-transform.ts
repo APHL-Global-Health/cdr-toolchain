@@ -867,9 +867,12 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const labResults = buildLabResults(obs, opts.codebook, opts.site, isolates, obrOf);
   const susceptibilityTests = buildSusceptibilityTests(obs, opts.codebook, opts.site, isolates, opts.site.default_guideline, obrOf);
 
-  // Date-of-birth age only for a request the registration bytes gave no age.
-  // An unconfigured deployment keeps today's behaviour.
-  if (patient.date_of_birth !== null) {
+  // Date-of-birth age only when the deployment has no registration age
+  // offsets. With offsets configured and zero bytes, v1 has no age, so it
+  // stays null.
+  const ageOffsetsConfigured =
+    opts.factConfig.registration.ageYears !== null || opts.factConfig.registration.ageDays !== null;
+  if (patient.date_of_birth !== null && !ageOffsetsConfigured) {
     for (const r of labRequests) {
       if (r.received_at === null) continue;
       if (r.age_years !== null || r.age_days !== null) continue;

@@ -50,6 +50,14 @@ function isLater(a: PanelIteration, b: PanelIteration): boolean {
   return a.panelIndex > b.panelIndex;
 }
 
+/** True when `a` is an earlier run than `b`: lower test index, then earlier datestamp. */
+function isFirstRun(a: PanelIteration, b: PanelIteration): boolean {
+  if (a.panelIndex !== b.panelIndex) return a.panelIndex < b.panelIndex;
+  const am = a.datestamp?.getTime() ?? Infinity;
+  const bm = b.datestamp?.getTime() ?? Infinity;
+  return am < bm;
+}
+
 type DatetimeSlot = NonNullable<BlobOffsets["reviewedAt"]>;
 
 function decodeAt(header: TestDataHeader, slot: DatetimeSlot): Date | null {
@@ -62,7 +70,9 @@ function decodeReviewedAt(header: TestDataHeader, offsets: BlobOffsets): Date | 
 }
 
 /**
- * Header facts for one OBR. Analysis time comes from the FIRST iteration.
+ * Header facts for one OBR. Analysis time comes from the FIRST run of the OBR, the iteration with the
+ * lowest test index (DISA TESTINDEX). Reruns can carry a later datestamp in
+ * that first slot, so the datestamp alone would pick the rerun's time.
  * People and analyser come from the winner, the same iteration that decides
  * status, so authorised_by and authorised_at never come from different runs.
  * initialsAt reads any short ASCII field, so it serves the analyser code too.
@@ -108,8 +118,8 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
     const obr = obrOf(it.panelCode, baseIndex(it.panelIndex));
     if (obr === null) continue;
     const cur = firstByObr.get(obr);
-    // The earliest is isLater with the arguments swapped.
-    if (cur === undefined || isLater(cur, it)) firstByObr.set(obr, it);
+    // First run: lowest test index. On a tie, the earlier datestamp.
+    if (cur === undefined || isFirstRun(it, cur)) firstByObr.set(obr, it);
   }
 
   const out = new Map<number, ObrStatus>();

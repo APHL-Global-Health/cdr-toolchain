@@ -69,11 +69,13 @@ function buildHeader(tester = "SMM", reviewer = "APB"): TestDataHeader {
 
 /** Tanzania registration layout: request type byte 333 (8 = E), age years 414,
  *  age days 417-418 little-endian, newborn bit 2 at 409. */
-function buildRegistration(newborn: boolean): string {
+function buildRegistration(newborn: boolean, ageBytes = true): string {
   const buf = Buffer.alloc(512, 0);
   buf[333] = 8;
-  buf[414] = 3;
-  buf.writeUInt16LE(1100, 417);
+  if (ageBytes) {
+    buf[414] = 3;
+    buf.writeUInt16LE(1100, 417);
+  }
   if (newborn) buf[409] = 2;
   return buf.toString("latin1");
 }
@@ -222,6 +224,12 @@ test("unconfigured: header facts null, date-of-birth age, only offset-free facts
   assert.equal("attributes" in facts, false);
   assert.equal(facts.registered_by, "Joseph K. Mrema");
   assert.equal(facts.point_of_care, "Paediatric Ward");
+});
+
+test("configured offsets with age bytes 0: age stays null, no date-of-birth fallback", () => {
+  const req = run(specimen({ RegistrationBlob: buildRegistration(false, false) }), TZ_OFFSETS, TZ_FACTS).lab_requests[0]!;
+  assert.equal(req.age_years, null);
+  assert.equal(req.age_days, null);
 });
 
 test("point of care falls back to the raw ward code", () => {

@@ -235,6 +235,17 @@ test("reads analysis time from the FIRST iteration and people from the latest", 
   assert.equal(s.reviewerInitials, "APB");
 });
 
+test("analysis time comes from the lowest test index, not the earliest datestamp", () => {
+  // A rerun can carry a later datestamp in the first slot.
+  const iterations: PanelIteration[] = [
+    { panelCode: "PROT", panelIndex: 1, datestamp: new Date(2016, 2, 8), header: headerWith({ analysis: [2013, 8, 5, 20, 53] }) },
+    { panelCode: "PROT", panelIndex: 2, datestamp: new Date(2013, 7, 5), header: headerWith({ analysis: [2013, 8, 5, 21, 10] }) },
+  ];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 3]]), rejectedObrs: new Set(), offsets: ALL }).get(1)!;
+  assert.equal(s.analysisAt?.getHours(), 20);
+  assert.equal(s.analysisAt?.getMinutes(), 53);
+});
+
 test("an unconfigured slot yields null, never a guess", () => {
   const offsets: BlobOffsets = { ...ALL, analysisAt: null, analyzerCode: null, testerInitials: null };
   const iterations: PanelIteration[] = [
