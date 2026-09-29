@@ -18,6 +18,10 @@ export class REGDAT4 {
   readonly #server: DisaServer | undefined;
   LabNumber: string;
 
+  /** The whole REGDAT4_STATUS blob as latin1, one char per byte. Byte 0 is kept as 0
+   *  (Core.FixBytes would turn it into a space), so single-byte fields can be read. */
+  Raw!: string;
+
   Index!: number;
   UniqueID!: string;
   RegisteredDatetime!: string | null;
@@ -87,6 +91,7 @@ export class REGDAT4 {
   }
 
   Populate(bytes: DisaInput): void {
+    this.Raw = Core.ConvertToBytes(bytes);
     const data = Core.FixBytes(bytes);
 
     this.Index = Core.DisaUIntValue(bytes, 5, 8);
