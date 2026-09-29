@@ -807,7 +807,9 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const rejectionByObr = new Map<number, { code: string; reason: string }>();
   for (const o of flattenDisa(specimen, { includeEmpty: true })) {
     if (o.paramCode !== "RJREA") continue;
-    if (o.valueStr === null || o.valueStr.trim().length === 0) continue;
+    // A populated code rejects the panel even when its COMMDICT text did not
+    // decode (the code then sits only in rawValue). Else the decoded text counts.
+    if (o.rawValue.trim().length === 0 && o.valueStr.trim().length === 0) continue;
     const id = obrOf(o.panelCode, o.panelIndex);
     if (id === null) continue;
     rejectedObrs.add(id);

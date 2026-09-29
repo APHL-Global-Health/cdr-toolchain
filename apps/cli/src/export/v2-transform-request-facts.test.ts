@@ -142,6 +142,7 @@ function run(s: SpecimenRecpt, blobOffsets: BlobOffsets, factConfig: RequestFact
   return toV2(s, { prefix: "", site: DEFAULT_SITE, codebook, blobOffsets, factConfig });
 }
 
+// Reads the real config/tanzania.yaml, so changing those measured offsets fails this test on purpose.
 test("configured: header facts, names, section, blob age and request_facts", () => {
   const req = run(specimen(), TZ_OFFSETS, TZ_FACTS).lab_requests[0]!;
   assert.equal(req.analysis_at, "2018-05-17T14:30:00");
@@ -189,6 +190,22 @@ test("a rejected panel carries the RJREA code and reason; its sibling carries ne
   assert.equal(rejected.rejection_reason, "Spec contaminated with urine");
   assert.equal("rejection_code" in sibling, false);
   assert.equal("rejection_reason" in sibling, false);
+});
+
+test("a rejection code whose text did not decode still rejects the panel", () => {
+  const payload = run(
+    specimen({}, [
+      { code: "COL", index: 1, items: [makeItem("RJREA", "", "CONU", codedType)] },
+      { code: "HIVVL", index: 1, items: [makeItem("HIVVL", "40")] },
+    ]),
+    TZ_OFFSETS,
+    TZ_FACTS,
+  );
+  const req = payload.lab_requests.find((r) => r.obr_set_id === 1)!;
+  const facts = req.source_payload.request_facts as Record<string, unknown>;
+  assert.equal(req.result_status, "X");
+  assert.equal(facts.rejection_code, "CONU");
+  assert.equal("rejection_reason" in facts, false);
 });
 
 test("unconfigured: header facts null, date-of-birth age, only offset-free facts", () => {
