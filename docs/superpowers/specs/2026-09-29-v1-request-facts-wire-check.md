@@ -1,8 +1,12 @@
 # The v1 request facts on the wire, checked against v1
 
-Date: 2026-09-29. Branch `spec/v1-request-facts-wire` at `4398726`. Plan Task 7 step 2.
+Date: 2026-09-29. Branch `spec/v1-request-facts-wire`, first run at `4398726`, re-run at `4a60ce1` after fix `7c3f26e`. Plan Task 7 step 2.
 
-15 facts checked on 136 paired rows. 9 agree with v1 on every row where either side has a value. 4 differ only where USERDIC6 names or blank sections differ, as the findings predicted. 1 (analysis time) falls short of the measured source in the targeted samples. 1 (point of care) could not be checked, because v1 holds no ward in this sample.
+15 facts checked on 136 paired rows. 10 agree with v1 on every row where either side has a value. 4 differ only where USERDIC6 names or blank sections differ, as the findings predicted. 1 (point of care) could not be checked, because v1 holds no ward in this sample.
+
+## Re-run after fix 7c3f26e
+
+Fix `7c3f26e` takes analysis time from the run with the lowest TESTINDEX per OBR, with the earlier DATESTAMP breaking a tie. The same script on the same three samples (main, rejected, therapy) now gives analysis time 136 of 136, 177 of 177 and 68 of 68, with no mismatches. That equals the measured source. Before the fix it was 136, 169 of 177 and 67 of 68. No other fact's counts changed, and the pairing and error counts are the same. The newborn sample was not re-run.
 
 ## Method
 
@@ -38,7 +42,7 @@ Also present, not compared value by value: `note` (clinical info) on 26 ServiceR
 
 | Fact | Rejected, 177 rows | Therapy, 68 rows | Newborn, 6 rows |
 |---|---|---|---|
-| analysis time | 169 match, 8 mismatch | 67 match, 1 mismatch | 6 match |
+| analysis time | 177 match (169 and 8 mismatch before `7c3f26e`) | 68 match (67 and 1 mismatch before) | 6 match (not re-run) |
 | request type | 177 match | 68 match | 6 match |
 | age years | 173 match, 4 both empty | 55 match, 13 both empty | 6 both empty |
 | age days | 173 match, 4 both empty | 56 match, 12 both empty | 6 both empty |
@@ -68,7 +72,7 @@ Staff names. Every name mismatch is a USERDIC6 description that changed after v1
 - TDS0011401#1 tested and registered by: CE `Sylvester Mattunda`, v1 `Sylvester Mbanga  Medical Technologist`
 - TDS0012343#2 tested by: CE `Miriam Matonya`, v1 `Martha Matola` plus a line break and a job title
 
-Analysis time. Every mismatch is an OBR with a rerun, where the exporter picked the wrong run as "first".
+Analysis time, before fix `7c3f26e` only. Every mismatch was an OBR with a rerun, where the exporter picked the wrong run as "first". The re-run has none.
 - TDS0010409#10 GLUC: CE `2013-04-09T13:30`, v1 `2013-04-10T16:28`
 - TDS0011349#1 COL: CE `2013-06-21T13:09`, v1 `2014-06-11T11:29`
 - TDS0011354#1 COL: CE `2013-06-21T13:35`, v1 `2014-06-11T11:30`
@@ -81,7 +85,7 @@ Point of care. The only non-empty CE values:
 - Request type, age, analyser, rejection code and reason, ordering notes, therapy and newborn: as expected. Every paired row agrees.
 - Section: as expected. The findings' 7 misses were letter L and blank sections. The config now maps L to OTH, so only the blank HBSAG rows remain.
 - Staff names: as expected. Initials agree, names differ where USERDIC6 changed. The rate is higher than the 2 to 4% population figure on these small samples (9 of 136 authorised by, 12 of 68 tested by in the therapy sample), because one renamed user (RJB) signs many rows.
-- **Analysis time falls short of the measured source.** The findings measured the first iteration by TESTINDEX: 177 of 177 on the rejected sample and 68 of 68 on the therapy sample. The exporter scores 169 and 67, the same as the findings' "last iteration" figures. The cause is in `apps/cli/src/export/review-status.ts:106-113`. `firstByObr` picks the earliest by DATESTAMP, then by panelIndex (`isLater`, `:46-51`). On the rerun OBRs the base slot (TESTINDEX 1 or 10) carries a DATESTAMP of 2016-03-08, later than the rerun slot (101 or 110). So the exporter takes the rerun, and v1 has the base slot's header time. Example TDS0011349 COL: slot 1 has DATESTAMP 2016-03-08 and header 2014-06-11 11:29, which is v1's value. Slot 101 has DATESTAMP 2014-06-11 and header 2013-06-21 13:09, which CE got. The main sample has no such OBR, so it scores 136 of 136. Not fixed here: this check is read-only.
+- Analysis time: as expected since fix `7c3f26e`. Before it, analysis time fell short of the measured source. The findings measured the first iteration by TESTINDEX: 177 of 177 on the rejected sample and 68 of 68 on the therapy sample. The exporter scores 169 and 67, the same as the findings' "last iteration" figures. The cause is in `apps/cli/src/export/review-status.ts:106-113`. `firstByObr` picks the earliest by DATESTAMP, then by panelIndex (`isLater`, `:46-51`). On the rerun OBRs the base slot (TESTINDEX 1 or 10) carries a DATESTAMP of 2016-03-08, later than the rerun slot (101 or 110). So the exporter takes the rerun, and v1 has the base slot's header time. Example TDS0011349 COL: slot 1 has DATESTAMP 2016-03-08 and header 2014-06-11 11:29, which is v1's value. Slot 101 has DATESTAMP 2014-06-11 and header 2013-06-21 13:09, which CE got. The main sample has no such OBR, so it scores 136 of 136. Fix `7c3f26e` now picks the lowest TESTINDEX, and the re-run matches every row.
 - Point of care: not checkable on this data. v1 `LIMSPointOfCareDesc` has no `~` on any sample row, so v1 holds the facility name and no ward. DISA has a ward on 1 lab (2 rows, `AFYA`, not in WARDDICT). CE sends that raw code, as ruling 4 says. The findings' "ward 66 of 66" came from the gate's `wardComparator`, which counts a DISA ward against an empty v1 ward as a match.
 
 ## Not checked
