@@ -13,7 +13,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { toFhir } from "./fhir-transform.js";
-import { basePayload } from "./fhir-transform.test.js";
+import { basePayload, fullFactsPayload } from "./fhir-transform.test.js";
 import type { V2LabResult, V2Isolate, V2SusceptibilityTest } from "./types.js";
 
 const RUN = process.env.FHIR_CONFORMANCE === "1";
@@ -144,7 +144,15 @@ before(async () => {
   // on every coding — noise that would drown any real structural finding (and
   // it took 12 minutes). Structure, cardinality and invariants are still fully
   // checked; only code-system lookups are skipped.
-  validator = await createValidatorInstance({ sv: "4.0.1", igs: [], locale: "en", txServer: "n/a" });
+  //
+  // extensions (the validator's -extension prefix list): the request facts travel in
+  // urn:openldr:ext:* extensions. They have no published StructureDefinition, so without this the
+  // validator reports each one as "could not be found so is not allowed here". CE reads those exact
+  // URLs, so the URLs stay. This only stops the validator rejecting an extension it cannot resolve.
+  // Structure, cardinality and value[x] types of everything else are still checked.
+  validator = await createValidatorInstance({
+    sv: "4.0.1", igs: [], locale: "en", txServer: "n/a", extensions: ["urn:openldr:ext:"],
+  });
 }, { timeout: 600_000 });
 
 after(() => {
@@ -158,6 +166,48 @@ test(
   async () => {
     const resources = toFhir(richPayload(), TZ);
     assert.ok(resources.length >= 6, `expected a rich resource set, got ${resources.length}`);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const outcomes: any[] = await validator.validate(resources);
+    assert.equal(
+      outcomes.length,
+      resources.length,
+      `expected one outcome per resource (${resources.length}), got ${outcomes.length}`,
+    );
+
+    const failures: string[] = [];
+    for (let i = 0; i < resources.length; i++) {
+      const resource = resources[i]!;
+      const outcome = outcomes[i];
+      const issues: any[] = outcome?.messages ?? outcome?.issues ?? [];
+      const badIssues = issues.filter((iss) => {
+        const level = String(iss.level ?? iss.severity ?? "").toLowerCase();
+        return level === "error" || level === "fatal";
+      });
+      if (badIssues.length > 0) {
+        failures.push(
+          `${resource.resourceType as string}/${resource.id as string}:\n` +
+            badIssues.map((iss) => `  - ${JSON.stringify(iss)}`).join("\n"),
+        );
+      }
+    }
+
+    console.log(`FHIR conformance: validated ${resources.length} resources.`);
+
+    assert.equal(
+      failures.length,
+      0,
+      `${failures.length} resource(s) failed R4 conformance:\n${failures.join("\n")}`,
+    );
+  },
+);
+
+test(
+  "request facts (extensions, locationCode, category, resultsInterpreter) are R4-conformant",
+  { skip: !RUN && "set FHIR_CONFORMANCE=1 to run (downloads a JRE + validator JAR)" },
+  async () => {
+    const resources = toFhir(fullFactsPayload(), TZ);
+    assert.ok(resources.length >= 2, `expected a rich resource set, got ${resources.length}`);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const outcomes: any[] = await validator.validate(resources);

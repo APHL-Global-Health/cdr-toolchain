@@ -8,6 +8,7 @@
 //   result_status <-> DiagnosticReport.status <- hl7-fhir.schema.js:300-314
 import type {
   V2Payload, V2Patient, V2ConceptCode, V2LabRequest, V2LabResult, V2Isolate, V2SusceptibilityTest,
+  V2RequestFacts,
 } from "./types.js";
 import { fhirId, fhirDateTime, fhirText } from "./fhir-primitives.js";
 import { LAB_SYSTEM_ID } from "./site-config.js";
@@ -20,6 +21,13 @@ export interface ToFhirOptions {
    *  (UTC+2) timestamps 2h earlier with no error. */
   tzOffset: string;
 }
+
+/** Prefix of every OpenLDR extension URL that CE reads on a ServiceRequest. */
+const EXT = "urn:openldr:ext:";
+/** Code system for the request attribute codes (therapy, newborn, ...). */
+const REQUEST_ATTRIBUTE_SYSTEM = "urn:openldr:cs:request-attribute";
+/** HL7 v2 diagnostic service section table, used for DiagnosticReport.category. */
+const SECTION_SYSTEM = "http://terminology.hl7.org/CodeSystem/v2-0074";
 
 /** V2 sex (M/F/U/I) -> FHIR administrative-gender. */
 function toGender(sex: string | null): string | undefined {
@@ -209,11 +217,71 @@ function specimenResource(
  * ⚠ FHIR has no native OBR set-id field; `identifier` carries it, matching the
  * existing urn:openldr:request-id / folder-no / national-id pattern.
  */
+/** Read request_facts off source_payload (free JSON). Absent or malformed means no facts. */
+function requestFacts(lr: V2LabRequest): V2RequestFacts {
+  const f = (lr.source_payload as Record<string, unknown> | null | undefined)?.request_facts;
+  return typeof f === "object" && f !== null && !Array.isArray(f) ? (f as V2RequestFacts) : {};
+}
+
+/** The v1 request facts as the extensions CE reads. Absent values are skipped, and an
+ *  extension with no sub-extensions is dropped. */
+function requestFactExtensions(lr: V2LabRequest, opts: ToFhirOptions): Record<string, unknown>[] {
+  const facts = requestFacts(lr);
+  const out: Record<string, unknown>[] = [];
+  const analysis = fhirDateTime(lr.analysis_at, opts.tzOffset);
+  if (analysis !== undefined) out.push({ url: `${EXT}analysis-time`, valueDateTime: analysis });
+  const registeredBy = fhirText(facts.registered_by ?? null);
+  if (registeredBy !== undefined) out.push({ url: `${EXT}registered-by`, valueString: registeredBy });
+  const testedBy = fhirText(lr.tested_by);
+  if (testedBy !== undefined) out.push({ url: `${EXT}tested-by`, valueString: testedBy });
+  const requestType = fhirText(facts.request_type ?? null);
+  if (requestType !== undefined) out.push({ url: `${EXT}request-type`, valueCode: requestType });
+
+  const age: Record<string, unknown>[] = [];
+  if (typeof lr.age_years === "number") age.push({ url: "years", valueInteger: lr.age_years });
+  if (typeof lr.age_days === "number") age.push({ url: "days", valueInteger: lr.age_days });
+  if (age.length > 0) out.push({ url: `${EXT}age-at-request`, extension: age });
+
+  const analyzer = fhirText(facts.analyzer_code ?? null);
+  if (analyzer !== undefined) out.push({ url: `${EXT}analyzer`, valueCode: analyzer });
+
+  const rejection: Record<string, unknown>[] = [];
+  const rejCode = fhirText(facts.rejection_code ?? null);
+  if (rejCode !== undefined) rejection.push({ url: "code", valueCode: rejCode });
+  const rejReason = fhirText(facts.rejection_reason ?? null);
+  if (rejReason !== undefined) rejection.push({ url: "reason", valueString: rejReason });
+  if (rejection.length > 0) out.push({ url: `${EXT}rejection`, extension: rejection });
+
+  for (const a of Array.isArray(facts.attributes) ? facts.attributes : []) {
+    const code = fhirText(a?.code ?? null);
+    if (code === undefined) continue;
+    let value: Record<string, unknown> | undefined;
+    if ("valueBoolean" in a && typeof a.valueBoolean === "boolean") {
+      value = { url: "value", valueBoolean: a.valueBoolean };
+    } else if ("valueString" in a) {
+      const v = fhirText(a.valueString ?? null);
+      if (v !== undefined) value = { url: "value", valueString: v };
+    }
+    out.push({
+      url: `${EXT}request-attribute`,
+      extension: [
+        { url: "code", valueCoding: { system: REQUEST_ATTRIBUTE_SYSTEM, code } },
+        ...(value !== undefined ? [value] : []),
+      ],
+    });
+  }
+  return out;
+}
+
 function requestResources(
   lr: V2LabRequest, patientRef: string, obrId: string, specimenId: string | undefined,
   opts: ToFhirOptions,
 ): FhirResource[] {
   const out: FhirResource[] = [];
+  const ext = requestFactExtensions(lr, opts);
+  const poc = fhirText(requestFacts(lr).point_of_care ?? null);
+  const section = fhirText(lr.section_code);
+  const authorisedBy = fhirText(lr.authorised_by);
   const panel = toCodeableConcept(lr.panel_code) ?? UNKNOWN_CODE;
   const identifier = [
     ...(fhirText(lr.request_id) !== undefined
@@ -235,6 +303,8 @@ function requestResources(
     ...(fhirText(lr.clinical_info) !== undefined
       ? { note: [{ text: fhirText(lr.clinical_info) }] } : {}),
     ...requesterFields(lr),
+    ...(poc !== undefined ? { locationCode: [{ text: poc }] } : {}),
+    ...(ext.length > 0 ? { extension: ext } : {}),
   }));
 
   out.push(compact({
@@ -244,6 +314,8 @@ function requestResources(
     code: panel,                               // CE-required
     subject: { reference: patientRef },
     identifier,
+    ...(section !== undefined ? { category: [{ coding: [{ system: SECTION_SYSTEM, code: section }] }] } : {}),
+    ...(authorisedBy !== undefined ? { resultsInterpreter: [{ display: authorisedBy }] } : {}),
     ...(specimenId !== undefined ? { specimen: [{ reference: `Specimen/${specimenId}` }] } : {}),
     effectiveDateTime: fhirDateTime(collectionTime(lr), opts.tzOffset),
     issued: fhirDateTime(lr.authorised_at, opts.tzOffset),
