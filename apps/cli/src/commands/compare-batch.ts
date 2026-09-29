@@ -34,6 +34,7 @@ import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
+import { loadRequestFactConfig, type RequestFactConfig } from "../config/request-fact-config.js";
 
 interface BatchOpts {
   where?: string;
@@ -194,6 +195,7 @@ function buildV2Payload(
   codebook: Codebook,
   docConfig: DocConfig,
   blobOffsets: BlobOffsets,
+  factConfig: RequestFactConfig,
 ): V2Payload {
   const auditReport = auditFromSpecimen(specimen, prefix, codebook, docConfig.panels);
   return toV2(specimen, {
@@ -203,6 +205,7 @@ function buildV2Payload(
     auditReport,
     excludeObs: (o) => isDocumentationObs(o, codebook, docConfig),
     blobOffsets,
+    factConfig,
   });
 }
 
@@ -331,6 +334,7 @@ export function registerCompareBatchCommand(program: Command): void {
       // Loaded ONCE per batch, not per specimen — loadBlobOffsets does file
       // I/O and toV2 runs per lab.
       let blobOffsets: BlobOffsets | null = null;
+      let factConfig: RequestFactConfig | null = null;
       let v2PayloadsBuilt = 0;
       const v2PerField: Record<string, V2FieldStats> = {};
       const v2ResultPerField: Record<string, V2FieldStats> = {};
@@ -351,6 +355,7 @@ export function registerCompareBatchCommand(program: Command): void {
         await closePool();
         docConfig = loadCountryDocConfig(opts.country ?? config.country);
         blobOffsets = loadBlobOffsets(opts.country ?? config.country);
+        factConfig = loadRequestFactConfig(opts.country ?? config.country);
         for (const def of V2_REQUEST_FIELDS) {
           v2PerField[def.field] = { match: 0, mismatch: 0, only_v2: 0, only_v1: 0 };
         }
@@ -420,8 +425,8 @@ export function registerCompareBatchCommand(program: Command): void {
             // Build the shipping payload and grade it against v1 — the leg the
             // gate has never looked at.
             let v2Payload: V2Payload | null = null;
-            if (runV2 && codebook !== null && docConfig !== null && blobOffsets !== null) {
-              v2Payload = buildV2Payload(disa, prefix, codebook, docConfig, blobOffsets);
+            if (runV2 && codebook !== null && docConfig !== null && blobOffsets !== null && factConfig !== null) {
+              v2Payload = buildV2Payload(disa, prefix, codebook, docConfig, blobOffsets, factConfig);
               v2PayloadsBuilt++;
               // v1's grain is (RequestID, OBRSetID) and v2 now matches it, so
               // pair on the NATURAL key. `v1` above is only the LOWEST OBRSetID

@@ -13,7 +13,11 @@ import { buildStatusByObr, type ObrStatus } from "./review-status.js";
 import type { Codebook } from "./codebook.js";
 import { buildLabConcept, type SiteConfig } from "./site-config.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
+import type { RequestFactConfig } from "../config/request-fact-config.js";
+import { readRegistrationFacts, type RegistrationFacts } from "./registration-facts.js";
 import type {
+  V2RequestAttribute,
+  V2RequestFacts,
   V2ConceptCode,
   V2DataQuality,
   V2Isolate,
@@ -260,6 +264,9 @@ function buildLabRequest(
   rejection: DisaRejection,
   specimenAnomalous: boolean,
   reviewStatus: ObrStatus | null,
+  rejectionReason: { code: string; reason: string } | null,
+  registration: RegistrationFacts,
+  factConfig: RequestFactConfig,
 ): V2LabRequest {
   const requestId = prefix + s.LabNumber.trim();
   const facility = s.Facility ?? null;
@@ -318,7 +325,35 @@ function buildLabRequest(
   // sourced from Facility.Code.)
   const requestingFacilityConcept = facilityConcept;
 
-  const sectionCode = panel?.section ?? null;
+  // v1 sends HL7SectionCode, not the TESTDICT letter. A missing panel entry and a
+  // blank section both look up the "" key. An unmapped letter gives null.
+  const sectionCode = factConfig.sectionCodes.get(panel?.section ?? "") ?? null;
+
+  // USERDIC6 name for a set of initials, else the initials themselves.
+  const person = (initials: string | null): string | null =>
+    initials === null ? null : codebook.userEntry(initials)?.description ?? initials;
+
+  const codes = factConfig.attributeCodes;
+  const attributes: V2RequestAttribute[] = [];
+  const therapyText = nz(s.TherapyText) ?? nz(s.Therapy);
+  if (codes.therapy !== null && therapyText !== null) attributes.push({ code: codes.therapy, valueString: therapyText });
+  const folderNo = nz(s.FolderNo);
+  if (codes.folderNumber !== null && folderNo !== null) attributes.push({ code: codes.folderNumber, valueString: folderNo });
+  if (codes.newborn !== null && registration.newborn) attributes.push({ code: codes.newborn, valueBoolean: true });
+
+  // Facts v2 has no field for. Only keys with a value are sent.
+  const registeredBy = person(nz(s.RegisteredBy));
+  const pointOfCare = wardDescription ?? nz(s.WardClinic);
+  const analyzerCode = nz(reviewStatus?.analyzerCode ?? null);
+  const requestFacts: V2RequestFacts = {
+    ...(registeredBy !== null ? { registered_by: registeredBy } : {}),
+    ...(registration.requestType !== null ? { request_type: registration.requestType } : {}),
+    ...(analyzerCode !== null ? { analyzer_code: analyzerCode } : {}),
+    ...(rejectionReason !== null && rejectionReason.code.length > 0 ? { rejection_code: rejectionReason.code } : {}),
+    ...(rejectionReason !== null && rejectionReason.reason.length > 0 ? { rejection_reason: rejectionReason.reason } : {}),
+    ...(pointOfCare !== null ? { point_of_care: pointOfCare } : {}),
+    ...(attributes.length > 0 ? { attributes } : {}),
+  };
 
   return {
     request_id: requestId,
@@ -330,14 +365,16 @@ function buildLabRequest(
     collected_datetime: disaToIso(s.CollectedDateTime),
     received_at: disaToIso(s.ReceivedInLabDateTime) ?? disaToIso(s.RegisteredDateTime),
     registered_at: disaToIso(s.RegisteredDateTime),
-    analysis_at: null,   // disalab doesn't expose analysis_at on SpecimenRecpt
+    analysis_at: reviewStatus?.analysisAt ? dateToLocalIso(reviewStatus.analysisAt) : null,
     authorised_at: reviewStatus?.authorisedAt ? dateToLocalIso(reviewStatus.authorisedAt) : null,
     clinical_info: nz(s.ClinicalDiagnosisText) ?? nz(s.ClinicalDiagnosis),
     icd10_codes: nz(s.ICD10),
     therapy: nz(s.TherapyText) ?? nz(s.Therapy),
     priority: nz(s.Priority),
-    age_years: null, // populated below if we can compute
-    age_days: null,
+    // From the registration bytes when measured. toV2 falls back to the date of
+    // birth only when both are null.
+    age_years: registration.ageYears,
+    age_days: registration.ageDays,
     sex: nz(s.Sex),
     patient_class: null, // not surfaced on SpecimenRecpt
     section_code: sectionCode,
@@ -356,8 +393,10 @@ function buildLabRequest(
     requesting_facility_code: requestingFacilityConcept,
     testing_facility_code: buildLabConcept(site) ?? facilityConcept,
     requesting_doctor: nz(s.Doctor) ?? nz(s.DoctorCode),
-    tested_by: nz(s.ReceivedInLabBy) ?? nz(s.TakenBy) ?? nz(s.CollectedBy),
-    authorised_by: null,
+    // The tester initials in the result header. Never ReceivedInLabBy: that is
+    // who received the specimen, not who tested it.
+    tested_by: person(reviewStatus?.testerInitials ?? null),
+    authorised_by: person(reviewStatus?.reviewerInitials ?? null),
     source_payload: {
       // Raw DISA ward code, preserved even when we have a resolved name —
       // downstream consumers may want to round-trip the original key.
@@ -366,6 +405,7 @@ function buildLabRequest(
       // when the (LOCATION, WARD) pair wasn't in the dictionary.
       ...(wardDescription !== null ? { ward: wardDescription } : {}),
       test_orders: s.TestOrders.map((t) => String(t).trim()).filter((t) => t.length > 0),
+      request_facts: requestFacts,
     },
   };
 }
@@ -661,6 +701,10 @@ export interface ToV2Opts {
    *  startup via loadBlobOffsets(country) — never call that inside toV2,
    *  which runs per specimen and would do file I/O in a hot loop. */
   blobOffsets: BlobOffsets;
+  /** Registration offsets, section codes and attribute codes, loaded ONCE at
+   *  startup via loadRequestFactConfig(country). Never call that inside toV2,
+   *  which runs per specimen and would do file I/O in a hot loop. */
+  factConfig: RequestFactConfig;
 }
 
 function buildDataQualityBlock(report: AuditReport): V2DataQuality | null {
@@ -759,13 +803,19 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   // padding) and not a header status flag. flattenDisa strips RJREA from the
   // normal stream, so re-scan with includeEmpty.
   const rejectedObrs = new Set<number>();
+  // The coded reason (RawValue) and its decoded text (Value) per OBR. First wins.
+  const rejectionByObr = new Map<number, { code: string; reason: string }>();
   for (const o of flattenDisa(specimen, { includeEmpty: true })) {
     if (o.paramCode !== "RJREA") continue;
     if (o.valueStr === null || o.valueStr.trim().length === 0) continue;
     const id = obrOf(o.panelCode, o.panelIndex);
     if (id === null) continue;
     rejectedObrs.add(id);
+    if (!rejectionByObr.has(id)) {
+      rejectionByObr.set(id, { code: o.rawValue.trim(), reason: String(o.value).trim() });
+    }
   }
+  const registration = readRegistrationFacts(specimen.RegistrationBlob ?? null, opts.factConfig.registration);
   const statusByObr = buildStatusByObr({
     iterations: specimen.TestResults.map((t) => ({
       panelCode: String(t.TESTCODE ?? "").trim(),
@@ -783,6 +833,9 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
     buildLabRequest(
       specimen, obr, opts.prefix, opts.site, opts.codebook, rejection, specimenAnomalous,
       statusByObr.get(obr.obr_set_id) ?? null,
+      rejectionByObr.get(obr.obr_set_id) ?? null,
+      registration,
+      opts.factConfig,
     ),
   );
 
@@ -812,9 +865,12 @@ export function toV2(specimen: SpecimenRecpt, opts: ToV2Opts): V2Payload {
   const labResults = buildLabResults(obs, opts.codebook, opts.site, isolates, obrOf);
   const susceptibilityTests = buildSusceptibilityTests(obs, opts.codebook, opts.site, isolates, opts.site.default_guideline, obrOf);
 
+  // Date-of-birth age only for a request the registration bytes gave no age.
+  // An unconfigured deployment keeps today's behaviour.
   if (patient.date_of_birth !== null) {
     for (const r of labRequests) {
       if (r.received_at === null) continue;
+      if (r.age_years !== null || r.age_days !== null) continue;
       r.age_years = ageYearsBetween(patient.date_of_birth, r.received_at);
       r.age_days = ageDaysBetween(patient.date_of_birth, r.received_at);
     }

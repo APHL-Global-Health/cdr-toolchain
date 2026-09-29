@@ -11,6 +11,10 @@ export interface StubOpts {
   specimens?: Record<string, string>;
   antibiotics?: string[];
   pathogenIdParams?: string[];
+  /** panelCode -> TESTDICT.SECTION. Absent means section null. */
+  panelSections?: Record<string, string>;
+  /** USERDIC6 initials -> full name. Absent means no entry. */
+  users?: Record<string, string>;
 }
 
 export function stubCodebook(opts: StubOpts = {}): Codebook {
@@ -30,7 +34,7 @@ export function stubCodebook(opts: StubOpts = {}): Codebook {
     panelEntry: (c) => {
       const d = opts.panels?.[c];
       if (d === undefined) return undefined;
-      return { code: c, description: d, abbreviation: "", section: null } as PanelEntry;
+      return { code: c, description: d, abbreviation: "", section: opts.panelSections?.[c] ?? null } as PanelEntry;
     },
     specimenEntry: (c) => {
       const d = opts.specimens?.[c];
@@ -40,7 +44,10 @@ export function stubCodebook(opts: StubOpts = {}): Codebook {
     },
     organismEntry: () => undefined,
     organismCategory: () => "none",
-    userEntry: () => undefined,
+    userEntry: (c) => {
+      const d = opts.users?.[c];
+      return d === undefined ? undefined : { code: c, description: d };
+    },
     stats: { parmRows: 0, testRows: 0, commOrganismRows: 0, commSpecimenRows: 0, userRows: 0 },
   };
 }

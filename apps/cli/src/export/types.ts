@@ -27,6 +27,23 @@ export interface V2Patient {
   patient_data: Record<string, unknown>;
 }
 
+/** A rare request fact for CE's lab_request_attributes (urn:openldr:cs:request-attribute). */
+export type V2RequestAttribute =
+  | { code: string; valueString: string }
+  | { code: string; valueBoolean: boolean };
+
+/** Request facts v2 has no field for. They ride in source_payload.request_facts, which v2
+ *  stores as free JSON, and toFhir sends them to CE. Every field is absent when unknown. */
+export interface V2RequestFacts {
+  registered_by?: string;
+  request_type?: string;
+  analyzer_code?: string;
+  rejection_code?: string;
+  rejection_reason?: string;
+  point_of_care?: string;
+  attributes?: V2RequestAttribute[];
+}
+
 export interface V2LabRequest {
   request_id: string;
   /**

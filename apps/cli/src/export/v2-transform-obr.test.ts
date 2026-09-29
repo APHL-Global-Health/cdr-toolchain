@@ -5,6 +5,7 @@ import { toV2 } from "./v2-transform.js";
 import { DEFAULT_SITE, siteWithLab } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
+import { EMPTY_REQUEST_FACT_CONFIG } from "../config/request-fact-config.js";
 
 const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
@@ -80,6 +81,7 @@ const opts = () => ({
     panels: { COL: "Collection", RNAHF: "RNA HF", ROTEL: "Rotavirus", MRCSW: "MC&S", MICBM: "Ident", MSENS: "Sensitivity" },
   }),
   blobOffsets: UNCONFIGURED_OFFSETS,
+  factConfig: EMPTY_REQUEST_FACT_CONFIG,
 });
 
 test("a 2-panel lab emits 2 lab_requests with dense obr_set_ids", () => {

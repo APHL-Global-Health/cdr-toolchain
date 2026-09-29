@@ -26,6 +26,7 @@ import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { assertOffsetsPlausible, DEFAULT_SELF_CHECK_SAMPLE, loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
+import { loadRequestFactConfig, type RequestFactConfig } from "../config/request-fact-config.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
 import { postFhirResources } from "../api/ce-client.js";
@@ -398,6 +399,9 @@ interface ProcessLabContext {
   /** Measured per-deployment TESTDATA_STATUS blob offsets, loaded ONCE at
    *  startup (below) — never per lab, since loadBlobOffsets does file I/O. */
   blobOffsets: BlobOffsets;
+  /** Registration offsets, section codes and attribute codes, loaded ONCE next to
+   *  blobOffsets. Never per lab, since loadRequestFactConfig does file I/O. */
+  factConfig: RequestFactConfig;
   prefix: string;
   /** Site config carrying the configured testing laboratory (siteWithLab), used for every
    *  toV2 call in place of the old hardcoded DEFAULT_SITE. */
@@ -579,6 +583,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
           auditReport,
           excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
           blobOffsets: ctx.blobOffsets,
+          factConfig: ctx.factConfig,
         });
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(
@@ -611,6 +616,7 @@ async function processOneLab(disaLabNo: string, ctx: ProcessLabContext): Promise
       auditReport,
       excludeObs: (o) => isDocumentationObs(o, ctx.codebook, ctx.docConfig),
       blobOffsets: ctx.blobOffsets,
+      factConfig: ctx.factConfig,
     });
 
     // -------- emit payloads (stdin to `openldr ingest stream`) --------
@@ -1073,6 +1079,7 @@ export function registerExportBatchCommand(program: Command): void {
       // Measured per-deployment TESTDATA_STATUS blob offsets, loaded ONCE for
       // the whole batch — loadBlobOffsets does file I/O and toV2 runs per lab.
       const blobOffsets = loadBlobOffsets(opts.country ?? config.country);
+      const factConfig = loadRequestFactConfig(opts.country ?? config.country);
 
       // Skip v2 POST config resolution entirely when we won't POST via v2
       // anyway: --dry-run runs the gates without sending, --emit-payloads
@@ -1167,6 +1174,7 @@ export function registerExportBatchCommand(program: Command): void {
         codebook,
         docConfig,
         blobOffsets,
+        factConfig,
         prefix,
         site,
         postConfig,
