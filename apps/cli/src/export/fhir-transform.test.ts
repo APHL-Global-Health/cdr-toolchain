@@ -947,3 +947,20 @@ test("a rejection with a code and no reason sends only the code", () => {
     { url: "urn:openldr:ext:rejection", extension: [{ url: "code", valueCode: "CONU" }] },
   ]);
 });
+
+test("an attribute with a blank value sends no request-attribute extension", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    source_payload: { request_facts: { attributes: [{ code: "therapy", valueString: "  " }] } },
+  });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.equal("extension" in sr, false);
+});
+
+test("empty request_facts sends no extension and no locationCode", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, { source_payload: { request_facts: {} } });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.equal("extension" in sr, false);
+  assert.equal("locationCode" in sr, false);
+});

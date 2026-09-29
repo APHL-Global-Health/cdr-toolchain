@@ -198,25 +198,6 @@ function specimenResource(
   });
 }
 
-/**
- * One OBR = one ServiceRequest + one DiagnosticReport.
- *
- * OBR is the ORDER, so ServiceRequest + DiagnosticReport is the idiomatic
- * mapping, not a workaround.
- *
- * ⚠ The report is emitted even when the OBR has NO results — an
- * ordered-but-unresulted panel (v1 status 'I') or a superseded iteration (v1
- * keeps the order row with zero results). The spec's first draft said report
- * "for the surviving iterations only", but that sentence was written without
- * reading this file: `no DiagnosticReport.result key when there are no results`
- * (fhir-transform.test.ts) already pins the opposite as a DELIBERATE decision —
- * the report is emitted, and `result` is simply omitted. Its `status` carries
- * the truth (partial / registered / cancelled), so an empty report asserts
- * nothing false, and keeping it preserves behaviour for single-panel labs.
- *
- * ⚠ FHIR has no native OBR set-id field; `identifier` carries it, matching the
- * existing urn:openldr:request-id / folder-no / national-id pattern.
- */
 /** Read request_facts off source_payload (free JSON). Absent or malformed means no facts. */
 function requestFacts(lr: V2LabRequest): V2RequestFacts {
   const f = (lr.source_payload as Record<string, unknown> | null | undefined)?.request_facts;
@@ -254,25 +235,38 @@ function requestFactExtensions(lr: V2LabRequest, opts: ToFhirOptions): Record<st
 
   for (const a of Array.isArray(facts.attributes) ? facts.attributes : []) {
     const code = fhirText(a?.code ?? null);
-    if (code === undefined) continue;
-    let value: Record<string, unknown> | undefined;
-    if ("valueBoolean" in a && typeof a.valueBoolean === "boolean") {
-      value = { url: "value", valueBoolean: a.valueBoolean };
-    } else if ("valueString" in a) {
-      const v = fhirText(a.valueString ?? null);
-      if (v !== undefined) value = { url: "value", valueString: v };
-    }
+    const value = "valueBoolean" in a ? a.valueBoolean : fhirText(a.valueString ?? null);
+    if (code === undefined || (typeof value !== "boolean" && typeof value !== "string")) continue;
     out.push({
       url: `${EXT}request-attribute`,
       extension: [
         { url: "code", valueCoding: { system: REQUEST_ATTRIBUTE_SYSTEM, code } },
-        ...(value !== undefined ? [value] : []),
+        typeof value === "boolean" ? { url: "value", valueBoolean: value } : { url: "value", valueString: value },
       ],
     });
   }
   return out;
 }
 
+/**
+ * One OBR = one ServiceRequest + one DiagnosticReport.
+ *
+ * OBR is the ORDER, so ServiceRequest + DiagnosticReport is the idiomatic
+ * mapping, not a workaround.
+ *
+ * ⚠ The report is emitted even when the OBR has NO results — an
+ * ordered-but-unresulted panel (v1 status 'I') or a superseded iteration (v1
+ * keeps the order row with zero results). The spec's first draft said report
+ * "for the surviving iterations only", but that sentence was written without
+ * reading this file: `no DiagnosticReport.result key when there are no results`
+ * (fhir-transform.test.ts) already pins the opposite as a DELIBERATE decision —
+ * the report is emitted, and `result` is simply omitted. Its `status` carries
+ * the truth (partial / registered / cancelled), so an empty report asserts
+ * nothing false, and keeping it preserves behaviour for single-panel labs.
+ *
+ * ⚠ FHIR has no native OBR set-id field; `identifier` carries it, matching the
+ * existing urn:openldr:request-id / folder-no / national-id pattern.
+ */
 function requestResources(
   lr: V2LabRequest, patientRef: string, obrId: string, specimenId: string | undefined,
   opts: ToFhirOptions,
