@@ -1,6 +1,7 @@
 import type { AUDTDATA, SpecimenRecpt } from "disalab";
 import { flattenDisa, supersedePanelIterations } from "../compare/result-mapping.js";
 import type { Codebook } from "./codebook.js";
+import { censorNumeric } from "./numeric-censoring.js";
 import { collectOrderedPanels } from "./panels.js";
 import type { V1LabResult, V1Payload, V1Request } from "./types.js";
 
@@ -377,6 +378,18 @@ export function toV1(specimen: SpecimenRecpt, opts: ToV1Opts): V1Payload {
     // there is just the HL7 status flag (commonly "F"), not a coded result.
     const codedValue = (typeChar === 5 || typeChar === 6) ? "" : o.rawValue.trim();
 
+    // A numeric result outside the reporting range shows as v1 shows it:
+    // "< 20" or "> 10000000". SIValue keeps the measured value, as v1's own
+    // rows do (v1 stores SIValue 0 beside LIMSRptResult "< 20").
+    let rptResult = o.valueStr;
+    if ((typeChar === 1 || typeChar === 2) && isNumericRow) {
+      const censored = censorNumeric(o.value as number, {
+        lowLimit: parm?.lowLimit ?? null,
+        highLimit: parm?.highLimit ?? null,
+      });
+      if (censored.comparator !== null) rptResult = `${censored.comparator} ${censored.value}`;
+    }
+
     labResults.push({
       DateTimeStamp: null,
       Versionstamp: null,
@@ -399,7 +412,7 @@ export function toV1(specimen: SpecimenRecpt, opts: ToV1Opts): V1Payload {
       Note: false,
       LIMSObservationCode: o.paramCode,
       LIMSObservationDesc: s(o.paramDesc ?? parm?.description),
-      LIMSRptResult: o.valueStr,
+      LIMSRptResult: rptResult,
       LIMSRptUnits: s(parm?.units),
       LIMSRptFlag: "",
       LIMSRptRange: s(parm?.reference),
