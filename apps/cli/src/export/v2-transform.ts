@@ -15,6 +15,7 @@ import { buildLabConcept, type SiteConfig } from "./site-config.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
 import type { RequestFactConfig } from "../config/request-fact-config.js";
 import { readRegistrationFacts, type RegistrationFacts } from "./registration-facts.js";
+import { censorNumeric } from "./numeric-censoring.js";
 import type {
   V2RequestAttribute,
   V2RequestFacts,
@@ -526,6 +527,17 @@ function buildLabResults(
     }
 
     const parm = codebook.paramEntry(o.paramCode);
+    let resultValue = nz(o.valueStr);
+    let comparator: "<" | ">" | null = null;
+    if (isNumeric && numericValue !== null) {
+      const censored = censorNumeric(numericValue, {
+        lowLimit: parm?.lowLimit ?? null,
+        highLimit: parm?.highLimit ?? null,
+      });
+      numericValue = censored.value;
+      comparator = censored.comparator;
+      if (comparator !== null) resultValue = `${comparator} ${censored.value}`;
+    }
     out.push({
       source_test_code: o.panelCode,
       obr_set_id: obrSetId,
@@ -537,7 +549,7 @@ function buildLabResults(
         observationSystemId(o.paramCode, codebook, site),
         "test",
       ),
-      result_value: nz(o.valueStr),
+      result_value: resultValue,
       result_type: v2ResultTypeFromDisaType(o.type),
       numeric_value: numericValue,
       coded_value: codedValue,
@@ -553,6 +565,7 @@ function buildLabResults(
       raw_result: {
         disa_type_code: o.type.length > 0 ? o.type.charCodeAt(0) : null,
         ...(o.rawValue.length > 0 && o.rawValue !== o.valueStr ? { raw_value: o.rawValue } : {}),
+        ...(comparator !== null ? { numeric_comparator: comparator } : {}),
       },
     });
   }

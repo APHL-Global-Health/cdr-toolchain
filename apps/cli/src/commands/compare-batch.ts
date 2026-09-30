@@ -34,6 +34,7 @@ import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
+import { loadParmdictOffsets } from "../config/parmdict-offsets.js";
 import { loadRequestFactConfig, type RequestFactConfig } from "../config/request-fact-config.js";
 
 interface BatchOpts {
@@ -351,7 +352,10 @@ export function registerCompareBatchCommand(program: Command): void {
         v1_results_documentation_excluded: 0,
       };
       if (runV2) {
-        codebook = await loadCodebook(buildServer(config.connectionString));
+        codebook = await loadCodebook(
+          buildServer(config.connectionString),
+          loadParmdictOffsets(opts.country ?? config.country),
+        );
         await closePool();
         docConfig = loadCountryDocConfig(opts.country ?? config.country);
         blobOffsets = loadBlobOffsets(opts.country ?? config.country);

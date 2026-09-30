@@ -2,6 +2,7 @@ import mssql from "mssql";
 import { getPool } from "disalab";
 import { COMMDICT, PARMDICT, TESTDICT } from "disalab";
 import type { DisaServer } from "disalab";
+import type { ParmdictOffsets } from "../config/parmdict-offsets.js";
 
 // PARMDICT.CONTEXT values discovered by inspecting the live DisaGlobal
 // dictionary on a Tanzania deployment. These are DISA-product-level
@@ -96,6 +97,10 @@ export interface ParmEntry {
   context: number;
   units: string;
   reference: string;
+  /** Reporting range low limit from PARMDICT_STATUS. Null when unconfigured or 0 (no limit). */
+  lowLimit: number | null;
+  /** Reporting range high limit from PARMDICT_STATUS. Null when unconfigured or 0 (no limit). */
+  highLimit: number | null;
 }
 
 export interface CommEntry {
@@ -142,7 +147,30 @@ export interface Codebook {
   };
 }
 
-export async function loadCodebook(server: DisaServer): Promise<Codebook> {
+function readFloat32Limit(raw: string, offset: number): number | null {
+  if (offset < 0 || offset + 4 > raw.length) return null;
+  const b = Buffer.alloc(4);
+  for (let i = 0; i < 4; i++) b[i] = raw.charCodeAt(offset + i) & 0xff;
+  const v = b.readFloatLE(0);
+  return Number.isFinite(v) && v !== 0 ? v : null;
+}
+
+/**
+ * Reads the reporting range from PARMDICT.Raw (a latin1 string, one char per
+ * byte, byte 0 kept). Zero means "no limit", so it gives null.
+ */
+export function readParmLimits(
+  raw: string,
+  offsets: ParmdictOffsets | null | undefined,
+): { lowLimit: number | null; highLimit: number | null } {
+  if (!offsets) return { lowLimit: null, highLimit: null };
+  return {
+    lowLimit: readFloat32Limit(raw, offsets.lowLimit),
+    highLimit: readFloat32Limit(raw, offsets.highLimit),
+  };
+}
+
+export async function loadCodebook(server: DisaServer, parmdictOffsets?: ParmdictOffsets | null): Promise<Codebook> {
   // PARMDICT has no SQL CODE column (CODE is decoded from the blob).
   // PARMDICT.ACTIVE is whitespace for active rows (not "Y"), so any active
   // filter would silently drop everything — pull the lot. ~1.5k rows; one
@@ -164,6 +192,7 @@ export async function loadCodebook(server: DisaServer): Promise<Codebook> {
       context: p.CONTEXT,
       units: p.UNITS.trim(),
       reference: p.REFERENCE.trim(),
+      ...readParmLimits(p.Raw, parmdictOffsets),
     });
   }
 

@@ -15,6 +15,8 @@ export class PARMDICT {
   INDEX: number;
   UNITS: string;
   REFERENCE: string;
+  /** The record as latin1, byte 0 kept. Read floats from this, never from FixBytes output. */
+  Raw: string;
 
   constructor(
     datestamp: unknown,
@@ -25,6 +27,7 @@ export class PARMDICT {
     bytes: DisaInput,
     server?: DisaServer,
   ) {
+    this.Raw = Core.ConvertToBytes(bytes);
     this.#server = server;
     this.DATESTAMP = datestamp;
     this.ACTIVE = active;

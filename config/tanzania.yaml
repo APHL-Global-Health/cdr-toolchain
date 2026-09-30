@@ -35,6 +35,10 @@ disa_registration_offsets:
   age_days: { offset: 417 }                              # 417-418 little-endian, equals v1 AgeInDays
   newborn: { offset: 409, mask: 2 }                      # 3 of 3 v1 newborns; thin base
 
+# PARMDICT_STATUS reporting limits, float32 little-endian. 0 means no limit.
+# Measured 2026-09-30 on Tanzania PARMDICT (HIVVM 10,000,000 / 20, HIVVQ 3,000,000 / 40, HIVTL 6.7 / 0).
+disa_parmdict_offsets: { high_limit: 103, low_limit: 107 }
+
 # TESTDICT.SECTION letter to v1 HL7SectionCode. "" is a blank section.
 hl7_section_codes:
   V: VR

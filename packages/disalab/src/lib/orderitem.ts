@@ -31,6 +31,7 @@ export class OrderItem {
     description: string | null | undefined,
     rawValue?: string,
     server?: DisaServer,
+    entered?: boolean,
   ) {
     this.#server = server;
     this.Type = this.CovertToChar(type);
@@ -43,7 +44,7 @@ export class OrderItem {
     this.ResultType = resulttype;
     this.Description = description;
 
-    this.IsResulted = value !== null && !Core.IsEmpty(Core.Trim(value.replace(/\0/g, "")));
+    const hasValue = value !== null && !Core.IsEmpty(Core.Trim(value.replace(/\0/g, "")));
 
     const isNumericType =
       type === 1 ||
@@ -51,6 +52,9 @@ export class OrderItem {
       type === "Real" ||
       type === "Integer" ||
       type === "Accounting";
+    // A numeric zero is stored as all-zero value bytes, which look empty.
+    // Byte 6 of the item says a person entered it, so it is a result.
+    this.IsResulted = isNumericType ? hasValue || entered === true : hasValue;
     if (isNumericType && this.IsResulted) {
       const converter = new BitConverter();
       this.Value = converter.ToSingle(value);
@@ -109,7 +113,9 @@ export class OrderItem {
       const par = data.substring(startIndex, startIndex + 5);
       if (!Core.IsNullOrEmpty(par.replace(/\0/g, " ").trim())) {
         const type = data.substring(startIndex + 5, startIndex + 5 + 1).charCodeAt(0);
+        // Feeds ResultType only. It is the type byte, not the entered flag.
         const resulted = data.substring(startIndex + 5, startIndex + 5 + 1).charCodeAt(0);
+        const entered = data.charCodeAt(startIndex + 6) !== 0;
         let result = data.substring(startIndex + 7, startIndex + 7 + 5);
         const rawResult = result;
 
@@ -148,7 +154,7 @@ export class OrderItem {
           }
         }
 
-        list.push(new OrderItem(type, par.trim(), result, resulted, description, rawResult));
+        list.push(new OrderItem(type, par.trim(), result, resulted, description, rawResult, undefined, entered));
       }
 
       startIndex += 12;
