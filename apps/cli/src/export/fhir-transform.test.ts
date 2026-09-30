@@ -254,6 +254,23 @@ test("numeric lab_result becomes an Observation with valueQuantity", () => {
   assert.equal(o.subject.reference, "Patient/DEFAULT-REQ-2024-00456");
 });
 
+test("a censored numeric result carries the comparator on valueQuantity", () => {
+  const pl = basePayload({
+    lab_results: [labResult({
+      result_value: "< 20", numeric_value: 20, numeric_units: "copies/mL",
+      raw_result: { numeric_comparator: "<" },
+    })],
+  });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.deepEqual(o.valueQuantity, { value: 20, comparator: "<", unit: "copies/mL" });
+});
+
+test("a plain numeric result has no comparator key", () => {
+  const pl = basePayload({ lab_results: [labResult()] });
+  const o = findOne(toFhir(pl, TZ), "Observation");
+  assert.equal("comparator" in o.valueQuantity, false);
+});
+
 test("abnormal_flag maps to interpretation and rpt_range to referenceRange", () => {
   // The v2 reference nulls both on its FHIR path; going FHIR-ward we map them.
   const pl = basePayload({ lab_results: [labResult({ abnormal_flag: "H", rpt_range: "4.0-11.0" })] });
@@ -895,6 +912,16 @@ export function fullFactsPayload(): V2Payload {
       },
     },
   });
+  // A result censored at its low reporting limit: < 20 copies/mL.
+  p.lab_results.push(labResult({
+    obx_set_id: 2,
+    observation_code: {
+      concept_code: "HIVVM", display_name: "HIV Viral Load",
+      concept_class: "test", datatype: "numeric", system_id: "DEFAULT_TEST",
+    },
+    result_value: "< 20", numeric_value: 20, numeric_units: "copies/mL",
+    raw_result: { numeric_comparator: "<" },
+  }));
   return p;
 }
 

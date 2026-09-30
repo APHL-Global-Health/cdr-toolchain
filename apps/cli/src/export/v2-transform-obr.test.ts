@@ -199,3 +199,36 @@ test("with no configured lab, testing_facility_code still mirrors requesting_fac
   );
   assert.deepEqual(payload.lab_requests[0]!.testing_facility_code, payload.lab_requests[0]!.requesting_facility_code);
 });
+
+test("a numeric result outside the reporting range goes out as a comparator and the limit", () => {
+  const censoringOpts = {
+    ...opts(),
+    codebook: stubCodebook({
+      panels: { RNAHF: "RNA HF" },
+      params: { HIVVM: { lowLimit: 20, highLimit: 10000000 } },
+    }),
+  };
+  const run = (value: string) =>
+    toV2(
+      specimenFixture({
+        TestOrders: ["RNAHF"],
+        TestResults: [{ TESTCODE: "RNAHF", TESTINDEX: 1, DATESTAMP: null, ORDER: [makeItem("HIVVM", value)] }],
+      }),
+      censoringOpts,
+    ).lab_results[0]!;
+
+  const low = run("0");
+  assert.equal(low.numeric_value, 20);
+  assert.equal(low.result_value, "< 20");
+  assert.equal((low.raw_result as Record<string, unknown>).numeric_comparator, "<");
+
+  const high = run("12000000");
+  assert.equal(high.numeric_value, 10000000);
+  assert.equal(high.result_value, "> 10000000");
+  assert.equal((high.raw_result as Record<string, unknown>).numeric_comparator, ">");
+
+  const plain = run("540");
+  assert.equal(plain.numeric_value, 540);
+  assert.equal("numeric_comparator" in plain.raw_result, false);
+  assert.notEqual(plain.result_value?.startsWith("<"), true);
+});

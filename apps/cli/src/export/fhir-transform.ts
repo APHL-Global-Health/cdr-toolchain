@@ -457,6 +457,12 @@ function toReferenceRange(
   return { text: t };
 }
 
+/** "<" or ">" when the V2 result was censored at a reporting limit, else undefined. */
+function numericComparator(r: V2LabResult): "<" | ">" | undefined {
+  const c = (r.raw_result as { numeric_comparator?: unknown }).numeric_comparator;
+  return c === "<" || c === ">" ? c : undefined;
+}
+
 function observationResource(
   r: V2LabResult, patientRef: string, rootId: string, obrId: string, specimenId: string | undefined,
   collectionIso: string | null,
@@ -467,7 +473,7 @@ function observationResource(
   // value[x] — at most one. Order inverts hl7-fhir.schema.js:324-334.
   let value: Record<string, unknown> = {};
   if (r.numeric_value !== null) {
-    value = { valueQuantity: compact({ value: r.numeric_value, unit }) };
+    value = { valueQuantity: compact({ value: r.numeric_value, comparator: numericComparator(r), unit }) };
   } else if (fhirText(r.coded_value) !== undefined) {
     value = {
       valueCodeableConcept: compact({
