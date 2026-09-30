@@ -20,6 +20,7 @@ import { toV2 } from "../export/v2-transform.js";
 import { toV1 } from "../export/v1-transform.js";
 import { auditFromSpecimen } from "../audit/detector.js";
 import { loadBlobOffsets } from "../config/blob-offsets.js";
+import { loadParmdictOffsets } from "../config/parmdict-offsets.js";
 import { loadRequestFactConfig } from "../config/request-fact-config.js";
 import { severityAtLeast, type Severity } from "../audit/types.js";
 import { postLabRequest } from "../api/client.js";
@@ -225,7 +226,7 @@ export function registerExportCommand(program: Command): void {
       // Codebook query reuses the global mssql pool — make sure prior fetches
       // closed it (fetchDisaSpecimen / fetch* helpers all close in finally).
       const server = buildServer(config.connectionString);
-      const codebook = await loadCodebook(server);
+      const codebook = await loadCodebook(server, loadParmdictOffsets(config.country));
       await closePool();
       const blobOffsets = loadBlobOffsets(config.country);
       const factConfig = loadRequestFactConfig(config.country);

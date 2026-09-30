@@ -29,7 +29,7 @@ export function stubCodebook(opts: StubOpts = {}): Codebook {
     paramEntry: (c) => {
       const o = opts.params?.[c];
       if (o === undefined) return undefined;
-      return { code: c, description: "", abbreviation: "", context: 0, units: "", reference: "", ...o };
+      return { code: c, description: "", abbreviation: "", context: 0, units: "", reference: "", lowLimit: null, highLimit: null, ...o };
     },
     panelEntry: (c) => {
       const d = opts.panels?.[c];

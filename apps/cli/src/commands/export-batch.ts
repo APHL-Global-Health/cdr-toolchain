@@ -25,6 +25,7 @@ import { toFormSubmission } from "../export/forms-transform.js";
 import { isDocumentationObs, type DocConfig } from "../export/non-test.js";
 import { loadCountryDocConfig } from "../config/country-config.js";
 import { auditFromSpecimen } from "../audit/detector.js";
+import { loadParmdictOffsets } from "../config/parmdict-offsets.js";
 import { assertOffsetsPlausible, DEFAULT_SELF_CHECK_SAMPLE, loadBlobOffsets, type BlobOffsets } from "../config/blob-offsets.js";
 import { loadRequestFactConfig, type RequestFactConfig } from "../config/request-fact-config.js";
 import { severityAtLeast, type Severity, type AuditReport } from "../audit/types.js";
@@ -1068,7 +1069,10 @@ export function registerExportBatchCommand(program: Command): void {
       };
 
       // -------- one-time setup --------
-      const codebook = await loadCodebook(buildServer(config.connectionString));
+      const codebook = await loadCodebook(
+        buildServer(config.connectionString),
+        loadParmdictOffsets(opts.country ?? config.country),
+      );
       await closePool();
 
       // Country documentation classifiers, loaded once. Drives the
