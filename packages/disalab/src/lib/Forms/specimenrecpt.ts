@@ -49,6 +49,11 @@ export class SpecimenRecpt {
   RegisteredDateTime: string | null = null;
   Priority: string | null = null;
 
+  /** REGDAT4 bytes 135-138: the user who registered the request (initials). */
+  RegisteredBy: string | null = null;
+  /** REGDAT4_STATUS as latin1, one char per byte. For the CLI's measured byte reads. */
+  RegistrationBlob: string | null = null;
+
   DoctorCode: string | null = null;
   Doctor: string | null = null;
   DoctorPhone: string | null = null;
@@ -189,6 +194,8 @@ export class SpecimenRecpt {
       r.ReceivedInLabDateTime = regdat4.ReceivedInLabDateTime;
       r.ReceivedInLabBy = regdat4.ReceivedInLabBy ?? null;
       r.RegisteredDateTime = regdat4.RegisteredDatetime;
+      r.RegisteredBy = Core.IsNullOrEmpty(regdat4.ReceivedBy) ? null : regdat4.ReceivedBy;
+      r.RegistrationBlob = regdat4.Raw ?? null;
       r.Priority = regdat4.Priority;
 
       if (Core.IsNullOrEmpty(r.Specimen)) r.Specimen = null;

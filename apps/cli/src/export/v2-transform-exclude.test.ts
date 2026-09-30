@@ -5,8 +5,9 @@ import { toV2 } from "./v2-transform.js";
 import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
+import { EMPTY_REQUEST_FACT_CONFIG } from "../config/request-fact-config.js";
 
-const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 /**
  * Build a minimal SpecimenRecpt fixture that flattenDisa will yield two
@@ -105,6 +106,7 @@ test("excludeObs drops documentation observations from lab_results", () => {
     codebook: cb,
     excludeObs: (o) => o.panelCode === "VIRAL",
     blobOffsets: UNCONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
   });
   const codes = payload.lab_results.map((r) => r.observation_code.concept_code);
   assert.equal(codes.includes("ARTRS"), false);  // documentation obs excluded

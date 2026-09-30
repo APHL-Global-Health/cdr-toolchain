@@ -879,3 +879,99 @@ test("without a configured lab the clinic still becomes one Organization", () =>
     .filter((r: any) => r.resourceType === "Organization").map((r: any) => r.id);
   assert.deepEqual(orgs, ["facility-IBPAA"]);
 });
+
+export function fullFactsPayload(): V2Payload {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    analysis_at: "2013-08-05T20:55:00", tested_by: "Sylvester Mattunda", authorised_by: "Regnald Julius",
+    age_years: 1, age_days: 640, section_code: "VR",
+    source_payload: {
+      ...p.lab_requests[0]!.source_payload,
+      request_facts: {
+        registered_by: "Ester Mwavika", request_type: "E", analyzer_code: "ALNK1",
+        rejection_code: "CONU", rejection_reason: "Spec contaminated with urine",
+        point_of_care: "Medical Ward 2",
+        attributes: [{ code: "therapy", valueString: "ART" }, { code: "newborn", valueBoolean: true }],
+      },
+    },
+  });
+  return p;
+}
+
+test("sends every request fact in the slot CE reads", () => {
+  const out = toFhir(fullFactsPayload(), { tzOffset: "+03:00" });
+  const sr = out.find((r) => r.resourceType === "ServiceRequest")!;
+  const dr = out.find((r) => r.resourceType === "DiagnosticReport")!;
+  assert.deepEqual(sr.locationCode, [{ text: "Medical Ward 2" }]);
+  assert.deepEqual(sr.extension, [
+    { url: "urn:openldr:ext:analysis-time", valueDateTime: "2013-08-05T20:55:00+03:00" },
+    { url: "urn:openldr:ext:registered-by", valueString: "Ester Mwavika" },
+    { url: "urn:openldr:ext:tested-by", valueString: "Sylvester Mattunda" },
+    { url: "urn:openldr:ext:request-type", valueCode: "E" },
+    { url: "urn:openldr:ext:age-at-request", extension: [{ url: "years", valueInteger: 1 }, { url: "days", valueInteger: 640 }] },
+    { url: "urn:openldr:ext:analyzer", valueCode: "ALNK1" },
+    { url: "urn:openldr:ext:rejection", extension: [{ url: "code", valueCode: "CONU" }, { url: "reason", valueString: "Spec contaminated with urine" }] },
+    { url: "urn:openldr:ext:request-attribute", extension: [{ url: "code", valueCoding: { system: "urn:openldr:cs:request-attribute", code: "therapy" } }, { url: "value", valueString: "ART" }] },
+    { url: "urn:openldr:ext:request-attribute", extension: [{ url: "code", valueCoding: { system: "urn:openldr:cs:request-attribute", code: "newborn" } }, { url: "value", valueBoolean: true }] },
+  ]);
+  assert.deepEqual(dr.category, [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "VR" }] }]);
+  assert.deepEqual(dr.resultsInterpreter, [{ display: "Regnald Julius" }]);
+});
+
+test("an absent fact is omitted, not sent empty", () => {
+  const out = toFhir(basePayload(), { tzOffset: "+03:00" });
+  const sr = out.find((r) => r.resourceType === "ServiceRequest")!;
+  const dr = out.find((r) => r.resourceType === "DiagnosticReport")!;
+  assert.equal("extension" in sr, false);
+  assert.equal("locationCode" in sr, false);
+  assert.equal("category" in dr, false);
+  assert.equal("resultsInterpreter" in dr, false);
+});
+
+test("age with only years sends only the years sub-extension", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, { age_years: 34, age_days: null });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.deepEqual(sr.extension, [
+    { url: "urn:openldr:ext:age-at-request", extension: [{ url: "years", valueInteger: 34 }] },
+  ]);
+});
+
+test("a rejection with a code and no reason sends only the code", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    source_payload: { ...p.lab_requests[0]!.source_payload, request_facts: { rejection_code: "CONU" } },
+  });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.deepEqual(sr.extension, [
+    { url: "urn:openldr:ext:rejection", extension: [{ url: "code", valueCode: "CONU" }] },
+  ]);
+});
+
+test("an attribute with a blank value sends no request-attribute extension", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    source_payload: { request_facts: { attributes: [{ code: "therapy", valueString: "  " }] } },
+  });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.equal("extension" in sr, false);
+});
+
+test("empty request_facts sends no extension and no locationCode", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, { source_payload: { request_facts: {} } });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.equal("extension" in sr, false);
+  assert.equal("locationCode" in sr, false);
+});
+
+test("a malformed attribute entry is skipped, not fatal", () => {
+  const p = basePayload();
+  Object.assign(p.lab_requests[0]!, {
+    source_payload: { request_facts: { attributes: [null, { code: "therapy", valueString: "ART" }] } },
+  });
+  const sr = toFhir(p, { tzOffset: "+03:00" }).find((r) => r.resourceType === "ServiceRequest")!;
+  assert.deepEqual(sr.extension, [
+    { url: "urn:openldr:ext:request-attribute", extension: [{ url: "code", valueCoding: { system: "urn:openldr:cs:request-attribute", code: "therapy" } }, { url: "value", valueString: "ART" }] },
+  ]);
+});

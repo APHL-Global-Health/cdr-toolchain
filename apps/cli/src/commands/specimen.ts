@@ -36,7 +36,9 @@ export function registerSpecimenCommand(program: Command): void {
             { labNumber },
           );
         }
-        emitRow(recpt as unknown as Record<string, unknown>, output);
+        // The raw registration blob is about 700 escaped bytes. Leave it out.
+        const { RegistrationBlob: _blob, ...printable } = recpt as unknown as Record<string, unknown>;
+        emitRow(printable, output);
       });
     });
 }

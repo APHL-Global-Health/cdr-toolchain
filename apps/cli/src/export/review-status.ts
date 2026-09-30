@@ -7,6 +7,12 @@ export interface ObrStatus {
   /** Null ⇒ undeterminable (deployment has no measured initials offset). */
   status: "X" | "I" | "F" | "R" | null;
   authorisedAt: Date | null;
+  /** From the FIRST iteration of the OBR. Null when unconfigured or undecodable. */
+  analysisAt: Date | null;
+  /** From the same iteration that decides status. */
+  analyzerCode: string | null;
+  testerInitials: string | null;
+  reviewerInitials: string | null;
   headerUndecodable: boolean;
 }
 
@@ -44,11 +50,42 @@ function isLater(a: PanelIteration, b: PanelIteration): boolean {
   return a.panelIndex > b.panelIndex;
 }
 
+/** True when `a` is an earlier run than `b`: lower test index, then earlier datestamp. */
+function isFirstRun(a: PanelIteration, b: PanelIteration): boolean {
+  if (a.panelIndex !== b.panelIndex) return a.panelIndex < b.panelIndex;
+  const am = a.datestamp?.getTime() ?? Infinity;
+  const bm = b.datestamp?.getTime() ?? Infinity;
+  return am < bm;
+}
+
+type DatetimeSlot = NonNullable<BlobOffsets["reviewedAt"]>;
+
+function decodeAt(header: TestDataHeader, slot: DatetimeSlot): Date | null {
+  const fn = slot.kind === "long-datetime" ? decodeLongDatetime : decodeShortDatetime;
+  return fn(header.raw, slot.start, 2000, 2100);
+}
+
 function decodeReviewedAt(header: TestDataHeader, offsets: BlobOffsets): Date | null {
-  if (offsets.reviewedAt === null) return null;
-  const { start, kind } = offsets.reviewedAt;
-  const fn = kind === "long-datetime" ? decodeLongDatetime : decodeShortDatetime;
-  return fn(header.raw, start, 2000, 2100);
+  return offsets.reviewedAt === null ? null : decodeAt(header, offsets.reviewedAt);
+}
+
+/**
+ * Header facts for one OBR. Analysis time comes from the FIRST run of the OBR, the iteration with the
+ * lowest test index (DISA TESTINDEX). Reruns can carry a later datestamp in
+ * that first slot, so the datestamp alone would pick the rerun's time.
+ * People and analyser come from the winner, the same iteration that decides
+ * status, so authorised_by and authorised_at never come from different runs.
+ * initialsAt reads any short ASCII field, so it serves the analyser code too.
+ */
+function headerFacts(first: PanelIteration | null, winner: PanelIteration | null, offsets: BlobOffsets) {
+  const w = winner?.header ?? null;
+  const f = first?.header ?? null;
+  return {
+    analysisAt: f !== null && offsets.analysisAt !== null ? decodeAt(f, offsets.analysisAt) : null,
+    analyzerCode: w !== null && offsets.analyzerCode !== null ? w.initialsAt(offsets.analyzerCode) : null,
+    testerInitials: w !== null && offsets.testerInitials !== null ? w.initialsAt(offsets.testerInitials) : null,
+    reviewerInitials: w !== null && offsets.reviewerInitials !== null ? w.initialsAt(offsets.reviewerInitials) : null,
+  };
 }
 
 /**
@@ -76,6 +113,15 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
     if (cur === undefined || isLater(it, cur)) winnerByObr.set(obr, it);
   }
 
+  const firstByObr = new Map<number, PanelIteration>();
+  for (const it of iterations) {
+    const obr = obrOf(it.panelCode, baseIndex(it.panelIndex));
+    if (obr === null) continue;
+    const cur = firstByObr.get(obr);
+    // First run: lowest test index. On a tie, the earlier datestamp.
+    if (cur === undefined || isFirstRun(it, cur)) firstByObr.set(obr, it);
+  }
+
   const out = new Map<number, ObrStatus>();
   const obrIds = new Set<number>([
     ...winnerByObr.keys(),
@@ -88,9 +134,10 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
   for (const obr of obrIds) {
     const winner = winnerByObr.get(obr) ?? null;
     const headerUndecodable = winner !== null && winner.header === null;
+    const facts = headerFacts(firstByObr.get(obr) ?? null, winner, offsets);
 
     if (rejectedObrs.has(obr)) {
-      out.set(obr, { status: "X", authorisedAt: null, headerUndecodable });
+      out.set(obr, { status: "X", authorisedAt: null, ...facts, headerUndecodable });
       continue;
     }
     // ⛔ `I` means "this panel genuinely produced NO results" — never "we chose
@@ -100,7 +147,7 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
     // while v1 reports F. Measured 2026-08-02: 30 of 53 result_status
     // mismatches were exactly this (HIVPC panels, PARMDICT context 77).
     if ((obsCountByObr.get(obr) ?? 0) === 0) {
-      out.set(obr, { status: "I", authorisedAt: null, headerUndecodable });
+      out.set(obr, { status: "I", authorisedAt: null, ...facts, headerUndecodable });
       continue;
     }
     const header = winner?.header ?? null;
@@ -109,13 +156,14 @@ export function buildStatusByObr(args: BuildStatusArgs): Map<number, ObrStatus> 
     // than defaulting to R — null is today's behaviour, R would be a false
     // claim that the panel was left unverified.
     if (offsets.reviewerInitials === null) {
-      out.set(obr, { status: null, authorisedAt: null, headerUndecodable });
+      out.set(obr, { status: null, authorisedAt: null, ...facts, headerUndecodable });
       continue;
     }
     const reviewed = header !== null && header.initialsAt(offsets.reviewerInitials) !== null;
     out.set(obr, {
       status: reviewed ? "F" : "R",
       authorisedAt: reviewed && header !== null ? decodeReviewedAt(header, offsets) : null,
+      ...facts,
       headerUndecodable,
     });
   }

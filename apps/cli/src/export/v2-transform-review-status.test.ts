@@ -16,6 +16,7 @@ import { toV2 } from "./v2-transform.js";
 import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
+import { EMPTY_REQUEST_FACT_CONFIG } from "../config/request-fact-config.js";
 
 // Asserts the OUTCOME (the offset), not the mechanism, so this suite cannot
 // pass while the pin is silently ineffective.
@@ -26,6 +27,9 @@ test("TZ pin took effect", () => {
 const CONFIGURED_OFFSETS: BlobOffsets = {
   reviewerInitials: { start: 77, end: 80 },
   reviewedAt: { start: 21, kind: "long-datetime" },
+  analysisAt: null,
+  analyzerCode: null,
+  testerInitials: null,
 };
 
 const numericType = String.fromCharCode(1);
@@ -144,6 +148,7 @@ test("a panel whose only observation is excluded is NOT interim", () => {
     site: DEFAULT_SITE,
     codebook: stubCodebook({ panels: { MRCSW: "MC&S" } }),
     blobOffsets: CONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
     excludeObs: () => true,
   });
 
@@ -168,6 +173,7 @@ test("a rejected panel does not force X onto a resulted sibling panel", () => {
       site: DEFAULT_SITE,
       codebook: stubCodebook({ panels: { COL: "COL", MRCSW: "MC&S" } }),
       blobOffsets: CONFIGURED_OFFSETS,
+      factConfig: EMPTY_REQUEST_FACT_CONFIG,
     },
   );
 
@@ -182,6 +188,7 @@ test("toV2 with CONFIGURED offsets emits result_status F and a local-form author
     site: DEFAULT_SITE,
     codebook: stubCodebook({ panels: { MRCSW: "MC&S" } }),
     blobOffsets: CONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
   });
 
   assert.equal(payload.lab_requests.length, 1);

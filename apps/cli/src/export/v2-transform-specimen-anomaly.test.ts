@@ -6,8 +6,9 @@ import { DEFAULT_SITE } from "./site-config.js";
 import { stubCodebook } from "../test-helpers/stub-codebook.js";
 import type { AuditReport } from "../audit/types.js";
 import type { BlobOffsets } from "../config/blob-offsets.js";
+import { EMPTY_REQUEST_FACT_CONFIG } from "../config/request-fact-config.js";
 
-const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
+const UNCONFIGURED_OFFSETS: BlobOffsets = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 // Minimal SpecimenRecpt with one resulted panel and a recorded specimen "B".
 function specimenFixture(): SpecimenRecpt {
@@ -55,6 +56,7 @@ test("corroborated (warn) panel_specimen_mismatch tags specimen with the anomaly
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(), auditReport: reportWithMismatch("warn"),
     blobOffsets: UNCONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
   });
   const spec = payload.lab_requests[0]!.specimen_code;
   assert.ok(spec, "expected specimen_code");
@@ -67,6 +69,7 @@ test("no audit report leaves the specimen on the default system_id", () => {
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(),
     blobOffsets: UNCONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
   });
   assert.equal(payload.lab_requests[0]!.specimen_code?.system_id, "DEFAULT_SPEC");
 });
@@ -75,6 +78,7 @@ test("an error-level (uncorroborated) mismatch does NOT tag the specimen (it wou
   const payload = toV2(specimenFixture(), {
     prefix: "", site: DEFAULT_SITE, codebook: cb(), auditReport: reportWithMismatch("error"),
     blobOffsets: UNCONFIGURED_OFFSETS,
+    factConfig: EMPTY_REQUEST_FACT_CONFIG,
   });
   assert.equal(payload.lab_requests[0]!.specimen_code?.system_id, "DEFAULT_SPEC");
 });

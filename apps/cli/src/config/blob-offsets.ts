@@ -19,7 +19,13 @@ const reviewedAtSchema = z.object({
 
 const schema = z.object({
   disa_blob_offsets: z
-    .object({ reviewer_initials: slotSchema.optional(), reviewed_at: reviewedAtSchema.optional() })
+    .object({
+      reviewer_initials: slotSchema.optional(),
+      reviewed_at: reviewedAtSchema.optional(),
+      analysis_at: reviewedAtSchema.optional(),
+      analyzer_code: slotSchema.optional(),
+      tester_initials: slotSchema.optional(),
+    })
     .optional(),
 });
 
@@ -27,6 +33,12 @@ export interface BlobOffsets {
   /** Null ⇒ this deployment is UNMEASURED; do not attempt an F/R decode. */
   reviewerInitials: { start: number; end: number } | null;
   reviewedAt: { start: number; kind: "long-datetime" | "short-datetime" } | null;
+  /** Tanzania: offset 15, long-datetime. 169,844 match v1, 0 mismatch. */
+  analysisAt: { start: number; kind: "long-datetime" | "short-datetime" } | null;
+  /** Tanzania: bytes 56-61. 170,465 agree with v1, 0 mismatch. */
+  analyzerCode: { start: number; end: number } | null;
+  /** Tanzania: bytes 74-77. Initials match v1. */
+  testerInitials: { start: number; end: number } | null;
 }
 
 /**
@@ -41,7 +53,9 @@ export interface BlobOffsets {
  * disalab's DEFAULT_HEADER_OFFSETS still exists, but as an EXPLICIT opt-in for
  * tests and direct callers — it is deliberately not used as a config default.
  */
-const UNCONFIGURED: BlobOffsets = { reviewerInitials: null, reviewedAt: null };
+const UNCONFIGURED: BlobOffsets = {
+  reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null,
+};
 
 export function loadBlobOffsets(country: string | undefined, dir: string = configDir()): BlobOffsets {
   if (country === undefined || country.trim().length === 0) return UNCONFIGURED;
@@ -60,6 +74,9 @@ export function loadBlobOffsets(country: string | undefined, dir: string = confi
   return {
     reviewerInitials: block.reviewer_initials ?? null,
     reviewedAt: block.reviewed_at ?? null,
+    analysisAt: block.analysis_at ?? null,
+    analyzerCode: block.analyzer_code ?? null,
+    testerInitials: block.tester_initials ?? null,
   };
 }
 

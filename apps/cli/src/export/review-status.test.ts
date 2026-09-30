@@ -2,8 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TestDataHeader, HEADER_LENGTH } from "disalab";
 import { buildStatusByObr, type PanelIteration } from "./review-status.js";
+import type { BlobOffsets } from "../config/blob-offsets.js";
 
-const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null };
+const OFFSETS = { reviewerInitials: { start: 77, end: 80 }, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
 
 function header(reviewed: boolean): TestDataHeader {
   const b = Buffer.alloc(HEADER_LENGTH, 0);
@@ -163,14 +164,14 @@ test("an unmeasured deployment yields null status, NOT a defaulted R", () => {
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
     obsCountByObr: new Map([[1, 3]]),
     rejectedObrs: new Set(),
-    offsets: { reviewerInitials: null, reviewedAt: null },
+    offsets: { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null },
   });
   assert.equal(s.get(1)?.status, null);
   assert.equal(s.get(1)?.authorisedAt, null);
 });
 
 test("an unmeasured deployment STILL reports X and I, which need no offsets", () => {
-  const unmeasured = { reviewerInitials: null, reviewedAt: null };
+  const unmeasured = { reviewerInitials: null, reviewedAt: null, analysisAt: null, analyzerCode: null, testerInitials: null };
   const rejected = buildStatusByObr({
     iterations: [iter("HIVVL", 1, true)],
     obrOf: obrOfMap({ "HIVVL:1": 1 }),
@@ -199,4 +200,74 @@ test("an ordered-but-unresulted OBR with no iteration at all is I", () => {
     offsets: OFFSETS,
   });
   assert.equal(s.get(1)?.status, "I");
+});
+
+const ALL: BlobOffsets = {
+  reviewerInitials: { start: 77, end: 80 },
+  reviewedAt: { start: 21, kind: "long-datetime" },
+  analysisAt: { start: 15, kind: "long-datetime" },
+  analyzerCode: { start: 56, end: 61 },
+  testerInitials: { start: 74, end: 77 },
+};
+
+function headerWith(opts: { analysis?: [number, number, number, number, number]; analyzer?: string; tester?: string; reviewer?: string }): TestDataHeader {
+  const buf = Buffer.alloc(HEADER_LENGTH, 0);
+  if (opts.analysis) {
+    const [y, m, d, h, mi] = opts.analysis;
+    buf[15] = d; buf[16] = m; buf[17] = y % 256; buf[18] = Math.floor(y / 256); buf[19] = mi; buf[20] = h;
+  }
+  if (opts.analyzer) buf.write(opts.analyzer, 56, "latin1");
+  if (opts.tester) buf.write(opts.tester, 74, "latin1");
+  if (opts.reviewer) buf.write(opts.reviewer, 77, "latin1");
+  return TestDataHeader.fromBytes(buf);
+}
+
+test("reads analysis time from the FIRST iteration and people from the latest", () => {
+  const iterations: PanelIteration[] = [
+    { panelCode: "PROT", panelIndex: 1, datestamp: new Date(2013, 7, 5, 20, 0), header: headerWith({ analysis: [2013, 8, 5, 20, 53], analyzer: "ALNK1", tester: "SMM" }) },
+    { panelCode: "PROT", panelIndex: 2, datestamp: new Date(2013, 7, 5, 21, 0), header: headerWith({ analysis: [2013, 8, 5, 21, 10], analyzer: "ALNK2", tester: "RJB", reviewer: "APB" }) },
+  ];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 3]]), rejectedObrs: new Set(), offsets: ALL }).get(1)!;
+  assert.equal(s.analysisAt?.getHours(), 20);
+  assert.equal(s.analysisAt?.getMinutes(), 53);
+  assert.equal(s.analyzerCode, "ALNK2");
+  assert.equal(s.testerInitials, "RJB");
+  assert.equal(s.reviewerInitials, "APB");
+});
+
+test("analysis time comes from the lowest test index, not the earliest datestamp", () => {
+  // A rerun can carry a later datestamp in the first slot.
+  const iterations: PanelIteration[] = [
+    { panelCode: "PROT", panelIndex: 1, datestamp: new Date(2016, 2, 8), header: headerWith({ analysis: [2013, 8, 5, 20, 53] }) },
+    { panelCode: "PROT", panelIndex: 2, datestamp: new Date(2013, 7, 5), header: headerWith({ analysis: [2013, 8, 5, 21, 10] }) },
+  ];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 3]]), rejectedObrs: new Set(), offsets: ALL }).get(1)!;
+  assert.equal(s.analysisAt?.getHours(), 20);
+  assert.equal(s.analysisAt?.getMinutes(), 53);
+});
+
+test("an unconfigured slot yields null, never a guess", () => {
+  const offsets: BlobOffsets = { ...ALL, analysisAt: null, analyzerCode: null, testerInitials: null };
+  const iterations: PanelIteration[] = [
+    { panelCode: "PROT", panelIndex: 1, datestamp: null, header: headerWith({ analysis: [2013, 8, 5, 20, 53], analyzer: "ALNK1", tester: "SMM" }) },
+  ];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 1]]), rejectedObrs: new Set(), offsets }).get(1)!;
+  assert.equal(s.analysisAt, null);
+  assert.equal(s.analyzerCode, null);
+  assert.equal(s.testerInitials, null);
+});
+
+test("a rejected panel still carries the header facts it has", () => {
+  const iterations: PanelIteration[] = [
+    { panelCode: "PROT", panelIndex: 1, datestamp: null, header: headerWith({ tester: "SMM" }) },
+  ];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 0]]), rejectedObrs: new Set([1]), offsets: ALL }).get(1)!;
+  assert.equal(s.status, "X");
+  assert.equal(s.testerInitials, "SMM");
+});
+
+test("an all-zero analysis time is null", () => {
+  const iterations: PanelIteration[] = [{ panelCode: "PROT", panelIndex: 1, datestamp: null, header: headerWith({}) }];
+  const s = buildStatusByObr({ iterations, obrOf: () => 1, obsCountByObr: new Map([[1, 1]]), rejectedObrs: new Set(), offsets: ALL }).get(1)!;
+  assert.equal(s.analysisAt, null);
 });
