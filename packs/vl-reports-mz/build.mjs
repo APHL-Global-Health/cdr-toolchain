@@ -232,7 +232,8 @@ async function main() {
     ...summary.pocValueSet.left_out.map((r) => `POC value set, ${r.key}: ${r.reason}`),
     ...summary.linkValueSet.left_out.map((r) => `link value set, ${r.key}: ${r.reason}`),
   ];
-  const readme = readFileSync(join(here, 'README.md'), 'utf8').trimEnd()
+  // The admin-facing text shown in the marketplace. README.md is for pack authors.
+  const readme = readFileSync(join(here, 'PACK.md'), 'utf8').trimEnd()
     + `\n\n## Rows left out of this build\n\nBuilt from ${summary.source}. ${leftOut.length} rows left out.\n\n`
     + leftOut.map((l) => `- ${l}`).join('\n') + '\n';
   writeJson('manifest.json', {
