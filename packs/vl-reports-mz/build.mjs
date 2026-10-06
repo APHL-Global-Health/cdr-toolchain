@@ -245,7 +245,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.1.0',
+    version: '0.1.1',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
