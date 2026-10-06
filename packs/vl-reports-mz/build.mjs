@@ -84,10 +84,9 @@ function summarizeStep(step) {
     case 'code-system':
     case 'value-set':
       return { kind: step.kind, label: step.resource.name ?? step.resource.url, count: 1 };
-    case 'facility-register': {
-      const lines = step.csv.split(/\r?\n/).filter((l) => l.trim() !== '');
-      return { kind: step.kind, label: step.name, count: Math.max(0, lines.length - 1) };
-    }
+    case 'facility-register':
+      // The same expression as CE's summarizeContentPack, so the signed step list matches pack.json.
+      return { kind: step.kind, label: step.name, count: step.csv.split(/\r?\n/).slice(1).filter((l) => l.trim() !== '').length };
     case 'link-matching':
       return { kind: step.kind, label: step.registerUrl, count: 1 };
     case 'custom-queries':
