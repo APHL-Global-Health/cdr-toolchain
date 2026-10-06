@@ -42,25 +42,27 @@ function csvCell(v) {
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-function codeSystem(url, name, title, rows) {
+function codeSystem(url, name, title, description, rows) {
   return {
     resourceType: 'CodeSystem',
     url,
     name,
     title,
+    description,
     status: 'active',
     content: 'complete',
     concept: rows.map((r) => ({ code: r.code, display: r.display })),
   };
 }
 
-function valueSet(url, name, title, systemUrl, rows) {
+function valueSet(url, name, title, description, systemUrl, rows) {
   const concept = rows.map((r) => ({ code: r.code, display: r.display }));
   return {
     resourceType: 'ValueSet',
     url,
     name,
     title,
+    description,
     status: 'active',
     compose: { include: [{ system: systemUrl, concept }] },
     // The warehouse table terminology_codes is filled from expansion.contains only.
@@ -214,11 +216,14 @@ async function main() {
   const REGISTER_URL = 'urn:openldr:mz:laboratories';
   const POC_TITLE = 'Mozambique POC sites';
   const LINK_TITLE = 'Mozambique link sites';
+  // Shown under the name on the CE Terminology page.
+  const POC_DESCRIPTION = 'Point-of-care sites, from the v1 dictionary list DisaPoc. The VL queries use it for the IsDisaPoc column.';
+  const LINK_DESCRIPTION = 'Link sites, from the v1 dictionary list Disalink. The VL queries use it for the IsDisaLink column.';
   const steps = [
-    { kind: 'code-system', resource: codeSystem(POC_CS, 'MozPocSites', POC_TITLE, pocRows) },
-    { kind: 'value-set', resource: valueSet('urn:openldr:mz:poc-sites', 'MozPocSites', POC_TITLE, POC_CS, pocRows) },
-    { kind: 'code-system', resource: codeSystem(LINK_CS, 'MozLinkSites', LINK_TITLE, linkRows) },
-    { kind: 'value-set', resource: valueSet('urn:openldr:mz:link-sites', 'MozLinkSites', LINK_TITLE, LINK_CS, linkRows) },
+    { kind: 'code-system', resource: codeSystem(POC_CS, 'MozPocSites', POC_TITLE, POC_DESCRIPTION, pocRows) },
+    { kind: 'value-set', resource: valueSet('urn:openldr:mz:poc-sites', 'MozPocSites', POC_TITLE, POC_DESCRIPTION, POC_CS, pocRows) },
+    { kind: 'code-system', resource: codeSystem(LINK_CS, 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, linkRows) },
+    { kind: 'value-set', resource: valueSet('urn:openldr:mz:link-sites', 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, LINK_CS, linkRows) },
     { kind: 'facility-register', url: REGISTER_URL, name: 'Mozambique laboratories and POC sites', code: 'MZLABS', csv },
     { kind: 'link-matching', registerUrl: REGISTER_URL },
     { kind: 'custom-queries', file: vlQueryFile(MOZ_CODES) },
@@ -240,7 +245,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.1.0',
+    version: '0.1.1',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
