@@ -2,6 +2,7 @@
 
 This pack adds two custom queries that give viral load data in the column layout of the
 OpenLDR v1 views `viewVL_Info` and `viewVL_Result`. It is for labs whose data comes from DISA*Lab.
+It also installs Mozambique's lab register and health facility register.
 
 ## What it installs
 
@@ -9,19 +10,33 @@ In this order:
 
 1. Code system and value set for the POC sites: `urn:openldr:mz:poc-sites`.
 2. Code system and value set for the link sites: `urn:openldr:mz:link-sites`.
-3. The lab register `urn:openldr:mz:laboratories` (laboratories and POC sites).
-4. Link-matching against that register. It links observed lab codes that match a register code.
-5. The queries "VL info" and "VL results".
+3. The lab register `urn:openldr:mz:laboratories` (laboratories and POC sites), code `MZLABS`.
+4. The health facility register `urn:openldr:mz:facilities`, code `MZFAC`. It has 2,830
+   facilities from the v1 dictionary view `viewFacilities`, keyed on the DISA facility code.
+5. Link-matching against the facility register.
+6. Link-matching against the lab register.
+7. The queries "VL info" and "VL results".
+
+Link-matching links each observed facility code to the register row with the same code. It does
+not look at whether the code came in as a testing lab or a requesting facility. 45 codes are in
+both registers, and each pair names the same place. The facility register links first, so these
+45 codes link to the facility rows, which carry province and district. Their testing labs show
+the facility register's name.
 
 Installing again is safe. It replaces the terminology and the two queries, and updates the
-register rows. A query you edited under one of these names is overwritten.
+register rows. A register you already loaded under the same URL is reused, not duplicated. A
+query you edited under one of these names is overwritten.
+
+The facility register has the code, name, province and district. It leaves out the facility type
+and the status (`HFStatus`): those need mapping to CE's values first.
 
 ## Parameters
 
 Both queries take the same three text parameters.
 
 - `from`, `to`: required. Dates as `YYYY-MM-DD`, on the registered time.
-- `facility`: requesting facility code. Pass an empty string for all facilities.
+- `facility`: requesting facility code. Leave it blank for all facilities. An older CE fails a
+  blank box with "unbound parameter: facility"; there, the report must send an empty string.
 
 A report run stops at 1000 rows. Narrow the dates for a big lab.
 
