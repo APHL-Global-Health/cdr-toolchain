@@ -29,3 +29,18 @@ The v1 views call three SQL functions that are not in `openldr-views-script.sql`
 Ask for their scripts from the OpenLDR data database. Without them these columns stay out of the
 VL queries: `HIVVL_ViralLoadResult`, `HIVVL_ViralLoadCAPCTM`, `HIVVL_Low_value`, `HIVVL_Viral`,
 `FinalViralLoadResult` and `ReasonForTest`. README.md lists what is returned instead.
+
+## 3. Facility type letters and HFStatus
+
+`viewFacilities.FacilityType` holds one letter, with no definitions anywhere in the dictionary:
+H (2,554 rows), blank (171), Q (60), Y (20), F (17), C (4), and P, V, T, G once each.
+`HFStatus` is 1 (2,370 rows) or 0 (460).
+
+Ask:
+
+- What does each FacilityType letter mean? Is there a list, for example in MISAU's facility master?
+- Does HFStatus 0 mean the facility is closed, or something else (not reporting, not verified)?
+- Should a facility with HFStatus 0 still receive results?
+
+Since pack 0.4.0 both are kept raw in each facility's `extras` (`facility_type`, `hf_status`). With
+the answers, the pack can map them into CE's facility level and status.

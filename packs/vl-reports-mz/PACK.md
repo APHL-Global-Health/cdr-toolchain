@@ -27,10 +27,11 @@ Installing again is safe. It replaces the terminology and the two queries, and u
 register rows. A register you already loaded under the same URL is reused, not duplicated. A
 query you edited under one of these names is overwritten.
 
-The facility register has the code, name, province and district. It also keeps v1's province and
-district codes in each facility's `extras`, as `province_code` and `district_code`. Custom queries
-read them from the warehouse table `facility_registry`. It leaves out the facility type and the
-status (`HFStatus`): those need mapping to CE's values first.
+The facility register has the code, name, province and district. It also keeps four v1 values in
+each facility's `extras`, exactly as v1 has them: `province_code`, `district_code`,
+`facility_type` (a letter such as H or Q) and `hf_status` (1 or 0). Custom queries read them from
+the warehouse table `facility_registry`. The facility type and status are not put in CE's own
+level and status fields: what each letter means is not known yet.
 
 This version needs a CE that supports extra register columns. An older CE refuses it and writes
 nothing.
