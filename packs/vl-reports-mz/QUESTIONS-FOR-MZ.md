@@ -45,3 +45,19 @@ Ask:
 
 Since pack 0.4.0 both are kept raw in each facility's `extras` (`facility_type`, `hf_status`). With
 the answers, the pack can map them into CE's facility level and status.
+
+## 4. A small sample of result data
+
+No Mozambique result data has been available so far. The VL queries, the facility registers and
+link-matching have only been tested against empty tables, so none of them has shown a Mozambique
+row yet.
+
+Ask for one of these, whichever is easier to share:
+
+- A DISA*Lab database backup (`DisalabData`) covering a few days of viral load from one lab.
+- An `OpenLDRData` extract for the same window: the `Requests` and `LabResults` rows for those days.
+
+A few hundred requests is enough. With it we can export through cdr-toolchain, load the results
+into CE, and compare "VL info" and "VL results" against v1's `viewVL_Info` and `viewVL_Result`
+request by request. Patient names and identifiers can be removed first if that makes sharing easier;
+the comparison only needs the request and result fields.
