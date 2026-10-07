@@ -2,7 +2,7 @@
 
 A content pack for OpenLDR CE. It installs two custom queries that port Mozambique's v1 views
 `viewVL_Info` and `viewVL_Result`, plus the lab register, the health facility register and two
-value sets they need.
+value sets they need. A third query lists the facilities in the layout of v1's `viewFacilities`.
 This is the source of the pack. The signed bundle is built from it.
 
 ## Files
@@ -11,6 +11,7 @@ This is the source of the pack. The signed bundle is built from it.
 |---|---|
 | `build.mjs` | Reads the v1 dictionary `OpenLDRDict_MZ` (SELECT only) and writes `dist/`. |
 | `vl-queries.mjs` | The SQL of both queries: "VL info" and "VL results". |
+| `facility-queries.mjs` | The SQL of "Mozambique facilities (v1 layout)", v1's `viewFacilities` read from the warehouse table `facility_registry`. |
 | `QUESTIONS-FOR-MZ.md` | Open questions for the Mozambique team. |
 | `PACK.md` | The text an admin reads in the marketplace before installing. It becomes the manifest readme. |
 | `.gitignore` | Keeps `dist/` out of git. |
@@ -42,7 +43,9 @@ the cdr-toolchain path in the script. No password is written to any output file.
 7. `link-matching` against the facility register.
 8. `link-matching` against the lab register. Without these two the facility names, provinces
    and districts stay empty in both queries.
-9. `custom-queries`: "VL info" and "VL results".
+9. `custom-queries`: "VL info", "VL results" and "Mozambique facilities (v1 layout)". The
+   facilities query reads the warehouse copy of the register, so it needs a CE with the warehouse
+   table `facility_registry`. It leaves out retired rows. `DateTimeStamp` is CE's update time.
 
 The order of steps 7 and 8 matters. CE's link-matching (`facility-link-matching.ts`) links every
 unmapped observed code that equals a register code, from every observed system, and never
