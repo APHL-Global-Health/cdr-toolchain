@@ -111,7 +111,7 @@ async function main() {
     )).recordset;
     links = (await pool.request().query('SELECT DlinkCode, DlinkName, DlinkState FROM dbo.Disalink')).recordset;
     facilities = (await pool.request().query(
-      'SELECT FacilityCode, Description, ProvinceName, DistrictName FROM dbo.viewFacilities',
+      'SELECT FacilityCode, Description, ProvinceName, DistrictName, ProvinceCode, DistrictCode FROM dbo.viewFacilities',
     )).recordset;
   } finally {
     await pool.close();
@@ -187,7 +187,7 @@ async function main() {
   }
   const regRows = [...register.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
   const header = ['national_code', 'name', 'region', 'district'];
-  const toCsv = (rows) => [header.join(','), ...rows.map((r) => header.map((h) => csvCell(r[h])).join(','))].join('\r\n') + '\r\n';
+  const toCsv = (rows, cols = header) => [cols.join(','), ...rows.map((r) => cols.map((h) => csvCell(r[h])).join(','))].join('\r\n') + '\r\n';
   const csv = toCsv(regRows);
   summary.register.rows = regRows.length;
   summary.register.fromLaboratories = regRows.filter((r) => r.from === 'Laboratories').length;
@@ -207,10 +207,15 @@ async function main() {
       name: cleanNull(f.Description),
       region: cleanNull(f.ProvinceName),
       district: cleanNull(f.DistrictName),
+      province_code: cleanNull(f.ProvinceCode),
+      district_code: cleanNull(f.DistrictCode),
     });
   }
   const facilityRows = [...facilityByCode.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
-  const facilityCsv = toCsv(facilityRows);
+  // v1's area codes go in extras: CE has no typed column for them. The headers are lowercase
+  // because CE stores extras keys in lowercase.
+  const FACILITY_EXTRA_COLUMNS = ['province_code', 'district_code'];
+  const facilityCsv = toCsv(facilityRows, [...header, ...FACILITY_EXTRA_COLUMNS]);
   summary.facilityRegister.rows = facilityRows.length;
   // Codes in both registers. Link-matching gives each one to the register linked first.
   summary.facilityRegister.sharedWithLabs = facilityRows.filter((r) => register.has(r.national_code)).length;
@@ -255,7 +260,7 @@ async function main() {
     { kind: 'code-system', resource: codeSystem(LINK_CS, 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, linkRows) },
     { kind: 'value-set', resource: valueSet('urn:openldr:mz:link-sites', 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, LINK_CS, linkRows) },
     { kind: 'facility-register', url: REGISTER_URL, name: 'Mozambique laboratories and POC sites', code: 'MZLABS', csv },
-    { kind: 'facility-register', url: FACILITY_REGISTER_URL, name: 'Mozambique health facilities', code: 'MZFAC', csv: facilityCsv },
+    { kind: 'facility-register', url: FACILITY_REGISTER_URL, name: 'Mozambique health facilities', code: 'MZFAC', csv: facilityCsv, extraColumns: FACILITY_EXTRA_COLUMNS },
     // The facility register links first. The two registers share some codes (45 on 2026-10-07),
     // and each pair names the same place. Link-matching does not filter by observed system, so the
     // register linked first takes a shared code for testing labs and requesting facilities alike.
@@ -282,7 +287,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.2.0',
+    version: '0.3.0',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
