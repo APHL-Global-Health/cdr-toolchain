@@ -2,7 +2,8 @@
 
 This pack adds two custom queries that give viral load data in the column layout of the
 OpenLDR v1 views `viewVL_Info` and `viewVL_Result`. It is for labs whose data comes from DISA*Lab.
-It also installs Mozambique's lab register and health facility register.
+It also installs Mozambique's lab register and health facility register, and a query that lists
+the facilities in the layout of v1's `viewFacilities`.
 
 ## What it installs
 
@@ -15,7 +16,7 @@ In this order:
    facilities from the v1 dictionary view `viewFacilities`, keyed on the DISA facility code.
 5. Link-matching against the facility register.
 6. Link-matching against the lab register.
-7. The queries "VL info" and "VL results".
+7. The queries "VL info", "VL results" and "Mozambique facilities (v1 layout)".
 
 Link-matching links each observed facility code to the register row with the same code. It does
 not look at whether the code came in as a testing lab or a requesting facility. 45 codes are in

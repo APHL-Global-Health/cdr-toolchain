@@ -17,6 +17,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { vlQueryFile, MOZ_CODES } from './vl-queries.mjs';
+import { facilitiesQuery } from './facility-queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DIST = join(here, 'dist');
@@ -259,6 +260,7 @@ async function main() {
   // Shown under the name on the CE Terminology page.
   const POC_DESCRIPTION = 'Point-of-care sites, from the v1 dictionary list DisaPoc. The VL queries use it for the IsDisaPoc column.';
   const LINK_DESCRIPTION = 'Link sites, from the v1 dictionary list Disalink. The VL queries use it for the IsDisaLink column.';
+  const queryFile = vlQueryFile(MOZ_CODES);
   const steps = [
     { kind: 'code-system', resource: codeSystem(POC_CS, 'MozPocSites', POC_TITLE, POC_DESCRIPTION, pocRows) },
     { kind: 'value-set', resource: valueSet('urn:openldr:mz:poc-sites', 'MozPocSites', POC_TITLE, POC_DESCRIPTION, POC_CS, pocRows) },
@@ -272,7 +274,8 @@ async function main() {
     // The facility rows carry province and district. The lab rows for these codes do not.
     { kind: 'link-matching', registerUrl: FACILITY_REGISTER_URL },
     { kind: 'link-matching', registerUrl: REGISTER_URL },
-    { kind: 'custom-queries', file: vlQueryFile(MOZ_CODES) },
+    // The VL queries, then the facility list in v1's viewFacilities layout.
+    { kind: 'custom-queries', file: { ...queryFile, queries: [...queryFile.queries, facilitiesQuery(FACILITY_REGISTER_URL)] } },
   ];
   writeJson('pack.json', { formatVersion: 1, steps });
 
@@ -292,7 +295,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.5.0',
+    version: '0.5.1',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
