@@ -15,8 +15,9 @@ Ask:
 - Do lab feeds ever send a province code as a requesting facility? If so, in which form?
 - Why are provinces rows in the facility view at all? Are they used as a fallback facility?
 
-The pack uses the dictionary, so it writes `01` to `09`. The dev CE also holds `1` to `9` from a
-hand import of the xlsx. Those nine rows were left in place on purpose.
+The pack uses the dictionary, so it writes `01` to `09`. A hand import of the xlsx had put `1` to `9`
+on the dev CE as well. Those nine rows were retired on 2026-10-07 (`register_state` dropped), so they
+stay in history but no longer count as part of the register. The question above still stands.
 
 ## 2. The three missing functions
 
