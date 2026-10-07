@@ -111,7 +111,7 @@ async function main() {
     )).recordset;
     links = (await pool.request().query('SELECT DlinkCode, DlinkName, DlinkState FROM dbo.Disalink')).recordset;
     facilities = (await pool.request().query(
-      'SELECT FacilityCode, Description, ProvinceName, DistrictName, ProvinceCode, DistrictCode FROM dbo.viewFacilities',
+      'SELECT FacilityCode, Description, ProvinceName, DistrictName, ProvinceCode, DistrictCode, FacilityType, HFStatus FROM dbo.viewFacilities',
     )).recordset;
   } finally {
     await pool.close();
@@ -209,12 +209,15 @@ async function main() {
       district: cleanNull(f.DistrictName),
       province_code: cleanNull(f.ProvinceCode),
       district_code: cleanNull(f.DistrictCode),
+      facility_type: cleanNull(f.FacilityType),
+      hf_status: cleanNull(f.HFStatus),
     });
   }
   const facilityRows = [...facilityByCode.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
-  // v1's area codes go in extras: CE has no typed column for them. The headers are lowercase
+  // v1's area codes, FacilityType and HFStatus go in extras as v1 has them. CE has no column for
+  // the codes, and level and status need the letters mapped first. The headers are lowercase
   // because CE stores extras keys in lowercase.
-  const FACILITY_EXTRA_COLUMNS = ['province_code', 'district_code'];
+  const FACILITY_EXTRA_COLUMNS = ['province_code', 'district_code', 'facility_type', 'hf_status'];
   const facilityCsv = toCsv(facilityRows, [...header, ...FACILITY_EXTRA_COLUMNS]);
   summary.facilityRegister.rows = facilityRows.length;
   // Codes in both registers. Link-matching gives each one to the register linked first.
@@ -287,7 +290,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.3.0',
+    version: '0.4.0',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',

@@ -89,15 +89,18 @@ The private key never enters a repo. Keep it outside every working tree. Never c
 
 - One row per `viewFacilities` row. Code `FacilityCode` (the DISA code, not the MISAU national
   code), name `Description`, `region` `ProvinceName`, `district` `DistrictName`.
-- `ProvinceCode` and `DistrictCode` go in `extras`, as `province_code` and `district_code`. The
-  step lists them in `extraColumns`, so CE keeps them and still refuses any other unknown column.
-  The headers are lowercase because CE stores `extras` keys in lowercase. This needs a CE with
-  extra register columns (0.3.0 onward of this pack); an older CE refuses the pack.
+- `ProvinceCode`, `DistrictCode`, `FacilityType` and `HFStatus` go in `extras`, as
+  `province_code`, `district_code`, `facility_type` and `hf_status`, with v1's raw values. The step
+  lists them in `extraColumns`, so CE keeps them and still refuses any other unknown column. The
+  headers are lowercase because CE stores `extras` keys in lowercase. This needs a CE with extra
+  register columns (0.3.0 onward of this pack); an older CE refuses the pack.
+- `FacilityType` and `HFStatus` are not mapped into CE's `level` and `status`. The letters have no
+  definitions in the dictionary, and HFStatus 0 as "inactive" is a guess. See QUESTIONS-FOR-MZ.md.
 - An empty value, or the text `NULL`, is written as empty.
-- Left out: facility type and `HFStatus`. They need value mapping to CE's values first.
 - A blank code, a blank name or a repeated code is left out and named in `build-summary.json`.
 - Result from the dictionary on 2026-10-07: 2,830 rows, none left out. 37 have no province and
-  53 have no district. 2,793 have a province code and 2,781 a district code.
+  53 have no district. 2,793 have a province code and 2,781 a district code. FacilityType: H
+  2,554, blank 171, Q 60, Y 20, F 17, C 4, and P, V, T, G once each. HFStatus: 1 on 2,370, 0 on 460.
 
 The value sets hold every `DisaPoc` and `Disalink` row, active or not. v1's `IsDisaPoc` and
 `IsDisaLink` do not check the state either. Those two output columns keep v1's names on purpose.
