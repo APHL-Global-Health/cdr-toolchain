@@ -7,7 +7,7 @@
 // apps/cli/.env. The password is never written to any output file.
 //
 // Writes to dist/ (git-ignored), next to this script:
-//   pack.json            the pack payload: seven steps, in install order
+//   pack.json            the pack payload: nine steps, in install order
 //   manifest.json        the unsigned artifact manifest. `openldr artifact pack` fills in the
 //                        key fingerprint and the payload hash, then signs it.
 //   build-summary.json   row counts and every row left out, with the reason
@@ -36,6 +36,8 @@ function connectionString() {
 }
 
 const clean = (v) => (v == null ? '' : String(v).trim());
+// The facility dictionary writes some empty values as the text NULL.
+const cleanNull = (v) => (clean(v).toUpperCase() === 'NULL' ? '' : clean(v));
 
 function csvCell(v) {
   const s = clean(v);
@@ -101,13 +103,16 @@ function summarizeStep(step) {
 async function main() {
   const sql = require(MSSQL);
   const pool = await sql.connect(connectionString());
-  let labs, pocs, links;
+  let labs, pocs, links, facilities;
   try {
     labs = (await pool.request().query('SELECT LabCode, LabName, LabType FROM dbo.Laboratories')).recordset;
     pocs = (await pool.request().query(
       'SELECT DisaPocCode, DisaPocName, DisaPocLabNo, DisaPocProvinceName, DisapocDistrictName, DisapocState FROM dbo.DisaPoc',
     )).recordset;
     links = (await pool.request().query('SELECT DlinkCode, DlinkName, DlinkState FROM dbo.Disalink')).recordset;
+    facilities = (await pool.request().query(
+      'SELECT FacilityCode, Description, ProvinceName, DistrictName FROM dbo.viewFacilities',
+    )).recordset;
   } finally {
     await pool.close();
   }
@@ -115,8 +120,9 @@ async function main() {
   const summary = {
     source: DICT_DB,
     builtAt: new Date().toISOString(),
-    read: { laboratories: labs.length, disaPoc: pocs.length, disalink: links.length },
+    read: { laboratories: labs.length, disaPoc: pocs.length, disalink: links.length, viewFacilities: facilities.length },
     register: { rows: 0, fromLaboratories: 0, fromDisaPoc: 0, left_out: [] },
+    facilityRegister: { rows: 0, sharedWithLabs: 0, left_out: [] },
     pocValueSet: { concepts: 0, left_out: [] },
     linkValueSet: { concepts: 0, left_out: [] },
   };
@@ -181,10 +187,33 @@ async function main() {
   }
   const regRows = [...register.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
   const header = ['national_code', 'name', 'region', 'district'];
-  const csv = [header.join(','), ...regRows.map((r) => header.map((h) => csvCell(r[h])).join(','))].join('\r\n') + '\r\n';
+  const toCsv = (rows) => [header.join(','), ...rows.map((r) => header.map((h) => csvCell(r[h])).join(','))].join('\r\n') + '\r\n';
+  const csv = toCsv(regRows);
   summary.register.rows = regRows.length;
   summary.register.fromLaboratories = regRows.filter((r) => r.from === 'Laboratories').length;
   summary.register.fromDisaPoc = regRows.filter((r) => r.from === 'DisaPoc').length;
+
+  // ---- Facility register: one row per viewFacilities row, keyed on FacilityCode, the DISA code.
+  // Not the MISAU national code (slice A decision). Facility type and HFStatus are left out: they
+  // need value mapping first.
+  const facilityByCode = new Map();
+  for (const f of facilities) {
+    const code = cleanNull(f.FacilityCode);
+    if (!code) { summary.facilityRegister.left_out.push({ key: cleanNull(f.Description), reason: 'blank FacilityCode' }); continue; }
+    if (!cleanNull(f.Description)) { summary.facilityRegister.left_out.push({ key: code, reason: 'blank Description' }); continue; }
+    if (facilityByCode.has(code)) { summary.facilityRegister.left_out.push({ key: code, reason: 'duplicate FacilityCode' }); continue; }
+    facilityByCode.set(code, {
+      national_code: code,
+      name: cleanNull(f.Description),
+      region: cleanNull(f.ProvinceName),
+      district: cleanNull(f.DistrictName),
+    });
+  }
+  const facilityRows = [...facilityByCode.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
+  const facilityCsv = toCsv(facilityRows);
+  summary.facilityRegister.rows = facilityRows.length;
+  // Codes in both registers. Link-matching gives each one to the register linked first.
+  summary.facilityRegister.sharedWithLabs = facilityRows.filter((r) => register.has(r.national_code)).length;
 
   // ---- Value sets. Every row, active or not: v1's IsDisaPoc and IsDisaLink do not filter on state. ----
   const pocRows = [];
@@ -214,6 +243,7 @@ async function main() {
   const POC_CS = 'urn:openldr:mz:cs:poc-sites';
   const LINK_CS = 'urn:openldr:mz:cs:link-sites';
   const REGISTER_URL = 'urn:openldr:mz:laboratories';
+  const FACILITY_REGISTER_URL = 'urn:openldr:mz:facilities';
   const POC_TITLE = 'Mozambique POC sites';
   const LINK_TITLE = 'Mozambique link sites';
   // Shown under the name on the CE Terminology page.
@@ -225,6 +255,12 @@ async function main() {
     { kind: 'code-system', resource: codeSystem(LINK_CS, 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, linkRows) },
     { kind: 'value-set', resource: valueSet('urn:openldr:mz:link-sites', 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, LINK_CS, linkRows) },
     { kind: 'facility-register', url: REGISTER_URL, name: 'Mozambique laboratories and POC sites', code: 'MZLABS', csv },
+    { kind: 'facility-register', url: FACILITY_REGISTER_URL, name: 'Mozambique health facilities', code: 'MZFAC', csv: facilityCsv },
+    // The facility register links first. The two registers share some codes (45 on 2026-10-07),
+    // and each pair names the same place. Link-matching does not filter by observed system, so the
+    // register linked first takes a shared code for testing labs and requesting facilities alike.
+    // The facility rows carry province and district. The lab rows for these codes do not.
+    { kind: 'link-matching', registerUrl: FACILITY_REGISTER_URL },
     { kind: 'link-matching', registerUrl: REGISTER_URL },
     { kind: 'custom-queries', file: vlQueryFile(MOZ_CODES) },
   ];
@@ -234,6 +270,7 @@ async function main() {
   // payload hash. The zeros only satisfy the 64-hex check until then. ----
   const leftOut = [
     ...summary.register.left_out.map((r) => `register, ${r.table} ${r.key}: ${r.reason}`),
+    ...summary.facilityRegister.left_out.map((r) => `facility register, viewFacilities ${r.key}: ${r.reason}`),
     ...summary.pocValueSet.left_out.map((r) => `POC value set, ${r.key}: ${r.reason}`),
     ...summary.linkValueSet.left_out.map((r) => `link value set, ${r.key}: ${r.reason}`),
   ];
@@ -245,7 +282,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.1.1',
+    version: '0.2.0',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
@@ -260,6 +297,7 @@ async function main() {
     read: summary.read,
     steps: steps.map(summarizeStep),
     register: { rows: summary.register.rows, fromLaboratories: summary.register.fromLaboratories, fromDisaPoc: summary.register.fromDisaPoc, leftOut: summary.register.left_out.length },
+    facilityRegister: { rows: summary.facilityRegister.rows, sharedWithLabs: summary.facilityRegister.sharedWithLabs, leftOut: summary.facilityRegister.left_out.length },
     pocValueSet: { concepts: summary.pocValueSet.concepts, leftOut: summary.pocValueSet.left_out.length },
     linkValueSet: { concepts: summary.linkValueSet.concepts, leftOut: summary.linkValueSet.left_out.length },
   }, null, 2));

@@ -1,7 +1,8 @@
 # vl-reports-mz pack
 
 A content pack for OpenLDR CE. It installs two custom queries that port Mozambique's v1 views
-`viewVL_Info` and `viewVL_Result`, plus the lab register and two value sets they need.
+`viewVL_Info` and `viewVL_Result`, plus the lab register, the health facility register and two
+value sets they need.
 This is the source of the pack. The signed bundle is built from it.
 
 ## Files
@@ -10,6 +11,7 @@ This is the source of the pack. The signed bundle is built from it.
 |---|---|
 | `build.mjs` | Reads the v1 dictionary `OpenLDRDict_MZ` (SELECT only) and writes `dist/`. |
 | `vl-queries.mjs` | The SQL of both queries: "VL info" and "VL results". |
+| `QUESTIONS-FOR-MZ.md` | Open questions for the Mozambique team. |
 | `PACK.md` | The text an admin reads in the marketplace before installing. It becomes the manifest readme. |
 | `.gitignore` | Keeps `dist/` out of git. |
 
@@ -36,12 +38,22 @@ the cdr-toolchain path in the script. No password is written to any output file.
 3. `code-system` for the link sites, `urn:openldr:mz:cs:link-sites`.
 4. `value-set` `urn:openldr:mz:link-sites`.
 5. `facility-register` `urn:openldr:mz:laboratories`, code `MZLABS`, with the register CSV.
-6. `link-matching` against that register. Without it the testing lab name, province and
-   district stay empty in both queries.
-7. `custom-queries`: "VL info" and "VL results".
+6. `facility-register` `urn:openldr:mz:facilities`, code `MZFAC`, from `viewFacilities`.
+7. `link-matching` against the facility register.
+8. `link-matching` against the lab register. Without these two the facility names, provinces
+   and districts stay empty in both queries.
+9. `custom-queries`: "VL info" and "VL results".
 
-Requesting facilities come from the v1 facility dictionary register (slice A). Link that
-register the same way.
+The order of steps 7 and 8 matters. CE's link-matching (`facility-link-matching.ts`) links every
+unmapped observed code that equals a register code, from every observed system, and never
+replaces an existing mapping. So the register linked first takes a code both registers share, for
+testing labs (`urn:openldr:default_lab`) and requesting facilities (`urn:openldr:default_fac`)
+alike. On 2026-10-07 the two registers share 45 codes, and each pair names the same place. The
+lab rows for those codes have no province or district, and the facility rows do. So the facility
+register links first. A per-system filter in CE would remove the order rule. It is not built.
+
+Link-matching only links codes CE has already seen. On a new install with no results it links
+nothing, and the order matters again when someone runs it by hand later.
 
 ## Sign and publish
 
@@ -68,6 +80,20 @@ The private key never enters a repo. Keep it outside every working tree. Never c
 - Left out: 2 POCs with a blank `DisaPocLabNo` and 2 labs with a blank `LabName`.
 - Result from the dictionary on 2026-09-30: 311 rows (208 POC, 103 lab), 8 rows left out.
   `build-summary.json` names each one.
+- Two lab names read "Autopsia Laborat¢rio Maputo" (codes PAA and PPP). The dictionary stores
+  byte `0xA2` in a CP1252 column. That byte is `ó` in DOS code page 850, so the name was typed
+  under CP850. The build reads it correctly and does not change it. `viewFacilities` has one
+  more: REALF "Priv. Fam¡lia Real" (`0xA1`, `í` in CP850).
+
+## How the facility register is built
+
+- One row per `viewFacilities` row. Code `FacilityCode` (the DISA code, not the MISAU national
+  code), name `Description`, `region` `ProvinceName`, `district` `DistrictName`.
+- An empty value, or the text `NULL`, is written as empty.
+- Left out: facility type and `HFStatus`. They need value mapping to CE's values first.
+- A blank code, a blank name or a repeated code is left out and named in `build-summary.json`.
+- Result from the dictionary on 2026-10-07: 2,830 rows, none left out. 37 have no province and
+  53 have no district.
 
 The value sets hold every `DisaPoc` and `Disalink` row, active or not. v1's `IsDisaPoc` and
 `IsDisaLink` do not check the state either. Those two output columns keep v1's names on purpose.
@@ -77,8 +103,9 @@ The value sets hold every `DisaPoc` and `Disalink` row, active or not. v1's `IsD
 Both queries take the same three text parameters.
 
 - `from`, `to`: required. Dates as `YYYY-MM-DD`, on registered time (`lab_requests.authored_at`).
-- `facility`: requesting facility code. Pass an empty string for all facilities. Leaving it out
-  entirely fails with "unbound parameter: facility".
+- `facility`: requesting facility code. Leave it blank for all facilities. On a CE before the
+  blank-parameter fix, leaving it out entirely fails with "unbound parameter: facility", so pass
+  an empty string there.
 
 A report run stops at 1000 rows. Narrow the dates for a big lab.
 
@@ -145,7 +172,8 @@ What this pack has not shown:
   `Unreported` or NULL. There is no Mozambique cdr-toolchain config yet.
 - **The dictionary joins on real data.** The register and value sets were imported and projected,
   but no Mozambique code has been matched against them.
-- **Link matching for this register.** The link-matching step was not run on the dev CE.
+- **Link matching on real data.** The dev CE has no results, so both link-matching steps link
+  nothing. The order rule for the 45 shared codes is reasoned from the code, not observed.
 - **Anything the three missing functions do.**
 - **Duplicate observations.** A request with one observation code twice returns two rows, as v1
   did. No Tanzania HIVVL request has this, so it was not exercised.
