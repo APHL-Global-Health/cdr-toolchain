@@ -89,8 +89,9 @@ The private key never enters a repo. Keep it outside every working tree. Never c
 
 - One row per `viewFacilities` row. Code `FacilityCode` (the DISA code, not the MISAU national
   code), name `Description`, `region` `ProvinceName`, `district` `DistrictName`.
-- `ProvinceCode`, `DistrictCode`, `FacilityType` and `HFStatus` go in `extras`, as
-  `province_code`, `district_code`, `facility_type` and `hf_status`, with v1's raw values. The step
+- `ProvinceCode`, `DistrictCode`, `FacilityType`, `HFStatus` and `FacilityNationalCode` go in
+  `extras`, as `province_code`, `district_code`, `facility_type`, `hf_status` and
+  `facility_national_code`, with v1's raw values. The step
   lists them in `extraColumns`, so CE keeps them and still refuses any other unknown column. The
   headers are lowercase because CE stores `extras` keys in lowercase. This needs a CE with extra
   register columns (0.3.0 onward of this pack); an older CE refuses the pack.
@@ -101,6 +102,8 @@ The private key never enters a repo. Keep it outside every working tree. Never c
 - Result from the dictionary on 2026-10-07: 2,830 rows, none left out. 37 have no province and
   53 have no district. 2,793 have a province code and 2,781 a district code. FacilityType: H
   2,554, blank 171, Q 60, Y 20, F 17, C 4, and P, V, T, G once each. HFStatus: 1 on 2,370, 0 on 460.
+  FacilityNationalCode: 2,305 rows, 1,889 distinct codes, so some MISAU codes cover several DISA
+  facilities.
 
 The value sets hold every `DisaPoc` and `Disalink` row, active or not. v1's `IsDisaPoc` and
 `IsDisaLink` do not check the state either. Those two output columns keep v1's names on purpose.
