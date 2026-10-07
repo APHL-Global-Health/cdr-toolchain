@@ -11,6 +11,7 @@ This is the source of the pack. The signed bundle is built from it.
 |---|---|
 | `build.mjs` | Reads the v1 dictionary `OpenLDRDict_MZ` (SELECT only) and writes `dist/`. |
 | `vl-queries.mjs` | The SQL of both queries: "VL info" and "VL results". |
+| `QUESTIONS-FOR-MZ.md` | Open questions for the Mozambique team. |
 | `PACK.md` | The text an admin reads in the marketplace before installing. It becomes the manifest readme. |
 | `.gitignore` | Keeps `dist/` out of git. |
 
