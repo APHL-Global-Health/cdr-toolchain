@@ -36,6 +36,9 @@ function connectionString() {
   return cs.replace(/;?\s*$/, '') + `;Database=${DICT_DB}`;
 }
 
+// HFStatus as CE location-status codes. Confirmed by the Mozambique team on 2026-10-09.
+const HF_STATUS = { 1: 'active', 0: 'inactive' };
+
 const clean = (v) => (v == null ? '' : String(v).trim());
 // The facility dictionary writes some empty values as the text NULL.
 const cleanNull = (v) => (clean(v).toUpperCase() === 'NULL' ? '' : clean(v));
@@ -212,16 +215,19 @@ async function main() {
       district_code: cleanNull(f.DistrictCode),
       facility_type: cleanNull(f.FacilityType),
       hf_status: cleanNull(f.HFStatus),
+      // CE's own status, from HFStatus. The Mozambique team confirmed 1 = active, 0 = closed
+      // (2026-10-09). FHIR location-status has no "closed"; "inactive" is its "no longer used".
+      status: HF_STATUS[cleanNull(f.HFStatus)] ?? '',
       facility_national_code: cleanNull(f.FacilityNationalCode),
     });
   }
   const facilityRows = [...facilityByCode.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
   // These v1 values go in extras exactly as v1 has them. CE has no column for the area codes or the
-  // MISAU national code (the register is keyed on the DISA code), and level and status need the
-  // FacilityType letters and HFStatus mapped first. The headers are lowercase because CE stores
-  // extras keys in lowercase.
+  // MISAU national code (the register is keyed on the DISA code), and level needs the FacilityType
+  // letters defined first. hf_status stays raw beside the mapped status. The headers are lowercase
+  // because CE stores extras keys in lowercase.
   const FACILITY_EXTRA_COLUMNS = ['province_code', 'district_code', 'facility_type', 'hf_status', 'facility_national_code'];
-  const facilityCsv = toCsv(facilityRows, [...header, ...FACILITY_EXTRA_COLUMNS]);
+  const facilityCsv = toCsv(facilityRows, [...header, 'status', ...FACILITY_EXTRA_COLUMNS]);
   summary.facilityRegister.rows = facilityRows.length;
   // Codes in both registers. Link-matching gives each one to the register linked first.
   summary.facilityRegister.sharedWithLabs = facilityRows.filter((r) => register.has(r.national_code)).length;
@@ -295,7 +301,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.5.1',
+    version: '0.5.2',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',

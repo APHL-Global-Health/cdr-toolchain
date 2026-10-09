@@ -98,8 +98,11 @@ The private key never enters a repo. Keep it outside every working tree. Never c
   lists them in `extraColumns`, so CE keeps them and still refuses any other unknown column. The
   headers are lowercase because CE stores `extras` keys in lowercase. This needs a CE with extra
   register columns (0.3.0 onward of this pack); an older CE refuses the pack.
-- `FacilityType` and `HFStatus` are not mapped into CE's `level` and `status`. The letters have no
-  definitions in the dictionary, and HFStatus 0 as "inactive" is a guess. See QUESTIONS-FOR-MZ.md.
+- `HFStatus` also sets CE's `status` column: 1 is `active`, 0 is `inactive` (the Mozambique team
+  confirmed 0 means closed, 2026-10-09). CE uses `status` for display and filtering only; retirement
+  is `register_state`, so an inactive facility is not hidden.
+- `FacilityType` is not mapped into CE's `level`. The letters come from DISA*Lab's location
+  dictionary (`DisaGlobal.LOCNDIC4`), which we do not have for Mozambique. See QUESTIONS-FOR-MZ.md.
 - An empty value, or the text `NULL`, is written as empty.
 - A blank code, a blank name or a repeated code is left out and named in `build-summary.json`.
 - Result from the dictionary on 2026-10-07: 2,830 rows, none left out. 37 have no province and
