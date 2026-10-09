@@ -21,6 +21,10 @@ export interface RegistrationOffsets {
 export interface AttributeCodes {
   therapy: string | null;
   folderNumber: string | null;
+  /** REGDAT4 RefNos, v1 Patients.REFNO. */
+  referenceNumbers: string | null;
+  /** REGDAT4 UniqueID, v1 Patients.UNIQUEID. */
+  uniqueId: string | null;
   newborn: string | null;
 }
 
@@ -32,7 +36,7 @@ export interface RequestFactConfig {
 }
 
 const NO_REGISTRATION: RegistrationOffsets = { requestType: null, ageYears: null, ageDays: null, newborn: null };
-const NO_ATTRIBUTES: AttributeCodes = { therapy: null, folderNumber: null, newborn: null };
+const NO_ATTRIBUTES: AttributeCodes = { therapy: null, folderNumber: null, referenceNumbers: null, uniqueId: null, newborn: null };
 export const EMPTY_REQUEST_FACT_CONFIG: RequestFactConfig = {
   registration: NO_REGISTRATION, sectionCodes: new Map(), attributeCodes: NO_ATTRIBUTES,
 };
@@ -56,6 +60,8 @@ const attributesSchema = z.object({
   request_attributes: z.object({
     therapy: attributeCode.optional(),
     folder_number: attributeCode.optional(),
+    reference_numbers: attributeCode.optional(),
+    unique_id: attributeCode.optional(),
     newborn: attributeCode.optional(),
   }).optional(),
 });
@@ -74,7 +80,9 @@ export function loadRequestFactConfig(country: string | undefined, dir: string =
   if (!attrs.success) throw invalid(attrPath, attrs.error);
   const a = attrs.data.request_attributes ?? {};
   const attributeCodes: AttributeCodes = {
-    therapy: a.therapy ?? null, folderNumber: a.folder_number ?? null, newborn: a.newborn ?? null,
+    therapy: a.therapy ?? null, folderNumber: a.folder_number ?? null,
+    referenceNumbers: a.reference_numbers ?? null, uniqueId: a.unique_id ?? null,
+    newborn: a.newborn ?? null,
   };
 
   if (country === undefined || country.trim().length === 0) return { ...EMPTY_REQUEST_FACT_CONFIG, attributeCodes };
