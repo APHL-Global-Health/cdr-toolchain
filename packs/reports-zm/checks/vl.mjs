@@ -727,18 +727,17 @@ insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, 
 // ---- Expected rows, worked out by hand from the List text (lines 34-47 for the output and the order) ----
 
 const SEX_AGE_COLUMNS = ['Province', 'District', 'Facility', 'Gender', 'AgeGroup', 'Tests', 'Suppressed', 'UnSuppressed',
-  'Undetectable', 'TATWithin14', 'Pregnant', 'BreastFeeding', 'BaselineVL', 'ThreeMPostUnSuppressed', 'SuppressionRate'];
+  'Undetectable', 'TATWithin14', 'Pregnant', 'BreastFeeding', 'BaselineVL', 'ThreeMPostUnSuppressed'];
 // counts: [tests, suppressed, unsuppressed, undetectable, within 14 days, pregnant, breastfeeding, baseline, 3 months]
-const sx = (province, district, facility, gender, age, counts, rate) =>
-  Object.fromEntries(SEX_AGE_COLUMNS.map((c, i) => [c, [province, district, facility, gender, age, ...counts, rate][i]]));
-// The fallback row (lines 49, 80, 112): blank names, zeros. v1's row has no UnSuppressed column and no rate.
-const NOTHING = sx('', '', '', '', '', [0, 0, 0, 0, 0, 0, 0, 0, 0], null);
+const sx = (province, district, facility, gender, age, counts) =>
+  Object.fromEntries(SEX_AGE_COLUMNS.map((c, i) => [c, [province, district, facility, gender, age, ...counts][i]]));
+// The fallback row (lines 49, 80, 112): blank names, zeros. v1's row has no UnSuppressed column; the port gives 0.
+const NOTHING = sx('', '', '', '', '', [0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
-// Southern, by gender and age group. Rate = suppressed / tests as a percent, one decimal
-// (vVLQuarterlyFacilitySuppressionRate line 40).
+// Southern, by gender and age group.
 //   C2 Female 20-24: 1 test, suppressed, undetectable, within 14.
 //   A3 Female 25-29: tat 19, so not within 14; breastfeeding.
-//   A1 A2 A6 Female 30-34: suppressed 2 (A1 A6), pregnant 1 (A2), within 14 all three: 2/3 = 66.7.
+//   A1 A2 A6 Female 30-34: suppressed 2 (A1 A6), pregnant 1 (A2), within 14 all three.
 //   B2 Female, no age group. C1 Male 20-24 (unsuppressed). A4 A5 Male 40-44: suppressed 1, undetectable 1, baseline 1, 3 months 1.
 //   B1 B4 gender NULL 10-14: both suppressed, undetectable 1 (B4). B3 gender NULL and age NULL: unsuppressed.
 const S_FEM2024 = [1, 1, 0, 1, 1, 0, 0, 0, 0];
@@ -754,37 +753,37 @@ const ONE_SUPP_UU = [1, 1, 0, 1, 1, 0, 0, 0, 0];
 
 // National branch (List line 34): one row per province, gender, age group; District and Facility are 'All'.
 const NATIONAL7 = [
-  sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU, 100),                    // D1
-  sx('Lusaka', 'All', 'All', 'Male', '15-19', ONE_SUPP, 100),                         // D4
-  sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),                           // D2, local 06-01 00:00:00
-  sx('Southern', 'All', 'All', 'Female', '20-24', S_FEM2024, 100),
-  sx('Southern', 'All', 'All', 'Female', '25-29', S_FEM2529, 100),
-  sx('Southern', 'All', 'All', 'Female', '30-34', S_FEM3034, 66.7),
-  sx('Southern', 'All', 'All', 'Female', 'Missing', S_FEMMISS, 100),
-  sx('Southern', 'All', 'All', 'Male', '20-24', S_MAL2024, 0),
-  sx('Southern', 'All', 'All', 'Male', '40-44', S_MAL4044, 50),
-  sx('Southern', 'All', 'All', 'Missing', '10-14', S_MIS1014, 100),
-  sx('Southern', 'All', 'All', 'Missing', 'Missing', S_MISMISS, 0),
+  sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU),                    // D1
+  sx('Lusaka', 'All', 'All', 'Male', '15-19', ONE_SUPP),                         // D4
+  sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP),                           // D2, local 06-01 00:00:00
+  sx('Southern', 'All', 'All', 'Female', '20-24', S_FEM2024),
+  sx('Southern', 'All', 'All', 'Female', '25-29', S_FEM2529),
+  sx('Southern', 'All', 'All', 'Female', '30-34', S_FEM3034),
+  sx('Southern', 'All', 'All', 'Female', 'Missing', S_FEMMISS),
+  sx('Southern', 'All', 'All', 'Male', '20-24', S_MAL2024),
+  sx('Southern', 'All', 'All', 'Male', '40-44', S_MAL4044),
+  sx('Southern', 'All', 'All', 'Missing', '10-14', S_MIS1014),
+  sx('Southern', 'All', 'All', 'Missing', 'Missing', S_MISMISS),
 ];
 // Province branch (line 65): one row per facility, gender, age group. Order: district, facility, gender, age group.
 const CHOMA_CLINIC = [
-  sx('Southern', 'Choma', 'Choma Clinic', 'Female', 'Missing', S_FEMMISS, 100),
-  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', '10-14', S_MIS1014, 100),
-  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', 'Missing', S_MISMISS, 0),
+  sx('Southern', 'Choma', 'Choma Clinic', 'Female', 'Missing', S_FEMMISS),
+  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', '10-14', S_MIS1014),
+  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', 'Missing', S_MISMISS),
 ];
 const CHOMA_GENERAL = [
-  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '25-29', S_FEM2529, 100),
-  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '30-34', S_FEM3034, 66.7),
-  sx('Southern', 'Choma', 'Choma General Hospital', 'Male', '40-44', S_MAL4044, 50),
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '25-29', S_FEM2529),
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '30-34', S_FEM3034),
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Male', '40-44', S_MAL4044),
 ];
 const MAZABUKA7 = [
-  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Female', '20-24', S_FEM2024, 100),
-  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Male', '20-24', S_MAL2024, 0),
+  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Female', '20-24', S_FEM2024),
+  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Male', '20-24', S_MAL2024),
 ];
 const CHILENJE = [
-  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Female', '25-29', ONE_SUPP_UU, 100),
-  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP, 100),
-  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '50+', ONE_SUPP, 100),
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Female', '25-29', ONE_SUPP_UU),
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP),
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '50+', ONE_SUPP),
 ];
 
 // ---- The List suites ----
@@ -841,22 +840,22 @@ const suites7list = [
   // The window is [from 00:00:00, to + 1 day 00:00:00] on the LOCAL wall time (lines 17-21, 29, 40).
   // 05-31: D1 (05-31 23:50) and D2 (exactly 06-01 00:00:00) are in; D3 (00:00:01) is out.
   listSuite('sexage-window-0531', { ...area2('', ''), from: '2026-05-31', to: '2026-05-31' }, [
-    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU, 100),
-    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),
+    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU),
+    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP),
   ]),
   // 06-01: D2 again (a test at midnight counts in two consecutive windows), D3, and D6 (06-01 23:30).
   listSuite('sexage-window-0601', { ...area2('', ''), from: '2026-06-01', to: '2026-06-01' }, [
-    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP, 100),
-    sx('Lusaka', 'All', 'All', 'Female', '35-39', ONE_SUPP, 100),
-    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),
+    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP),
+    sx('Lusaka', 'All', 'All', 'Female', '35-39', ONE_SUPP),
+    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP),
   ]),
   // 04-30: D5 (04-30 23:30) is in; D4 (local 05-01 00:30, after the midnight that ends the window) is out. v2 would take it.
   listSuite('sexage-window-0430', { ...area2('', ''), from: '2026-04-30', to: '2026-04-30' }, [
-    sx('Lusaka', 'All', 'All', 'Female', '40-44', ONE_SUPP, 100),
+    sx('Lusaka', 'All', 'All', 'Female', '40-44', ONE_SUPP),
   ]),
   // 05-01: D4 is in (local 05-01 00:30; its UTC date is 04-30).
   listSuite('sexage-window-0501', { ...area2('Lusaka', ''), from: '2026-05-01', to: '2026-05-01' }, [
-    sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP, 100),
+    sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP),
   ]),
   {
     name: 'sexage-shape',

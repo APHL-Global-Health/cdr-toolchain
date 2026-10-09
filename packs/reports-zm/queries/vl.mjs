@@ -213,14 +213,13 @@ export const vlDashboardParams = () => [
 // Merged views (spec ruling 2). vSuppressionByFacility and vVLQuarterlyFacilitySuppressionRate both cannot run
 // against the v1 scripts as written (inventory: the first selects Quarter, Month and Week that its source view
 // lacks, and counts the text '< 1000 copies/ml' that the source never emits; the second tests '>= 1000 copies/ml',
-// which the source never emits, so its rate is always 100.0). Their evident intent is suppressed, unsuppressed
-// and the suppression rate by facility, sex and age group. This query carries that:
+// which the source never emits, so its rate is always 100.0). Their evident intent is suppressed and unsuppressed
+// counts (and a rate) by facility, sex and age group. v1's own List already carries that:
 //   - Suppressed and UnSuppressed by facility, Gender and AgeGroup are the v2_List columns (lines 35-36), with
 //     hivvl's rule for "suppressed" (a number under 1000, or a text on the suppressed list), not the views' text
 //     lists.
-//   - SuppressionRate is a column of this query and not of v1's List: suppressed over tests as a percent with one
-//     decimal, the last column. It follows the view (line 40 of the view: cast(... as decimal(18,1)) of suppressed over
-//     requests times 100). It is added after v1's columns, so v1's thirteen come first and unchanged.
+//   - The views' rate is Suppressed / Tests as a percent (the second view, line 40). It is not a column, because the
+//     List runs in v1 and keeps v1's 14 columns (spec ruling 1). Divide the two columns to get it.
 //   NOT covered, and not claimed:
 //   - The time split. vSuppressionByFacility groups by Year, Quarter, Month and Week, and vVLQuarterlyFacilitySuppressionRate
 //     by Year. This query has no time column. Run it once per quarter, month or week (set from and to) to get that split.
@@ -238,7 +237,7 @@ export const vlDashboardParams = () => [
 
 const AGE_ORDER = ['<01', '01-04', '05-09', '10-14', '15-19', '20-24', '25-29', '30-34', '35-39', '40-44', '45-49', '50+', 'Missing'];
 const SEX_AGE_COLUMNS = ['Province', 'District', 'Facility', 'Gender', 'AgeGroup', 'Tests', 'Suppressed', 'UnSuppressed', 'Undetectable',
-  'TATWithin14', 'Pregnant', 'BreastFeeding', 'BaselineVL', 'ThreeMPostUnSuppressed', 'SuppressionRate'];
+  'TATWithin14', 'Pregnant', 'BreastFeeding', 'BaselineVL', 'ThreeMPostUnSuppressed'];
 
 export function vlSexAgeSql() {
   const national = `(${blank('province')} and ${blank('district')})`;
@@ -272,12 +271,12 @@ from (
     case when ${national} then 'All' else a.facility end as "Facility", a.gender as "Gender", a.age_group as "AgeGroup",
     a.tests as "Tests", a.supp as "Suppressed", a.tests - a.supp as "UnSuppressed", a.uu as "Undetectable",
     a.w14 as "TATWithin14", a.preg as "Pregnant", a.bf as "BreastFeeding", a.base as "BaselineVL",
-    a.m3 as "ThreeMPostUnSuppressed", round(a.supp * 100.0 / a.tests, 1) as "SuppressionRate"
+    a.m3 as "ThreeMPostUnSuppressed"
   from agg a
   union all
   select null::text, null::text, null::text, null::text, null::text,
     ''::text, ''::text, ''::text, ''::text, ''::text,
-    0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, null::numeric
+    0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint
   where ${supported} and not exists (select 1 from agg)
 ) u
 order by ${label('u.k1')}, ${label('u.k2')}, ${label('u.k3')}, u.k4 collate "C",
