@@ -7,7 +7,7 @@
 // apps/cli/.env. The password is never written to any output file.
 //
 // Writes to dist/ (git-ignored), next to this script:
-//   pack.json            the pack payload: nine steps, in install order
+//   pack.json            the pack payload: eleven steps, in install order
 //   manifest.json        the unsigned artifact manifest. `openldr artifact pack` fills in the
 //                        key fingerprint and the payload hash, then signs it.
 //   build-summary.json   row counts and every row left out, with the reason
@@ -16,7 +16,8 @@ import { createRequire } from 'node:module';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { vlQueryFile, MOZ_CODES } from './vl-queries.mjs';
+import { vlQueryFile, MOZ_CODES, VL_CODED_SYSTEM, VL_CODED_VALUE_SET } from './vl-queries.mjs';
+import { pickCodedResultDisplays } from './vl-coded-results.mjs';
 import { facilitiesQuery } from './facility-queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -107,7 +108,7 @@ function summarizeStep(step) {
 async function main() {
   const sql = require(MSSQL);
   const pool = await sql.connect(connectionString());
-  let labs, pocs, links, facilities;
+  let labs, pocs, links, facilities, codedValues;
   try {
     labs = (await pool.request().query('SELECT LabCode, LabName, LabType FROM dbo.Laboratories')).recordset;
     pocs = (await pool.request().query(
@@ -117,6 +118,10 @@ async function main() {
     facilities = (await pool.request().query(
       'SELECT FacilityCode, Description, ProvinceName, DistrictName, ProvinceCode, DistrictCode, FacilityType, HFStatus, FacilityNationalCode FROM dbo.viewFacilities',
     )).recordset;
+    // The panels v1's ViralLoadResultMerge reads.
+    codedValues = (await pool.request().query(
+      "SELECT LIMSPanelCode, LIMSCodedValue, Description FROM dbo.LIMSCodedValues WHERE LIMSPanelCode IN ('HIVVL', 'VIRAL')",
+    )).recordset;
   } finally {
     await pool.close();
   }
@@ -124,11 +129,12 @@ async function main() {
   const summary = {
     source: DICT_DB,
     builtAt: new Date().toISOString(),
-    read: { laboratories: labs.length, disaPoc: pocs.length, disalink: links.length, viewFacilities: facilities.length },
+    read: { laboratories: labs.length, disaPoc: pocs.length, disalink: links.length, viewFacilities: facilities.length, limsCodedValues: codedValues.length },
     register: { rows: 0, fromLaboratories: 0, fromDisaPoc: 0, left_out: [] },
     facilityRegister: { rows: 0, sharedWithLabs: 0, left_out: [] },
     pocValueSet: { concepts: 0, left_out: [] },
     linkValueSet: { concepts: 0, left_out: [] },
+    vlCodedResults: { concepts: 0, choices: [], left_out: [] },
   };
 
   // ---- Register: one row per code. ----
@@ -256,6 +262,14 @@ async function main() {
   summary.pocValueSet.concepts = pocRows.length;
   summary.linkValueSet.concepts = linkRows.length;
 
+  // ---- Coded VL results: one description per code. See vl-coded-results.mjs for the rule. ----
+  const coded = pickCodedResultDisplays(codedValues.map((r) => ({
+    panel: r.LIMSPanelCode, code: r.LIMSCodedValue, description: r.Description,
+  })));
+  summary.vlCodedResults.concepts = coded.concepts.length;
+  summary.vlCodedResults.choices = coded.choices;
+  summary.vlCodedResults.left_out = coded.leftOut;
+
   // ---- Pack steps, in install order. ----
   const POC_CS = 'urn:openldr:mz:cs:poc-sites';
   const LINK_CS = 'urn:openldr:mz:cs:link-sites';
@@ -266,12 +280,16 @@ async function main() {
   // Shown under the name on the CE Terminology page.
   const POC_DESCRIPTION = 'Point-of-care sites, from the v1 dictionary list DisaPoc. The VL queries use it for the IsDisaPoc column.';
   const LINK_DESCRIPTION = 'Link sites, from the v1 dictionary list Disalink. The VL queries use it for the IsDisaLink column.';
+  const VL_CODED_TITLE = 'Mozambique viral load coded results';
+  const VL_CODED_DESCRIPTION = 'Viral load result codes and their descriptions, from the v1 dictionary list LIMSCodedValues (panels HIVVL and VIRAL). "VL results" uses it to show a coded result as text, as v1 did.';
   const queryFile = vlQueryFile(MOZ_CODES);
   const steps = [
     { kind: 'code-system', resource: codeSystem(POC_CS, 'MozPocSites', POC_TITLE, POC_DESCRIPTION, pocRows) },
     { kind: 'value-set', resource: valueSet('urn:openldr:mz:poc-sites', 'MozPocSites', POC_TITLE, POC_DESCRIPTION, POC_CS, pocRows) },
     { kind: 'code-system', resource: codeSystem(LINK_CS, 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, linkRows) },
     { kind: 'value-set', resource: valueSet('urn:openldr:mz:link-sites', 'MozLinkSites', LINK_TITLE, LINK_DESCRIPTION, LINK_CS, linkRows) },
+    { kind: 'code-system', resource: codeSystem(VL_CODED_SYSTEM, 'MozVlCodedResults', VL_CODED_TITLE, VL_CODED_DESCRIPTION, coded.concepts) },
+    { kind: 'value-set', resource: valueSet(VL_CODED_VALUE_SET, 'MozVlCodedResults', VL_CODED_TITLE, VL_CODED_DESCRIPTION, VL_CODED_SYSTEM, coded.concepts) },
     { kind: 'facility-register', url: REGISTER_URL, name: 'Mozambique laboratories and POC sites', code: 'MZLABS', csv },
     { kind: 'facility-register', url: FACILITY_REGISTER_URL, name: 'Mozambique health facilities', code: 'MZFAC', csv: facilityCsv, extraColumns: FACILITY_EXTRA_COLUMNS },
     // The facility register links first. The two registers share some codes (45 on 2026-10-07),
@@ -292,6 +310,7 @@ async function main() {
     ...summary.facilityRegister.left_out.map((r) => `facility register, viewFacilities ${r.key}: ${r.reason}`),
     ...summary.pocValueSet.left_out.map((r) => `POC value set, ${r.key}: ${r.reason}`),
     ...summary.linkValueSet.left_out.map((r) => `link value set, ${r.key}: ${r.reason}`),
+    ...summary.vlCodedResults.left_out.map((r) => `VL coded results, ${r.key}: ${r.reason}`),
   ];
   // The admin-facing text shown in the marketplace. README.md is for pack authors.
   const readme = readFileSync(join(here, 'PACK.md'), 'utf8').trimEnd()
@@ -301,7 +320,7 @@ async function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'vl-reports-mz',
-    version: '0.5.2',
+    version: '0.5.3',
     description: 'Viral load reports in the v1 layout, for data exported from DISA*Lab.',
     readme,
     license: 'UNLICENSED',
@@ -319,6 +338,7 @@ async function main() {
     facilityRegister: { rows: summary.facilityRegister.rows, sharedWithLabs: summary.facilityRegister.sharedWithLabs, leftOut: summary.facilityRegister.left_out.length },
     pocValueSet: { concepts: summary.pocValueSet.concepts, leftOut: summary.pocValueSet.left_out.length },
     linkValueSet: { concepts: summary.linkValueSet.concepts, leftOut: summary.linkValueSet.left_out.length },
+    vlCodedResults: { concepts: summary.vlCodedResults.concepts, choices: summary.vlCodedResults.choices.map((c) => `${c.code}: ${c.chosen}`), leftOut: summary.vlCodedResults.left_out.length },
   }, null, 2));
 }
 
