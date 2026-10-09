@@ -34,6 +34,37 @@ const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 const rpt = (a) =>
   `coalesce(${a}.text_value, coalesce(${a}.numeric_comparator || ' ', '') || ${a}.numeric_value::text, ${a}.coded_value)`;
 
+// ---- v1's VL functions as inline SQL. A custom query is one SELECT and cannot create SQL
+// functions, so each function is an expression. Source: the Mozambique team's
+// openldr-functions-script.sql (2026-10-09). v1 compares with SQL Server's default collation:
+// case-insensitive, and trailing spaces do not count. So the port compares lower(rtrim(x)).
+
+// SQL Server's ISNUMERIC: a sign, digits with thousands commas, a decimal point, an exponent, a
+// currency sign, surrounding spaces. It also accepts a lone "+", "$" or "." and tabs. This does
+// not; none is a plausible viral load result.
+const ISNUMERIC_RE = String.raw`^\s*[-+]?[$£€¥]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?\s*$`;
+
+export const isNumericSql = (x) => `coalesce(${x} ~ ${lit(ISNUMERIC_RE)}, false)`;
+
+// SQL Server's "x = ''" is also true for spaces only. NULL counts as blank here too.
+const blankSql = (x) => `coalesce(rtrim(${x}), '') = ''`;
+const foldSql = (x) => `lower(rtrim(${x}))`;
+const inListSql = (x, words) => `${foldSql(x)} in (${words.map((w) => lit(w.toLowerCase())).join(', ')})`;
+
+// GetReasonForTest: v1's English text for Mozambique's reason-for-test answers. Mozambique
+// content, so it lives in the pack, not in CE.
+const REASON_FOR_TEST = [
+  ['Nao Prenchido', 'Not Specified'],
+  ['Suspect treatment failure', 'Suspected treatment failure'],
+  ['Repiticas apos AMA', 'Repeat after breastfeeding'],
+  ['Rotina', 'Routine'],
+];
+
+export function reasonForTestSql(x) {
+  const whens = REASON_FOR_TEST.map(([from, to]) => `when ${foldSql(x)} = ${lit(from.toLowerCase())} then ${lit(to)}`).join(' ');
+  return `case when ${blankSql(x)} then 'Reason Not Specified' ${whens} else ${x} end`;
+}
+
 // Request attributes (urn:openldr:cs:request-attribute), one row per request and code.
 const ATTRS = [
   ['prereg_registration_time', 'prereg-registration-time'],
