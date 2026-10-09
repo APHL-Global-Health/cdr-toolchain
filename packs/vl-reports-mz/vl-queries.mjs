@@ -29,12 +29,12 @@ const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 export const VL_CODED_SYSTEM = 'urn:openldr:mz:cs:vl-coded-results';
 export const VL_CODED_VALUE_SET = 'urn:openldr:mz:vl-coded-results';
 
-const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
+export const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 // v1 LIMSRptResult: CE text value, else numeric value as text, else coded value.
 // A numeric result outside the reporting range shows as v1 shows it: the comparator, a space,
 // the limit ("< 20"). A null numeric value makes the whole middle term null.
-const rpt = (a) =>
+export const rpt = (a) =>
   `coalesce(${a}.text_value, coalesce(${a}.numeric_comparator || ' ', '') || ${a}.numeric_value::text, ${a}.coded_value)`;
 
 // ---- v1's VL functions as inline SQL. A custom query is one SELECT and cannot create SQL
@@ -52,8 +52,8 @@ export const isNumericSql = (x) => `coalesce(${x} ~ ${lit(ISNUMERIC_RE)}, false)
 
 // SQL Server's "x = ''" is also true for spaces only. NULL counts as blank here too.
 export const blankSql = (x) => `coalesce(rtrim(${x}), '') = ''`;
-const foldSql = (x) => `lower(rtrim(${x}))`;
-const inListSql = (x, words) => `${foldSql(x)} in (${words.map((w) => lit(w.toLowerCase())).join(', ')})`;
+export const foldSql = (x) => `lower(rtrim(${x}))`;
+export const inListSql = (x, words) => `${foldSql(x)} in (${words.map((w) => lit(w.toLowerCase())).join(', ')})`;
 
 // GetReasonForTest: v1's English text for Mozambique's reason-for-test answers. Mozambique
 // content, so it lives in the pack, not in CE.
