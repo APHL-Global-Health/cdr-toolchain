@@ -86,7 +86,7 @@ const AGE_CASES = [
 suites.push(caseSuite('age-group', ['age'],
   AGE_CASES.map(([age, expected]) => ({ age: age === null ? null : String(age), expected })), ageGroupSql('age::int')));
 
-// ---- inRange: a text window, the end day taken to the last millisecond ----
+// ---- inRange: a window on the local date, the first ten characters of the stamp ----
 suites.push(caseSuite('in-range', ['d'], [
   { d: '2026-04-30T23:59:59.999Z', expected: false },
   { d: '2026-05-01', expected: true },
@@ -94,6 +94,15 @@ suites.push(caseSuite('in-range', ['d'], [
   { d: '2026-05-31T23:59:59.999Z', expected: true },
   { d: '2026-06-01T00:00:00Z', expected: false },
   { d: null, expected: null },
+  // Fix round 1: a stamp with no fraction on the last day is in (text compare against 'T23:59:59.999Z' put it out).
+  { d: '2026-05-31T23:59:59Z', expected: true },
+  { d: '2026-04-30T23:59:59Z', expected: false },
+  // The date is the stamp's own local date, not its UTC date.
+  { d: '2026-05-01T00:30:00+02:00', expected: true },
+  { d: '2026-05-31T23:30:00+02:00', expected: true },
+  { d: '2026-06-01T00:30:00+02:00', expected: false },
+  { d: '2026-04-30T23:30:00+02:00', expected: false },
+  { d: '2026-05-15', expected: true },
 ], bind(inRange('d'), { from: '2026-05-01', to: '2026-05-31' })));
 suites.push(caseSuite('in-range-names', ['d'], [
   { d: '2026-01-15T10:00', expected: true },

@@ -309,7 +309,8 @@ function builderSuite(name, setup, cteSql, rows) {
 }
 
 const wantRows = expected.filter(Boolean);
-const inDay = (r, from, to) => r.tested_date !== null && r.tested_date >= from && r.tested_date <= `${to}T23:59:59.999Z`;
+// inRange compares the first ten characters of the stamp (its local date).
+const inDay = (r, from, to) => r.tested_date !== null && r.tested_date.slice(0, 10) >= from && r.tested_date.slice(0, 10) <= to;
 
 const suites = [
   builderSuite('hivvl-all', SETUP, hivvlCte('hv'), wantRows),

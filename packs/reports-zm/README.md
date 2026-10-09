@@ -110,8 +110,8 @@ One row per row of the master facility list (3,788 rows, 21 columns).
   `in_register` rows of `urn:openldr:zm:facilities` in `facility_registry`. Blank means all.
 - `from`, `to`: required. Dates as `YYYY-MM-DD`. A month or a quarter is a range.
 
-Dates compare as text, as in `vl-reports-mz`: `>= from` and `<= to || 'T23:59:59.999Z'`. A request
-near midnight at a UTC offset can fall on the other side of `from` or `to`.
+Dates compare on the date written in the stamp (its first ten characters, the local date), so
+`from <= date <= to`. A request at 23:30 with a `+02:00` offset stays on its local day.
 
 Province, District and Facility come from the register row the requesting facility is mapped to.
 Every part keeps only requests with a mapped facility, as v1's inner joins drop facilities missing

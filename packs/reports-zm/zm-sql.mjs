@@ -15,10 +15,11 @@ export const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 // 'a', 'b' from ['a', 'b']: single quotes doubled.
 export const sqlList = (values) => values.map(sqlLit).join(', ');
 
-// A text window on a date column: `expr >= from and expr <= to-day-end`. Dates compare as text
-// (YYYY-MM-DD, or a full ISO stamp), so the end day is taken to its last millisecond.
+// A window on a date column: `left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
+// characters of the stamp's own text (YYYY-MM-DD), so it is the LOCAL date: '2026-05-31T23:30:00+02:00' and
+// '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside. The parameters are YYYY-MM-DD.
 export const inRange = (expr, fromParam = 'from', toParam = 'to') =>
-  `${expr} >= {{param.${fromParam}}} and ${expr} <= ({{param.${toParam}}} || 'T23:59:59.999Z')`;
+  `left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= {{param.${toParam}}}`;
 
 // ---- Parameters ----
 
@@ -574,8 +575,9 @@ const gxSourceSql = (obsCode, resultAlias, finalRange) => `select lr.request_id 
 
 // The with-list shared by both builders: the view's rows (x joined to y, a, b and id) with the extra
 // columns province, district and lab_name that the table needs. `<name>_rows` is the last item.
-function geneXpertRows(who, name, from, to) {
-  const { finalRange } = copyWindow(who, from, to, 'dr.issued');
+function geneXpertRows(who, name, from, to, on = 'issued') {
+  if (on !== 'issued' && on !== 'analysis_at') throw new Error(`${who}: on must be 'issued' or 'analysis_at'`);
+  const { finalRange } = copyWindow(who, from, to, on === 'issued' ? 'dr.issued' : 'lr.analysis_at');
   // View lines 107-120: a GXRIF row joins a GXMTB row when the request number and eleven request facts are
   // equal. Text compares ignore case and trailing spaces. A NULL fact equals nothing, so the RIF is lost.
   const sameText = (c) => `${foldSql(`x.${c}`)} = ${foldSql(`y.${c}`)}`;
@@ -591,6 +593,7 @@ function geneXpertRows(who, name, from, to) {
     from lab_requests lr
     join lab_results l on l.request_id = lr.id
     where ${inListSql('lr.panel_code', ['TBCOL'])} and ${inListSql('l.observation_code', ['TBHIV', 'TBAGE', 'PADIS'])}
+      and lr.request_id in (select s.requestid from ${name}_x s)
   ),
   ${name}_rows as (
     select id.answer as dist_tb_number, x.requestid, x.lims_facility_code, x.description, x.tested_at,
@@ -617,10 +620,20 @@ function geneXpertRows(who, name, from, to) {
 }
 
 // Zambia's view v_GeneXpert, as a CTE: `<name> as (...)`. Put it in a `with` list.
-//   geneXpertCte('gx')                              all rows
-//   geneXpertCte('gx', { from: 'from', to: 'to' })  only rows whose authorised date is in the window;
-//                                                   the two values are parameter names, compared as in inRange
-// The view has no window in v1; the window only limits the rows read.
+//   geneXpertCte('gx')                                      all rows
+//   geneXpertCte('gx', { from: 'from', to: 'to' })          only rows whose authorised date is in the window
+//   geneXpertCte('gx', { from, to, on: 'analysis_at' })     the window is on the analysis date instead
+//   geneXpertCte('gx', { labName: true })                   adds lab_name as a last column
+// `from` and `to` are parameter names, compared as in inRange (the local date of the stamp). `on` picks the
+// window column: 'issued' (the default, AuthorisedDateTime) or 'analysis_at' (AnalysisDateTime). `labName`
+// is an addition beyond the view: the view has no LabName, but fn_GeneXpertReport joins it (ruling 8: the
+// report's display, else the mapped register name, else the performer's code). It is off by default, so the
+// view's columns stay exact.
+// The view has no window in v1; the window only limits the rows read. Each consumer applies its own v1
+// edges on top: sp_dash_getTBGNX and sp_dash_getTBGNX_List filter the authorised date, with the end date
+// moved one day later (@EDate + 1); sp_dash_getTBLabStats has no authorised-date filter on most of its
+// aggregates (a registered-date filter on one of them); fn_GeneXpertReport filters the analysis date
+// (line 67). The window here is only a way to read fewer rows.
 //
 // Columns, in the order of the view (View__dbo_v_GeneXpert.sql: line 106 and x.* from lines 20-39), in
 // snake_case. requestid keeps v1's one-word spelling, and v1's "AgeinDays" is agein_days.
@@ -653,8 +666,8 @@ function geneXpertRows(who, name, from, to) {
 //     request number give several rows (every match), and two request rows with equal facts cross-match.
 //   - Text compares ignore case and trailing spaces, as SQL Server does; values come through as stored.
 //
-// The window is on the authorised date, as the TB reports filter (cast(AuthorisedDateTime as date)). It
-// also cuts the GXRIF rows. That cannot change a match, because the join needs equal authorised dates.
+// The window also cuts the GXRIF rows. That cannot change a match, because the join needs equal authorised
+// dates and equal analysis dates.
 //
 // TBCOL: it is not a documentation panel in Zambia's config (config/zambia.yaml lists only VIRAL), so
 // cdr-toolchain sends TBCOL as lab results and the answers are in lab_results, not in a form.
@@ -667,13 +680,13 @@ function geneXpertRows(who, name, from, to) {
 //     not RequestingFacilityCode; CE keeps one facility code for the request.
 //   - A partial stamp ('2026-07') stays as text in the date columns and gives NULL hours in tbgnxCte.
 //     v1 cannot hold one.
-export function geneXpertCte(name, { from, to } = {}) {
+export function geneXpertCte(name, { from, to, on = 'issued', labName = false } = {}) {
   return `${name} as (
-  with ${geneXpertRows('geneXpertCte', name, from, to)}
+  with ${geneXpertRows('geneXpertCte', name, from, to, on)}
   select r.dist_tb_number, r.requestid, r.lims_facility_code, r.description, r.tested_at,
     r.specimen_date_time, r.registered_date_time, r.received_date_time, r.analysis_date_time,
     r.authorised_date_time, r.hl7_sex_code, r.age_in_years, r.agein_days, r.mtb, r.lims_panel_code,
-    r.rif, r.tbhiv, r.tbage
+    r.rif, r.tbhiv, r.tbage${labName ? ', r.lab_name' : ''}
   from ${name}_rows r
 )`;
 }

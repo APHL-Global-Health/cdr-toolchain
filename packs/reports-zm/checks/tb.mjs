@@ -38,6 +38,7 @@ const REQ_DEFAULTS = {
 const GX_D = {
   dist_tb_number: null, requestid: null,
   lims_facility_code: 'ZSOUT',                 // view line 23
+  lab_name: 'Lusaka Provincial Lab',           // only with the labName option (ruling 8: the mapped register name)
   description: 'Choma General Hospital',       // view line 25: the dictionary description
   tested_at: 'LUS',                            // view lines 26-29: TestingFacilityCode
   specimen_date_time: '2026-05-01T07:00:00Z', registered_date_time: '2026-05-02T08:00:00Z',
@@ -131,7 +132,7 @@ lab('T4-STATUS-CANC', [{ status: 'cancelled' }]);
 // No report at all: the request still shows, with no testing code, no specimen date and no authorised date.
 // RIF is lost (null facts break the join) and, with no TestedAt, the TBGNX table drops the row (proc line 102).
 lab('T4-NOREPORT', [{ report: false }],
-  { tested_at: null, specimen_date_time: null, received_date_time: null, authorised_date_time: null },
+  { tested_at: null, specimen_date_time: null, received_date_time: null, authorised_date_time: null, lab_name: null },
   [{ rif: null }], []);
 
 // The MTB map (proc lines 51-62): a case on the reported text. Anything else stays as reported.
@@ -264,21 +265,21 @@ AGES.forEach(([years, group]) => lab(`T4-AGE-${years}`, [{ years }], { age_in_ye
 // (ruling 7), so the port gives NULL. The TBGNX table drops TestedAt '000' (the compare ignores trailing spaces)
 // and NULL (proc line 102). POC (proc line 76) is panel POCGT or a numeric TestedAt (ISNUMERIC: '1E5' counts).
 // LabName: ruling 8, the report's display, else the mapped register name, else the code.
-lab('T4-TA-000', [{ performer: '000' }], { tested_at: '000' }, [{}], []);
-lab('T4-TA-000-SPACE', [{ performer: '000 ' }], { tested_at: '000 ' }, [{}], []);
-lab('T4-TA-0000', [{ performer: '0000' }], { tested_at: '0000' }, [{}], [{ poc: 1, lab_name: '0000' }]);
-lab('T4-TA-4567', [{ performer: '4567' }], { tested_at: '4567' }, [{}], [{ poc: 1, lab_name: '4567' }]);
-lab('T4-TA-12', [{ performer: '12' }], { tested_at: '12' }, [{}], [{ poc: 1, lab_name: '12' }]);
-lab('T4-TA-1E5', [{ performer: '1E5' }], { tested_at: '1E5' }, [{}], [{ poc: 1, lab_name: '1E5' }]);
-lab('T4-TA-12A', [{ performer: '12A' }], { tested_at: '12A' }, [{}], [{ poc: 0, lab_name: '12A' }]);
-lab('T4-TA-KIT', [{ performer: 'KIT' }], { tested_at: 'KIT' }, [{}], [{ lab_name: 'KIT' }]);
-lab('T4-TA-DISPLAY', [{ performer: 'KIT', display: 'Kitwe Central Lab' }], { tested_at: 'KIT' }, [{}], [{ lab_name: 'Kitwe Central Lab' }]);
+lab('T4-TA-000', [{ performer: '000' }], { tested_at: '000', lab_name: '000' }, [{}], []);
+lab('T4-TA-000-SPACE', [{ performer: '000 ' }], { tested_at: '000 ', lab_name: '000 ' }, [{}], []);
+lab('T4-TA-0000', [{ performer: '0000' }], { tested_at: '0000', lab_name: '0000' }, [{}], [{ poc: 1 }]);
+lab('T4-TA-4567', [{ performer: '4567' }], { tested_at: '4567', lab_name: '4567' }, [{}], [{ poc: 1 }]);
+lab('T4-TA-12', [{ performer: '12' }], { tested_at: '12', lab_name: '12' }, [{}], [{ poc: 1 }]);
+lab('T4-TA-1E5', [{ performer: '1E5' }], { tested_at: '1E5', lab_name: '1E5' }, [{}], [{ poc: 1 }]);
+lab('T4-TA-12A', [{ performer: '12A' }], { tested_at: '12A', lab_name: '12A' }, [{}], [{ poc: 0 }]);
+lab('T4-TA-KIT', [{ performer: 'KIT' }], { tested_at: 'KIT', lab_name: 'KIT' }, [{}], [{}]);
+lab('T4-TA-DISPLAY', [{ performer: 'KIT', display: 'Kitwe Central Lab' }], { tested_at: 'KIT', lab_name: 'Kitwe Central Lab' }, [{}], [{}]);
 lab('T4-TA-DISPLAY-BLANK', [{ display: '  ' }], {}, [{}], [{}]);
-lab('T4-TA-NULL', [{ performer: null }], { tested_at: null, rif: null }, [{}], []);
-lab('T4-TA-BLANK', [{ performer: '' }], { tested_at: null, rif: null }, [{}], []);
-lab('T4-TA-SPACES', [{ performer: '  ' }], { tested_at: null, rif: null }, [{}], []);
+lab('T4-TA-NULL', [{ performer: null }], { tested_at: null, rif: null, lab_name: null }, [{}], []);
+lab('T4-TA-BLANK', [{ performer: '' }], { tested_at: null, rif: null, lab_name: '' }, [{}], []);
+lab('T4-TA-SPACES', [{ performer: '  ' }], { tested_at: null, rif: null, lab_name: '  ' }, [{}], []);
 // POCGT with a text code, TBGNX with a numeric code: both POC.
-lab('T4-POC-PANEL', [{ panel: 'POCGT', performer: 'KIT' }], { tested_at: 'KIT', lims_panel_code: 'POCGT' }, [{}], [{ poc: 1, lab_name: 'KIT' }]);
+lab('T4-POC-PANEL', [{ panel: 'POCGT', performer: 'KIT' }], { tested_at: 'KIT', lims_panel_code: 'POCGT', lab_name: 'KIT' }, [{}], [{ poc: 1 }]);
 
 // TAT and the 24, 48 and 72 hour flags (proc lines 77-80): datediff(HH) counts hour boundaries, not elapsed
 // hours (09:59 to 10:01 is 1). The flags are "under" the limit. Local stamps keep their offset; the offsets
@@ -309,9 +310,8 @@ const EDGE_SHARED = { specimen_date_time: '2026-04-28T10:00:00Z' };
 const edge = (label, issued, tat, w72h) => lab(`T4-EDGE-${label}`,
   [{ ...EDGE, issued }], { ...EDGE_SHARED, authorised_date_time: issued }, [{}], [{ tat, w72h }]);
 edge('IN1', '2026-05-01T00:00:00Z', 62, 1);
-// inRange compares text, so '2026-05-31T23:59:59Z' (no fraction) sorts after '2026-05-31T23:59:59.999Z' and is
-// out of the window. DISA stamps carry '+02:00', which sorts before '.', so they are not affected. Noted in the report.
-edge('IN2', '2026-05-31T23:59:00Z', 805, 0);
+// A stamp with no fraction on the last day is in (fix round 1; the old text compare put it out).
+edge('IN2', '2026-05-31T23:59:59Z', 805, 0);
 edge('OUT1', '2026-04-30T23:59:59Z', 61, 1);
 edge('OUT2', '2026-06-01T00:00:00Z', 806, 0);
 // Local stamps: the window is on the local date. 00:30+02:00 on 05-01 is in (UTC would be 04-30); 23:30+02:00 on
@@ -323,6 +323,16 @@ localEdge('TZ-IN1', '2026-05-01T00:30:00+02:00', 62, 1);
 localEdge('TZ-IN2', '2026-05-31T23:30:00+02:00', 805, 0);
 localEdge('TZ-OUT1', '2026-06-01T00:30:00+02:00', 806, 0);
 localEdge('TZ-OUT2', '2026-04-30T23:30:00+02:00', 61, 1);
+// The analysis-date window (fn_GeneXpertReport filters AnalysisDateTime, line 67). AN-IN was analysed in May and
+// authorised in June; AN-OUT was analysed in June and authorised in May. TAT from 05-01 07:00: 843 and 459 hours.
+lab('T4-AN-IN', [{ analysis: '2026-05-20T09:00:00Z', issued: '2026-06-05T10:00:00Z' }],
+  { analysis_date_time: '2026-05-20T09:00:00Z', authorised_date_time: '2026-06-05T10:00:00Z' }, [{}], [{ tat: 843, w72h: 0 }]);
+lab('T4-AN-OUT', [{ analysis: '2026-06-02T09:00:00Z', issued: '2026-05-20T10:00:00Z' }],
+  { analysis_date_time: '2026-06-02T09:00:00Z', authorised_date_time: '2026-05-20T10:00:00Z' }, [{}], [{ tat: 459, w72h: 0 }]);
+// A +02:00 analysis stamp near midnight: 2026-05-31T23:30:00+02:00 is on 05-31 (in); 2026-06-01T00:30:00+02:00 is out.
+lab('T4-AN-TZ-IN', [{ analysis: '2026-05-31T23:30:00+02:00' }], { analysis_date_time: '2026-05-31T23:30:00+02:00' });
+lab('T4-AN-TZ-OUT', [{ analysis: '2026-06-01T00:30:00+02:00' }], { analysis_date_time: '2026-06-01T00:30:00+02:00' });
+
 const EDGE_IN = ['T4-EDGE-IN1', 'T4-EDGE-IN2', 'T4-EDGE-TZ-IN1', 'T4-EDGE-TZ-IN2'];
 const EDGE_OUT = ['T4-EDGE-OUT1', 'T4-EDGE-OUT2', 'T4-EDGE-TZ-OUT1', 'T4-EDGE-TZ-OUT2'];
 
@@ -369,10 +379,30 @@ function builderSuite(name, columns, setup, cteSql, rows) {
   };
 }
 
-const inDay = (r, from, to) => r.authorised_date_time !== null && r.authorised_date_time >= from && r.authorised_date_time <= `${to}T23:59:59.999Z`;
+// inRange compares the first ten characters of the stamp (its local date).
+const inDayOf = (col) => (r, from, to) => r[col] !== null && r[col].slice(0, 10) >= from && r[col].slice(0, 10) <= to;
+const inDay = inDayOf('authorised_date_time');
+const inAnalysisDay = inDayOf('analysis_date_time');
 const MAY = { from: '2026-05-01', to: '2026-05-31' };
 const gxRows = gxExpected;
 const tbRows = tbExpected;
+
+// A builderSuite that also names lab ids that must (not) be in the result, so the JS filter is not the only judge.
+function mustSuite(name, columns, setup, cteSql, rows, mustHave, mustNot) {
+  const base = builderSuite(name, columns, setup, cteSql, rows);
+  return {
+    ...base,
+    count: base.count + mustHave.length + mustNot.length,
+    check(got) {
+      const ids = new Set(got.map((r) => r.requestid));
+      return [
+        ...base.check(got),
+        ...mustHave.filter((id) => !ids.has(id)).map((id) => `${id} must be in the result`),
+        ...mustNot.filter((id) => ids.has(id)).map((id) => `${id} must not be in the result`),
+      ];
+    },
+  };
+}
 
 function shapeSuite(name, build, bannedName) {
   return {
@@ -406,6 +436,27 @@ const suites = [
     tbRows.filter((r) => inDay(r, '2026-05-03', '2026-05-03'))),
   builderSuite('gx-window-names', GX_COLUMNS, '', bind(geneXpertCte('tb', { from: 'start', to: 'end' }), { start: '2026-05-03', end: '2026-05-03' }),
     gxRows.filter((r) => inDay(r, '2026-05-03', '2026-05-03'))),
+  // The window on the analysis date (fn_GeneXpertReport). AN-IN and AN-OUT tell the two window columns apart;
+  // the two TZ rows pin the local date.
+  mustSuite('gx-window-analysis', GX_COLUMNS, '', bind(geneXpertCte('tb', { from: 'from', to: 'to', on: 'analysis_at' }), MAY),
+    gxRows.filter((r) => inAnalysisDay(r, MAY.from, MAY.to)), ['T4-AN-IN', 'T4-AN-TZ-IN'], ['T4-AN-OUT', 'T4-AN-TZ-OUT']),
+  mustSuite('gx-window-issued-explicit', GX_COLUMNS, '', bind(geneXpertCte('tb', { from: 'from', to: 'to', on: 'issued' }), MAY),
+    gxRows.filter((r) => inDay(r, MAY.from, MAY.to)), ['T4-AN-OUT'], ['T4-AN-IN']),
+  // The labName option adds lab_name as a last column (fn_GeneXpertReport outputs LabName).
+  builderSuite('gx-lab-name', [...GX_COLUMNS, 'lab_name'], '', geneXpertCte('tb', { labName: true }), gxRows),
+  builderSuite('gx-lab-name-window', [...GX_COLUMNS, 'lab_name'], '', bind(geneXpertCte('tb', { from: 'from', to: 'to', on: 'analysis_at', labName: true }), MAY),
+    gxRows.filter((r) => inAnalysisDay(r, MAY.from, MAY.to))),
+  {
+    name: 'gx-options',
+    count: 3,
+    check() {
+      const bad = [];
+      try { geneXpertCte('x', { from: 'a', to: 'b', on: 'authorised' }); bad.push('an unknown window column must throw'); } catch { /* expected */ }
+      if (geneXpertCte('x').includes('r.lab_name')) bad.push('lab_name must be off by default');
+      if (!geneXpertCte('x', { labName: true }).includes('r.tbage, r.lab_name')) bad.push('labName must add the last column');
+      return bad;
+    },
+  },
   {
     // The window filter above is plain JS: pin it to the edge cases written by hand.
     name: 'window-edges',
