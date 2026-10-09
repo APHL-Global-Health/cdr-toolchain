@@ -2,7 +2,7 @@
 
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
+  hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
 } from '../zm-sql.mjs';
 
@@ -1115,6 +1115,244 @@ export const uniqueClientsFacilityParams = () => [
   { ...provinceParam('province', false), label: 'Province (blank for Southern and Western)' },
 ];
 
+// ---- Unique VL clients, 12-month rates ----
+//
+// Replaces sp_getUniqueVLClientsInfoLast1Year ("R" below). One row: the unique clients (VLClients), how many are suppressed (Suppressed)
+// and undetectable (Undetectable), and the two rates (SuppressionRate, UndetectableRate). Columns as v1, in v1's order.
+//
+// What v1 does (R = StoredProcedure__dbo_sp_getUniqueVLClientsInfoLast1Year.sql):
+//   - A client is one TND row with Rank = 1 (R lines 19, 35, 53, 70, 89, 107, 126, 143): the client's latest result EVER, ranked over
+//     all of the client's results, not over the window. `tndCte` with `rank: true` gives that row (visit = 1).
+//   - That row must have a date in the window (R line 20: cast(ResultDate as date) between two DATES, so the whole last day is in) and a
+//     result that is a number (ISNUMERIC) or one of 13 texts (R lines 22-26, listed in RATE_TEXTS).
+//   - Its lab number must have a hivvl row whose baseline flag is 0 or NULL (R lines 17-18, 27): the join drops a lab with no hivvl row
+//     (RTRI, or a text such as '<883 copies/mL' that is not a valid hivvl result) and a baseline lab. The baseline test comes AFTER the
+//     rank, so a client whose latest result is a baseline test (or has no hivvl row) is not in the report at all. The report does not
+//     fall back to an earlier result, where "Unique VL clients" does.
+//   - Area: HIVVL.Province / District / Facility equal the parameters (R lines 62, 79, 98, 116, 135, 152): the hivvl row's names, not TND's.
+//   - VLClients = count(ARTNumber), Suppressed = sum(TND.Suppressed), Undetectable = sum(TND.UU); the rates are the sum x 100.0 /
+//     count(ARTNumber) (R lines 14-16). SQL Server decimal arithmetic gives 12 decimals and CUTS them, it does not round (measured on the
+//     local SQL Server: 1 of 3 gives 33.333333333333, 2 of 3 gives 66.666666666666, 3 of 7 gives 42.857142857142).
+//   - Branch by which parameters are given (R lines 12, 45, 81, 118): none = all Zambia; province; province and district; all three.
+//     The `exists(select count(...) ...)` in each IF is an aggregate without GROUP BY, so it always returns a row and is always true
+//     (measured on the local SQL Server): a branch never falls through on "no data". An area with no client gives VLClients 0 and NULL
+//     for the other four columns (a sum of no rows is NULL, so are the rates). Any other combination of parameters (a district without a
+//     province, a facility without a district, a facility with only a province) gives the all-zero row (R line 154: five integer 0).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The district and facility branches' text list lacks 'ND' (R lines 110 and 146); the all-Zambia and province branches have it. The
+//     inventory names only the district branch. A client whose latest result is the text 'ND' is not counted in those two branches.
+//   - TND.Rank is row_number() over province, district, facility, panel, sex code, surname, first name and ART number, so a client with a
+//     result in two panels, or with two sex codes, is two clients. Two results at one instant are ranked in an order v1 leaves open (the
+//     port takes the lab number, then the result row).
+//   - The latest result ever decides: a client whose newest result is a text on no list (PTLTT) or outside the window is not counted,
+//     though an earlier result in the window was valid.
+//   - The area names are the hivvl row's, compared ignoring case and trailing spaces.
+//
+// Window (spec ruling 3): v1's window is the 12 full months before the current one (R lines 20-21). `from` is the first day of that
+// window (the first of the month, 12 months back) and `to` its last day (the end of last month), for example 2025-10-01 to 2026-09-30
+// when run in October 2026. Both are required local dates, both days in. The rank is NOT limited to the window.
+//
+// CE gaps (spec ruling 7) and CE choices: as "Unique VL clients" (HOSPID is not sent, so the ART number is artNumberSql's with HOSPID
+// blank; a request without a patient row is kept with empty names; v1 varchar parameters (20, 40, 40) cut a longer name, the port
+// compares it whole; TND has no 2017 floor or ceiling; a result with no date, or a partial one, is out of the rank). CE art_number is
+// never NULL, so count(ARTNumber) counts every row (v1's NULL ART number, from a NULL REFNO, is not reproduced).
+//
+// Deviations (spec ruling 2): none. v1 runs and returns real data.
+const RATE_TEXTS = ['<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml', '<30 copies/mL', 'NDET', 'ND',
+  '<400 copies/mL', '<400', '<40 copies/mL'];
+const RATE_TEXTS_NO_ND = RATE_TEXTS.filter((t) => t !== 'ND');
+
+export function uniqueClientsRatesSql() {
+  const eq = (column, id) => `${foldSql(column)} = ${foldSql(`{{param.${id}}}`)}`;
+  const textOk = `(${isNumericSql('t.result')} or (case when s.branch in (3, 4) then ${inListSql('t.result', RATE_TEXTS_NO_ND)} else ${inListSql('t.result', RATE_TEXTS)} end))`;
+  const key = (x) => `lower(rtrim(${x}))`;
+  const rate = (top) => `trunc(${top} * 100.0 / nullif(a.clients, 0), 12)`;
+  return `with ${tndCte('tnd', { rank: true })},
+${hivvlCte('hv', { from: 'from', to: 'to', labsInWindow: true })},
+scope as (
+  select case
+    when ${blank('province')} and ${blank('district')} and ${blank('facility')} then 1
+    when ${given('province')} and ${blank('district')} and ${blank('facility')} then 2
+    when ${given('province')} and ${given('district')} and ${blank('facility')} then 3
+    when ${given('province')} and ${given('district')} and ${given('facility')} then 4
+    else 0 end as branch
+),
+j as (
+  select t.art_number, t.suppressed_flag, t.uu_flag
+  from tnd t
+  join hv h on ${key('h.lab_id')} = ${key('t.lab_id')}
+  cross join scope s
+  where t.visit = 1
+    and ${inRange('t.result_date')}
+    and ${textOk}
+    and (h.baseline_vl = 0 or h.baseline_vl is null)
+    and case s.branch
+      when 1 then true
+      when 2 then ${eq('h.province', 'province')}
+      when 3 then ${eq('h.province', 'province')} and ${eq('h.district', 'district')}
+      when 4 then ${eq('h.province', 'province')} and ${eq('h.district', 'district')} and ${eq('h.facility', 'facility')}
+      else false end
+),
+a as (
+  select count(j.art_number) as clients, sum(j.suppressed_flag) as suppressed, sum(j.uu_flag) as undetectable
+  from j
+)
+select case when s.branch = 0 then 0 else a.clients end as "VLClients",
+  case when s.branch = 0 then 0 else a.suppressed end as "Suppressed",
+  case when s.branch = 0 then 0 else a.undetectable end as "Undetectable",
+  case when s.branch = 0 then 0 else ${rate('a.suppressed')} end as "SuppressionRate",
+  case when s.branch = 0 then 0 else ${rate('a.undetectable')} end as "UndetectableRate"
+from scope s
+cross join a`;
+}
+
+export const uniqueClientsRatesParams = () => [
+  provinceParam('province', false),
+  districtParam('district', false),
+  facilityParam(),
+  ...dateParams(true),
+];
+
+// ---- VL requests and tests by lab and month ----
+//
+// Replaces the view vVLRequestsTestsByMonth ("M" below, View__dbo_vVLRequestsTestsByMonth.sql). One row per year, month and laboratory:
+// the VL requests registered (Requests) and the VL tests finished (Tested). Columns as v1: Year, Month, Laboratory, Requests, Tested.
+//
+// What v1 does:
+//   - Requests (M line 22): count(distinct RequestID) of the HIVVL requests (M line 46), grouped by the year and month of RegisteredDateTime
+//     (M lines 21, 48) and the laboratory.
+//   - Laboratory (M lines 21, 39-43): the testing facility code, or the receiving facility code when the testing code is blank, joined
+//     to the Laboratories dictionary; the row shows the dictionary's LabCode.
+//   - Tested (M lines 23-33): count(distinct RequestID) of HIVVL requests with a result of observation HIVVL or HIVVC (line 29), a final
+//     report (line 30), authorised in the same MONTH as the row's registered month (line 31), and the same testing facility code as the row's laboratory (line 32).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Tested matches the authorised month only, not the year (M line 31: datepart(mm, ...) = datepart(mm, ...)), so Tested for May 2026
+//     also counts every other May (2025, 2024...) at that laboratory. The same number repeats on each year's May row.
+//   - Tested matches the laboratory on the TESTING code only (M line 32), so a laboratory that appears only through a receiving code has
+//     Tested 0. (CE holds no receiving code, so every laboratory is a testing code.)
+//   - Tested counts requests authorised in that month, whatever month they were registered in.
+//   - A request with no registration date is one row with NULL Year and Month, and Tested 0 (a month compared with NULL is never true).
+//     Kept when no window is given.
+//
+// Window (spec ruling 3): v1 has no window. `from` and `to` are optional; blank means all history, which is v1. When given, they cut the
+// REQUESTS by the local date of their registration (the row's own year-month key), both days in. Tested is not cut: it keeps counting every
+// year, as above. A window that starts or ends inside a month therefore gives that month a partial Requests; a window from the first to the
+// last day of whole months gives v1's rows for those months exactly.
+//
+// CE gaps (spec ruling 7 and 8):
+//   - Laboratory is diagnostic_reports.performer (the testing lab code), shown as stored (the smallest spelling in byte order when
+//     spellings differ by case or trailing spaces). CE has no Laboratories dictionary and no receiving facility code, so the inner join to the
+//     dictionary (which drops a request whose lab code is not in it) is not reproduced: a request with a blank testing lab is out (v1 falls to
+//     the receiving code, which CE lacks), and every other code is a laboratory.
+//   - A request with no report has no testing lab in CE, so it is not counted in Requests.
+//
+// Deviations (spec ruling 2): none.
+export function labMonthSql() {
+  const lab = foldSql('dr.performer');
+  const rangeBlank = `({{param.from}} = '' or left(lr.authored_at, 10) >= {{param.from}}) and ({{param.to}} = '' or left(lr.authored_at, 10) <= {{param.to}})`;
+  return `with sent as (
+  select extract(year from ${localDate('lr.authored_at')})::int as yr, extract(month from ${localDate('lr.authored_at')})::int as mo,
+    ${lab} as lab_key, dr.performer, lr.request_id
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${foldSql('lr.panel_code')} = 'hivvl'
+    and length(rtrim(dr.performer)) > 0
+    and ${rangeBlank}
+),
+tested as (
+  select extract(month from ${localDate('dr.issued')})::int as mo, ${lab} as lab_key, count(distinct ${foldSql('lr.request_id')}) as n
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  where ${foldSql('lr.panel_code')} = 'hivvl'
+    and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC'])}
+    and ${foldSql('dr.status')} = 'final'
+    and length(rtrim(dr.performer)) > 0
+  group by 1, 2
+)
+select g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"
+from (
+  select s.yr as "Year", s.mo as "Month", min(s.performer collate "C") as "Laboratory", count(distinct ${foldSql('s.request_id')}) as "Requests",
+    s.lab_key
+  from sent s
+  group by s.yr, s.mo, s.lab_key
+) g
+left join tested t on t.mo = g."Month" and t.lab_key = g.lab_key
+order by g."Year" nulls first, g."Month" nulls first, ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Requests", coalesce(t.n, 0)`;
+}
+
+export const labMonthParams = () => dateParams(false);
+
+// ---- VL result bands by month ----
+//
+// Replaces the view vVLResRangeBreakDownByMonth ("B" below, View__dbo_vVLResRangeBreakDownByMonth.sql), which reads the helper view
+// vVLReportData ("D", View__dbo_vVLReportData.sql). One row per year and month: the VL requests (Total) and how many have a result in each
+// band. Columns as v1: Year, Month, Total, Target Not Detected, < 20 copies/ml, < 1000 copies/ml, >= 1000 copies/ml.
+//
+// What v1 does:
+//   - D reads the VL requests (panel HIVVL, D line 45) that are not rejected (rejection code NULL or blank, D line 45) joined to their
+//     results of observation HIVVL, HIVVD and HIVVC (D lines 42-46). VLEIDRequests and VLEIDResults are plain copies of Requests and
+//     LabResults (sp_UpdateVLEIDRequests, sp_UpdateVLEIDResults; the observations they hold include these three), so the port reads
+//     lab_requests and lab_results directly: the join on (RequestID, OBRSetID) is the row link lab_results.request_id = lab_requests.id.
+//     No builder is added: the copy table adds no rule of its own to restate.
+//   - Month (D line 25; B lines 12-14): the year and month of coalesce(SpecimenDateTime, ReceivedDateTime, RegisteredDateTime), the
+//     collection date, else the received date, else the registration date (the report's effective stamp, the specimen's received stamp,
+//     the request's authored stamp). The local date of the stamp.
+//   - D's last step (D lines 48-49) joins FACILITIES_NEW with a LEFT join and takes DISTINCT: it drops no row and changes no count of distinct requests,
+//     so the area is not read.
+//   - Total (B line 17) = count(distinct RequestID) of the month. Each band column (B lines 18-46) = count(distinct RequestID) of the month
+//     whose result row has that band label. A request with results in two bands counts once in each band and once in Total.
+//   - The band of a result (D lines 33-39): coded value 'LDL' is 'Target Not Detected'; SIValue 0 up to 20 is '< 20 copies/ml'; 20 to 1000
+//     is '<= 1000 copies/ml'; over 1000 is '> 1000 copies/ml'; anything else is 'Unknown' (counted in Total only).
+//
+// Deviation (spec ruling 2): v1 runs but its last two columns are constant 0. B tests the labels '< 1000 copies/ml' and '>= 1000 copies/ml'
+// (B lines 38, 45), and D never produces them: it produces '<= 1000 copies/ml' and '> 1000 copies/ml' (D lines 36-37). The two other views
+// that read D (vSuppressionByFacility line 11, vVLQuarterlyFacilitySuppressionRate line 22) test the same labels as B, and suppression is a
+// result under 1000 in this pack, so the evident intent is the bands the column headers name: '< 1000 copies/ml' = 20 up to (not
+// including) 1000; '>= 1000 copies/ml' = 1000 and over. Target Not Detected and '< 20 copies/ml' are v1's own and unchanged. A result of
+// exactly 1000 is '<= 1000' in D, which by position is the '< 1000' column; the header says '>= 1000', so the port puts it there. Zambia may
+// confirm the bands. Total and the first two band columns match v1 for the same data.
+//
+// Window (spec ruling 3): v1 has no window. `from` and `to` are optional; blank means all history, which is v1. When given, they cut the
+// rows by the local date of the month key above (collected, else received, else registered), both days in.
+//
+// CE gaps: LIMSCodedValue is lab_results.coded_value and SIValue is numeric_value (a '<' comparator is not read). A request with no usable
+// date at all is one row with NULL Year and Month (kept when no window is given).
+export function resultBandsSql() {
+  const band = `case
+        when ${foldSql('l.coded_value')} = 'ldl' then 'tnd'
+        when l.numeric_value >= 0 and l.numeric_value < 20 then 'lt20'
+        when l.numeric_value >= 20 and l.numeric_value < 1000 then 'lt1000'
+        when l.numeric_value >= 1000 then 'ge1000'
+        else 'unknown' end`;
+  const day = `coalesce(${localDate('dr.effective')}, ${localDate('s.received_time')}, ${localDate('lr.authored_at')})`;
+  const count = (name) => `count(distinct ${foldSql('b.request_id')}) filter (where b.band = '${name}')`;
+  return `with b as (
+  select lr.request_id, ${day} as day, ${band} as band
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${foldSql('lr.panel_code')} = 'hivvl'
+    and (lr.rejection_code is null or rtrim(lr.rejection_code) = '')
+    and ${inListSql('l.observation_code', ['HIVVL', 'HIVVD', 'HIVVC'])}
+)
+select extract(year from b.day)::int as "Year", extract(month from b.day)::int as "Month",
+  count(distinct ${foldSql('b.request_id')}) as "Total",
+  ${count('tnd')} as "Target Not Detected",
+  ${count('lt20')} as "< 20 copies/ml",
+  ${count('lt1000')} as "< 1000 copies/ml",
+  ${count('ge1000')} as ">= 1000 copies/ml"
+from b
+where ({{param.from}} = '' or to_char(b.day, 'YYYY-MM-DD') >= {{param.from}}) and ({{param.to}} = '' or to_char(b.day, 'YYYY-MM-DD') <= {{param.to}})
+group by extract(year from b.day), extract(month from b.day)
+order by "Year" nulls first, "Month" nulls first`;
+}
+
+export const resultBandsParams = () => dateParams(false);
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
@@ -1129,5 +1367,8 @@ export function queries() {
     { name: 'VL testing summary by facility', sql: vlTestingSummarySql('facility'), params: vlTestingSummaryParams('facility') },
     { name: 'Unique VL clients', sql: uniqueClientsSql(), params: uniqueClientsParams() },
     { name: 'Unique VL clients by facility (12 months)', sql: uniqueClientsFacilitySql(), params: uniqueClientsFacilityParams() },
+    { name: 'Unique VL clients, 12-month rates', sql: uniqueClientsRatesSql(), params: uniqueClientsRatesParams() },
+    { name: 'VL requests and tests by lab and month', sql: labMonthSql(), params: labMonthParams() },
+    { name: 'VL result bands by month', sql: resultBandsSql(), params: resultBandsParams() },
   ];
 }

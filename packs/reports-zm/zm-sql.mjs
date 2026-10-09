@@ -823,9 +823,41 @@ export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not de
 // Options: `where` is a condition on the mapped row `fmr` and the request `lr`, applied while reading requests (slice 1's province
 // parameter); `extraPanels` and `orRegistered` widen the request rows for slice 1's parts 2 and 3 (a request registered in the window
 // without a report in it, and the panel HIVVL).
-export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`, where = 'true', extraPanels = [], orRegistered = false } = {}) {
+// `rank: true` is v1's TND.Rank (the visit number): it reads EVERY result of the clients, with no window (`from` and `to` are not used;
+// the caller applies its own), and adds three columns to the TND rows: `panel_code`, `result_row_id` (the lab_results row) and `visit`.
+// v1 numbers a client's results with row_number() over the province, district, facility, panel, sex code, surname, first name and ART
+// number (compared as SQL Server compares text), newest ResultDate first (lines 20-30), so visit 1 is the client's latest result EVER,
+// whatever window a report asks. The partition has the panel and the sex code, so a client with a result in each of two panels (or
+// with two sex codes) has a visit 1 in each. Ties on the stamp are broken on the lab number, then the result row (v1 picks any). A
+// row without a date (no report stamp, or a partial one such as '2026-07') is out, as v1's BETWEEN drops a NULL date. The default
+// (`rank` false) is unchanged, so slice 1 and every other caller read the same rows as before. `rank` cannot be used with `orRegistered`.
+export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`, where = 'true', extraPanels = [], orRegistered = false, rank = false } = {}) {
+  if (rank && orRegistered) throw new Error('tndCte: rank cannot be used with orRegistered');
   const idsName = `${name}_ids`;
   const result = rpt('r');
+  const requestWindow = rank ? `${localDate('dr.issued')} is not null` : `${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''}`;
+  const resultWindow = rank ? '' : `
+    and ${inRange('q.result_date', from, to)}`;
+  const columns = `q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.firstname, q.surname, q.age_years, q.sex, q.gender,
+    ${artNumberSql("coalesce(q.reference_numbers, '')", "coalesce(q.unique_id, '')")} as art_number,
+    q.collected_date, q.authored_at as registered_date, q.result_date,
+    ${result} as result,
+    case when ${inListSql(result, TND_SUPPRESSED_RESULTS)} or r.numeric_value < 1000 then 1 else 0 end as suppressed_flag,
+    case when ${inListSql(result, TND_UU_RESULTS)} or r.numeric_value < 200 then 1 else 0 end as uu_flag`;
+  const rows = `from ${reqName} q
+  join lab_results r on r.request_id = q.id
+  where q.panel_code in (${sqlList(TND_PANELS)})
+    and r.observation_code in (${sqlList(TND_OBSERVATIONS)})
+    and q.report_status = 'final'${resultWindow}
+    and ${result} is not null
+    and not ${inListSql(result, TND_INVALID_RESULTS)}`;
+  const visitPartition = ['b.province', 'b.district', 'b.facility', 'b.panel_code', 'b.sex', 'b.surname', 'b.firstname', 'b.art_number'].map(foldSql).join(', ');
+  const tndRows = rank
+    ? `select b.*, row_number() over (partition by ${visitPartition} order by ${localTs('b.result_date')} desc, b.lab_id, b.result_row_id) as visit
+  from (select ${columns}, q.panel_code, r.id as result_row_id
+  ${rows}) b`
+    : `select ${columns}
+  ${rows}`;
   return `${zmIdsCte(idsName)},
 ${reqName} as (
   select lr.id, lr.request_id, lr.panel_code, lr.age_years, lr.authored_at,
@@ -841,23 +873,10 @@ ${reqName} as (
   left join ${idsName} zi on zi.lab_request_id = lr.id
   where ${where}
     and lr.panel_code in (${sqlList([...new Set([...TND_PANELS, ...extraPanels])])})
-    and (${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''})
+    and (${requestWindow})
 ),
 ${name} as (
-  select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.firstname, q.surname, q.age_years, q.sex, q.gender,
-    ${artNumberSql("coalesce(q.reference_numbers, '')", "coalesce(q.unique_id, '')")} as art_number,
-    q.collected_date, q.authored_at as registered_date, q.result_date,
-    ${result} as result,
-    case when ${inListSql(result, TND_SUPPRESSED_RESULTS)} or r.numeric_value < 1000 then 1 else 0 end as suppressed_flag,
-    case when ${inListSql(result, TND_UU_RESULTS)} or r.numeric_value < 200 then 1 else 0 end as uu_flag
-  from ${reqName} q
-  join lab_results r on r.request_id = q.id
-  where q.panel_code in (${sqlList(TND_PANELS)})
-    and r.observation_code in (${sqlList(TND_OBSERVATIONS)})
-    and q.report_status = 'final'
-    and ${inRange('q.result_date', from, to)}
-    and ${result} is not null
-    and not ${inListSql(result, TND_INVALID_RESULTS)}
+  ${tndRows}
 )`;
 }
 

@@ -2152,5 +2152,460 @@ const suitesBuilders11 = [
   hvSuite('hivvl-windowed', { from: 'from', to: 'to' }, []),
 ];
 
+// ============================================================================================
+// Group t12: "Unique VL clients, 12-month rates" (v1 sp_getUniqueVLClientsInfoLast1Year, "R" below), "VL requests and tests by lab and
+// month" (v1 view vVLRequestsTestsByMonth, "M") and "VL result bands by month" (v1 view vVLResRangeBreakDownByMonth, "B", over the helper
+// view vVLReportData, "D"). Fixture ids start with "t12-"; lab ids with "T12-". "R line N" is a line of
+// StoredProcedure__dbo_sp_getUniqueVLClientsInfoLast1Year.sql, "M line N" of View__dbo_vVLRequestsTestsByMonth.sql, "B line N" of
+// View__dbo_vVLResRangeBreakDownByMonth.sql, "D line N" of View__dbo_vVLReportData.sql. Expected rows are worked out by hand from the v1 text.
+//
+// Every suite of a group shares one fixture (all setups run first), so the three queries' rows are kept apart by what each ignores:
+//   - R clients (lab ids T12-A.., T12-B.., T12-C.., T12-D.., T12-U..): a mapped requesting facility, a blank testing lab (M needs a lab
+//     code) and a rejection code (D drops rejected requests). R reads neither.
+//   - M requests (T12-X.., T12-Y..): no requesting facility (TND and hivvl need one) and a rejection code (D drops them).
+//   - B requests (T12-Bb..): no requesting facility and no testing lab, never rejected unless the case says so.
+//
+// R facilities (fixture codes ZT12x): A Choma General Hospital, Southern/Choma; B Choma Clinic, Southern/Choma; C Mongu Clinic,
+// Western/Mongu; D Chilenje Clinic, Lusaka/Lusaka; U not in the register. Window used by most cases: 2026-05-01 to 2026-05-31.
+//
+// R clients, with what each does. "latest ever" is TND.Rank = 1 (R lines 19, 35...): the client's newest result over ALL time.
+//   A01 Mary Banda    04-10 3000, then 05-12 50: latest 50, counted, suppressed, undetectable. (The same name and ART at Choma Clinic is a
+//                     separate client: B05.)
+//   A02 John Phiri    05-11 'Target Not Detected', then 06-15 4000: the latest ever is June, outside the May window: NOT counted in May
+//                     (counted in June). "Unique VL clients" would count his May result; R does not.
+//   A03 Peter Lungu   05-05 50, then 05-12 '<883 copies/mL': the latest has no hivvl row (not a valid hivvl result): not counted, and R
+//                     does not fall back to the 50.
+//   A04 Grace Tembo   'PTLTT': a valid hivvl text, but not a number and not one of the 13 texts: not counted.
+//   A05 Esther Daka   05-04 500, then 05-25 700 on a baseline lab: the latest is a baseline test, so she is dropped (R line 27 comes after
+//                     the rank). "Unique VL clients" would count the 500.
+//   A06 Lisa Mumba    panel RTRI: in TND, no hivvl row: not counted.
+//   A07 Adam, Zed Moyo   two people, one ART number (A700): R ranks by the names too in every branch, so both count (400; 1200).
+//   A08 Tom Zulu      two labs at one instant, both 100: row_number() gives one visit 1, so he counts once (rank() would count twice).
+//   A09 Sarah Chanda  'sarah' 'chanda' 'a900' 05-06 300, then 'Sarah' 'Chanda ' 'A900' 05-18 4000: one client ignoring case and trailing
+//                     spaces; the latest 4000 counts: not suppressed.
+//   A10 Blank Sex     sex '' 250: suppressed, not undetectable.   A11 (no patient)  ART 'U11' from the unique id: 3500.
+//   A12 Nina Other    150: suppressed and undetectable.   A13 Hope Mulenga  04-20 100, then 05-15 3000: latest 3000.
+//   A14 Pan Els       a result in panel HIVVL 05-14 (100) and one in panel RTRI 05-24 (90): the rank partitions by panel, so the HIVVL result
+//                     is visit 1 of its own and counts; the RTRI one has no hivvl row.
+//   A15 Sex Two       one ART number, sex code F (05-10 100) and sex code M (05-23 2000): the rank partitions by sex code, so both are visit
+//                     1 and both count.
+//   A16 Nd One        the text 'ND': counted in the all-Zambia and province branches, NOT in the district and facility branches (R lines 110, 146).
+//   A17 Four Hundred  the text '<400': in R's list but not a valid hivvl result, so no hivvl row: never counted.
+//   A18 Four Copies   '<400 copies/mL': counted, suppressed, not undetectable.
+//   B01..B06          Choma Clinic: window edges with +02:00 stamps, Mary Banda again (B05), and Late Fee (B06, latest in June).
+//   C01..C03          Mongu Clinic: a date-only stamp, a partial stamp ('2026-05', no day: out and must not raise), a plain one.
+//   D01..D05          Chilenje Clinic: 100; 'RNA not detected'; '<20 copies/mL'; 1000; 600 with no ART number.
+// ============================================================================================
+
+const P12 = [];
+const R12 = [];
+const D12 = [];
+const S12 = [];
+const L12 = [];
+const T12 = [];
+const F12 = [];
+let n12 = 0;
+const num12 = (v) => (v === null || v === undefined ? 'null' : String(v));
+const Q12_DEFAULTS = { panel: 'HIVVL', req: null, authored: '2026-05-01T08:00:00Z', eff: '2026-05-01T07:00:00Z', rec: null, issued: null,
+  status: 'final', performer: null, rej: null, obr: 1, results: [{ obs: 'HIVVL', num: 100 }], noReport: false, patient: false,
+  first: null, last: null, sex: 'F', age: 30, art: null, uq: null, form: null };
+
+// One lab request row of lab number `labId` with its report (unless noReport), specimen (when `rec`), results, optional patient and
+// pre-registration attributes. o: panel, req (requester code), authored, eff (collected), rec (received), issued, status, performer, rej
+// (rejection code), obr, results [{ obs, num, text, cmp, coded }], noReport, patient (true: a patient row), first, last, sex, age,
+// art (reference-numbers), uq (unique-id), form [[linkId, answer]].
+function rq12(labId, o = {}) {
+  const r = { ...Q12_DEFAULTS, ...o };
+  const k = String(++n12).padStart(3, '0');
+  const qid = `t12-q${k}`;
+  let pid = null;
+  if (r.patient) {
+    pid = `t12-p${k}`;
+    P12.push(`(${lit(pid)}, ${lit(r.first)}, ${lit(r.last)}, ${lit(r.sex)})`);
+  }
+  R12.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.authored)}, '2026-05-02T09:00:00Z', ${lit(r.req)}, ${lit(pid)}, ${num12(r.age)}, ${lit(r.rej)}, ${r.obr})`);
+  if (!r.noReport) {
+    let sid = null;
+    if (r.rec !== null) {
+      sid = `t12-s${k}`;
+      S12.push(`(${lit(sid)}, ${lit(r.rec)})`);
+    }
+    D12.push(`(${lit(`t12-d${k}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.eff)}, ${lit(r.issued)}, ${lit(r.performer)}, ${lit(sid)})`);
+  }
+  r.results.forEach((x, i) => {
+    L12.push(`(${lit(`t12-r${k}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)}, ${num12(x.num)}, ${lit(x.cmp ?? null)}, ${lit(x.coded ?? null)})`);
+  });
+  if (r.art !== null) T12.push(`(${lit(`t12-a${k}r`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(r.art)})`);
+  if (r.uq !== null) T12.push(`(${lit(`t12-a${k}u`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(UNQ)}, ${lit(r.uq)})`);
+  if (r.form) {
+    const items = r.form.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    F12.push(`(${lit(`t12-f${k}`)}, 'q', 'hiv_vl_documentation', ${lit(qid)}, '2026-05-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  }
+}
+
+// An R client's lab: a mapped requesting facility, a blank testing lab, rejected (the other two queries ignore it). o as rq12, plus num/text.
+function cl12(labId, issued, o = {}) {
+  const { num = null, text = null, obs = 'HIVVL', ...rest } = o;
+  rq12(labId, { req: 'ZT12A', performer: '', rej: 'REJ', patient: true, issued, results: [{ obs, num, text }], ...rest });
+}
+
+// ---- R: Choma General Hospital ----
+cl12('T12-A01a', '2026-04-10T08:00:00Z', { first: 'Mary', last: 'Banda', art: 'A100', num: 3000 });
+cl12('T12-A01b', '2026-05-12T08:00:00Z', { first: 'Mary', last: 'Banda', art: 'A100', num: 50 });
+cl12('T12-A02a', '2026-05-11T10:00:00Z', { first: 'John', last: 'Phiri', sex: 'M', art: 'A200', text: 'Target Not Detected' });
+cl12('T12-A02b', '2026-06-15T08:00:00Z', { first: 'John', last: 'Phiri', sex: 'M', art: 'A200', num: 4000 });
+cl12('T12-A03a', '2026-05-05T08:00:00Z', { first: 'Peter', last: 'Lungu', sex: 'M', art: 'A300', num: 50 });
+cl12('T12-A03b', '2026-05-12T08:00:00Z', { first: 'Peter', last: 'Lungu', sex: 'M', art: 'A300', text: '<883 copies/mL', num: 150 });
+cl12('T12-A04', '2026-05-08T08:00:00Z', { first: 'Grace', last: 'Tembo', art: 'A400', text: 'PTLTT' });
+cl12('T12-A05a', '2026-05-04T08:00:00Z', { first: 'Esther', last: 'Daka', art: 'A500', num: 500 });
+cl12('T12-A05b', '2026-05-25T08:00:00Z', { first: 'Esther', last: 'Daka', art: 'A500', num: 700, form: [['ARTRS', 'Baseline VL']] });
+cl12('T12-A06', '2026-05-06T08:00:00Z', { first: 'Lisa', last: 'Mumba', art: 'A600', panel: 'RTRI', num: 80 });
+cl12('T12-A07a', '2026-05-10T08:00:00Z', { first: 'Adam', last: 'Moyo', sex: 'M', art: 'A700', num: 400 });
+cl12('T12-A07b', '2026-05-15T08:00:00Z', { first: 'Zed', last: 'Moyo', sex: 'M', art: 'A700', num: 1200 });
+cl12('T12-A08a', '2026-05-12T09:00:00Z', { first: 'Tom', last: 'Zulu', sex: 'M', art: 'A800', num: 100 });
+cl12('T12-A08b', '2026-05-12T09:00:00Z', { first: 'Tom', last: 'Zulu', sex: 'M', art: 'A800', num: 100 });
+cl12('T12-A09a', '2026-05-06T08:00:00Z', { first: 'sarah', last: 'chanda', art: 'a900', num: 300 });
+cl12('T12-A09b', '2026-05-18T08:00:00Z', { first: 'Sarah', last: 'Chanda ', art: 'A900', num: 4000 });
+cl12('T12-A10', '2026-05-07T08:00:00Z', { first: 'Blank', last: 'Sex', sex: '', art: 'A1000', num: 250 });
+cl12('T12-A11', '2026-05-09T08:00:00Z', { patient: false, uq: 'U-11', num: 3500 });
+cl12('T12-A12', '2026-05-13T08:00:00Z', { first: 'Nina', last: 'Other', sex: 'N', art: 'A1200', num: 150 });
+cl12('T12-A13a', '2026-04-20T08:00:00Z', { first: 'Hope', last: 'Mulenga', art: 'A1300', num: 100 });
+cl12('T12-A13b', '2026-05-15T08:00:00Z', { first: 'Hope', last: 'Mulenga', art: 'A1300', num: 3000 });
+cl12('T12-A14a', '2026-05-14T08:00:00Z', { first: 'Pan', last: 'Els', art: 'A1400', num: 100 });
+cl12('T12-A14b', '2026-05-24T08:00:00Z', { first: 'Pan', last: 'Els', art: 'A1400', panel: 'RTRI', num: 90 });
+cl12('T12-A15a', '2026-05-10T09:00:00Z', { first: 'Sex', last: 'Two', sex: 'F', art: 'A1500', num: 100 });
+cl12('T12-A15b', '2026-05-23T08:00:00Z', { first: 'Sex', last: 'Two', sex: 'M', art: 'A1500', num: 2000 });
+cl12('T12-A16', '2026-05-16T08:00:00Z', { first: 'Nd', last: 'One', art: 'A1600', text: 'ND' });
+cl12('T12-A17', '2026-05-17T08:00:00Z', { first: 'Four', last: 'Hundred', art: 'A1700', text: '<400' });
+cl12('T12-A18', '2026-05-17T09:00:00Z', { first: 'Four', last: 'Copies', art: 'A1800', text: '<400 copies/mL' });
+// ---- R: Choma Clinic ----
+const CB = { req: 'ZT12B' };
+cl12('T12-B01', '2026-06-01T00:30:00+02:00', { ...CB, first: 'Edge', last: 'One', art: 'B100', num: 100 });   // local June 1 (UTC May 31): out of May
+cl12('T12-B02', '2026-05-01T00:30:00+02:00', { ...CB, first: 'Edge', last: 'Two', art: 'B200', num: 100 });   // local May 1 (UTC April 30): in
+cl12('T12-B03', '2026-05-31T23:59:59+02:00', { ...CB, first: 'Edge', last: 'Three', art: 'B300', num: 800 }); // the last evening of May: in
+cl12('T12-B04', '2026-04-30T23:30:00+02:00', { ...CB, first: 'Edge', last: 'Four', art: 'B400', num: 100 });  // local April 30: out of May
+cl12('T12-B05', '2026-05-22T08:00:00Z', { ...CB, first: 'Mary', last: 'Banda', art: 'A100', num: 90 });
+cl12('T12-B06a', '2026-05-10T08:00:00Z', { ...CB, first: 'Late', last: 'Fee', art: 'B600', num: 200 });
+cl12('T12-B06b', '2026-06-02T08:00:00Z', { ...CB, first: 'Late', last: 'Fee', art: 'B600', num: 5000 });
+// ---- R: Mongu Clinic ----
+const CC = { req: 'ZT12C' };
+cl12('T12-C01', '2026-05-20', { ...CC, first: 'Wanda', last: 'Mwila', age: 61, art: 'W100', num: 20 });
+cl12('T12-C02', '2026-05', { ...CC, first: 'Partial', last: 'Stamp', art: 'W200', num: 100 });
+cl12('T12-C03', '2026-05-21T08:00:00Z', { ...CC, first: 'Willy', last: 'Mwila', sex: 'M', art: 'W300', num: 5000 });
+// ---- R: Chilenje Clinic, and an unmapped facility ----
+const CD = { req: 'ZT12D' };
+cl12('T12-D01', '2026-05-14T08:00:00Z', { ...CD, first: 'Dan', last: 'Lungu', sex: 'M', art: 'D100', num: 100 });
+cl12('T12-D02', '2026-05-15T08:00:00Z', { ...CD, first: 'Dina', last: 'Zulu', art: 'D200', text: 'RNA not detected' });
+cl12('T12-D03', '2026-05-16T08:00:00Z', { ...CD, first: 'Ida', last: 'Unknown', sex: 'U', art: 'D300', text: '<20 copies/mL' });
+cl12('T12-D04', '2026-05-17T08:00:00Z', { ...CD, first: 'Ian', last: 'Indet', sex: 'I', art: 'D400', num: 1000 });
+cl12('T12-D05', '2026-05-18T08:00:00Z', { ...CD, first: 'Zero', last: 'Art', num: 600 });
+cl12('T12-U01', '2026-05-10T08:00:00Z', { req: 'ZT12U', first: 'Una', last: 'Mapped', art: 'U100', num: 100 });
+
+// ---- M: lab X (testing lab code 'T12X') and lab Y ('T12Y') ----
+// No requesting facility, rejected; so only the lab-by-month query sees them. Authored = registration; issued = authorised.
+const mx = (labId, o) => rq12(labId, { performer: 'T12X', rej: 'REJ', ...o });
+const my = (labId, o) => rq12(labId, { performer: 'T12Y', rej: 'REJ', ...o });
+mx('T12-X1', { authored: '2025-05-10T08:00:00Z', issued: '2025-05-20T10:00:00Z' });
+mx('T12-X2', { authored: '2025-05-11T08:00:00Z', issued: '2025-06-02T10:00:00Z', results: [{ obs: 'HIVVC', num: 100 }] });
+mx('T12-X3', { authored: '2026-05-12T08:00:00Z', issued: '2026-05-15T10:00:00Z' });
+mx('T12-X4', { authored: '2026-05-13T08:00:00Z', issued: '2026-05-16T10:00:00Z', status: 'preliminary' });              // not final: not tested
+mx('T12-X5', { authored: '2026-05-14T08:00:00Z', issued: '2026-05-17T10:00:00Z', results: [{ obs: 'HIVVD', num: 100 }] }); // observation not HIVVL or HIVVC: not tested
+mx('T12-X6', { authored: '2026-06-01T00:30:00+02:00', issued: '2026-05-01T00:30:00+02:00' });  // registered local June 1 (UTC May 31); authorised local May 1 (UTC April 30)
+mx('T12-X7', { authored: '2026-05-31T23:30:00+02:00', issued: '2026-05-31T23:45:00+02:00' });  // local May 31 both
+mx('T12-X8', { authored: '2026-04-02T08:00:00Z', issued: '2026-04-03T10:00:00Z', obr: 1 });
+mx('T12-X8', { authored: '2026-04-02T08:00:00Z', issued: '2026-04-03T10:00:00Z', obr: 2 });    // the same request, a second OBR set: counted once
+mx('T12-X9', { performer: 'T12x ', authored: '2026-03-05T08:00:00Z', issued: '2026-03-06T10:00:00Z' }); // the lab code differs in case and a trailing space
+mx('T12-X9b', { authored: '2026-03-09T08:00:00Z', issued: '2026-03-10T10:00:00Z' });
+mx('T12-X10', { panel: 'HIVPC', authored: '2026-03-06T08:00:00Z', issued: '2026-03-07T10:00:00Z' });  // not a VL panel
+mx('T12-X11', { performer: '', authored: '2026-03-07T08:00:00Z', issued: '2026-03-08T10:00:00Z' });  // blank testing lab
+mx('T12-X12', { noReport: true, authored: '2026-03-08T08:00:00Z' });                                 // no report, so no testing lab
+my('T12-Y1', { authored: '2026-03-10T08:00:00Z', issued: '2026-03-12T10:00:00Z' });
+my('T12-y1', { authored: '2026-03-10T09:00:00Z', issued: '2026-03-12T11:00:00Z' });                  // the lab number in another case: the same request
+my('T12-Y2', { authored: '2026-03-11T08:00:00Z', issued: null });                                    // final, never authorised
+my('T12-Y3', { authored: '2024-03-05T08:00:00Z', issued: '2024-03-06T10:00:00Z' });
+my('T12-Y4', { authored: null, issued: '2026-03-20T10:00:00Z' });                                    // no registration date
+my('T12-Y5', { panel: 'hivvl ', authored: '2026-03-12T08:00:00Z', issued: '2026-03-13T10:00:00Z' });  // panel code in another case, trailing space
+
+// ---- B: result bands ----
+// No requesting facility, no testing lab. effective = collected date (the month key), rec = received date, authored = registered date.
+const bb = (labId, o = {}) => rq12(labId, { eff: '2026-03-02T08:00:00Z', authored: '2026-03-01T08:00:00Z', ...o });
+bb('T12-Bb01', { results: [{ obs: 'HIVVL', num: 10 }] });
+bb('T12-Bb02', { eff: '2026-03-03T08:00:00Z', results: [{ obs: 'HIVVL', coded: 'LDL' }] });
+bb('T12-Bb03', { eff: '2026-03-04T08:00:00Z', results: [{ obs: 'HIVVL', num: 20 }] });
+bb('T12-Bb04', { eff: '2026-03-05T08:00:00Z', results: [{ obs: 'HIVVL', num: 999 }] });
+bb('T12-Bb05', { eff: '2026-03-06T08:00:00Z', results: [{ obs: 'HIVVL', num: 1000 }] });
+bb('T12-Bb06', { eff: '2026-03-07T08:00:00Z', results: [{ obs: 'HIVVL', num: 1000.5 }] });
+bb('T12-Bb07', { eff: '2026-03-08T08:00:00Z', results: [{ obs: 'HIVVL', num: 19.99 }] });
+bb('T12-Bb08', { eff: '2026-03-09T08:00:00Z', results: [{ obs: 'HIVVL', num: 0 }] });
+bb('T12-Bb09', { eff: '2026-03-10T08:00:00Z', results: [{ obs: 'HIVVL', num: -1 }] });
+bb('T12-Bb10', { eff: '2026-03-11T08:00:00Z', results: [{ obs: 'HIVVL', text: 'Pending' }] });
+bb('T12-Bb11', { eff: '2026-03-12T08:00:00Z', results: [{ obs: 'HIVVL', coded: 'ldl', num: 5000 }] });          // the coded value comes first
+bb('T12-Bb12', { eff: '2026-03-13T08:00:00Z', results: [{ obs: 'HIVVL', num: 10 }, { obs: 'HIVVC', num: 5000 }] }); // two bands, one request
+bb('T12-Bb13', { eff: '2026-03-14T08:00:00Z', results: [{ obs: 'HIVVD', num: 500 }] });
+bb('T12-Bb14', { eff: '2026-03-15T08:00:00Z', rej: 'REJ', results: [{ obs: 'HIVVL', num: 10 }] });                // rejected: out
+bb('T12-Bb15', { eff: '2026-03-16T08:00:00Z', rej: '  ', results: [{ obs: 'HIVVL', num: 100 }] });                // a blank rejection code is not a rejection
+bb('T12-Bb16', { eff: '2026-03-17T08:00:00Z', panel: 'HIVPC', results: [{ obs: 'HIVVL', num: 10 }] });            // not a VL panel
+bb('T12-Bb17', { eff: '2026-03-18T08:00:00Z', results: [{ obs: 'XXXX', num: 10 }] });                             // observation not HIVVL, HIVVD or HIVVC
+bb('T12-Bb18', { eff: '2026-03-19T08:00:00Z', results: [{ obs: 'HIVVL', num: 10 }] });
+bb('T12-bb18', { eff: '2026-03-19T09:00:00Z', results: [{ obs: 'HIVVL', num: 10 }] });                            // the same request in another case
+bb('T12-Bb19', { eff: '2026-03-20T08:00:00Z', results: [{ obs: 'HIVVL' }] });                                     // a result with no value at all
+bb('T12-Bb20', { eff: '2026-01-01T00:30:00+02:00', results: [{ obs: 'HIVVL', num: 50 }] });                       // local Jan 1 (UTC Dec 31)
+bb('T12-Bb21', { eff: null, rec: '2026-05-01T00:30:00+02:00', authored: '2025-02-01T08:00:00Z', results: [{ obs: 'HIVVL', num: 3000 }] }); // received date wins: local May 1
+bb('T12-Bb22', { eff: null, rec: null, authored: '2026-06-01T00:30:00+02:00', results: [{ obs: 'HIVVL', num: 5 }] }); // registered date: local June 1 (UTC May 31)
+bb('T12-Bb23', { eff: '2025-02-10T07:00:00Z', results: [{ obs: 'HIVVL', coded: 'LDL' }] });
+bb('T12-Bb24', { eff: null, rec: null, authored: null, results: [{ obs: 'HIVVL', num: 10 }] });                    // no date at all
+
+const SETUP12 = `${facilityRows('t12', [
+  ['ZT12A', 'Choma General Hospital', 'Southern', 'Choma'],
+  ['ZT12B', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT12C', 'Mongu Clinic', 'Western', 'Mongu'],
+  ['ZT12D', 'Chilenje Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT12U', 'Unmapped Clinic', 'Southern', 'Choma', false],
+])}
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, rejection_code, obr_set_id) values ${R12.join(',\n  ')};
+insert into patients (id, firstname, surname, sex) values ${P12.join(',\n  ')};
+insert into specimens (id, received_time) values ${S12.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id) values ${D12.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values ${L12.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${T12.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${F12.join(',\n  ')};`;
+
+// ---- R: expected rows ----
+
+const RATE_COLUMNS = ['VLClients', 'Suppressed', 'Undetectable', 'SuppressionRate', 'UndetectableRate'];
+const ratesQ = queries().find((q) => q.name === 'Unique VL clients, 12-month rates');
+const rate = (...v) => Object.fromEntries(RATE_COLUMNS.map((c, i) => [c, v[i]]));
+const MAY12 = { from: '2026-05-01', to: '2026-05-31' };
+const r12 = (province = '', district = '', facility = '', w = MAY12) => ({ province, district, facility, ...w });
+const rSuite = (name, params, row, setup = '') => orderedSuite10(name, ratesQ?.sql ?? 'select 1', params, RATE_COLUMNS, [row], setup);
+
+// Counts by facility, clients / suppressed / undetectable (the sums of the cases above):
+//   A: 14 clients with 'ND', 13 without (Nd One). Suppressed 9 (8 without ND), undetectable 6 (5 without ND).
+//      Counted: Mary 50 (S U), Adam 400 (S), Zed 1200, Tom 100 (S U), Sarah 4000, Blank Sex 250 (S), no-patient 3500, Nina 150 (S U),
+//      Hope 3000, Pan Els 100 (S U), Sex Two F 100 (S U), Sex Two M 2000, Nd One 'ND' (S U), Four Copies (S).
+//   B: Edge Two 100 (S U), Edge Three 800 (S), Mary 90 (S U): 3 clients, 3 suppressed, 2 undetectable.
+//   C: Wanda 20 (S U), Willy 5000: 2, 1, 1.
+//   D: Dan 100 (S U), Dina 'RNA not detected' (S U), Ida '<20 copies/mL' (S), Ian 1000, Zero Art 600 (S): 5, 4, 2.
+// Rates are cut at 12 decimals, not rounded (measured on SQL Server): 1200/17 = 70.588235294117|647, 800/17 = 47.058823529411|765, 500/13 = 38.461538461538|461.
+const NULLS = rate(0, null, null, null, null);
+const ZEROS = rate(0, 0, 0, 0, 0);
+
+const suitesRates = [
+  // R lines 12, 30-43 (nothing given): all Zambia. 24 clients, 17 suppressed, 11 undetectable. 'ND' counts here.
+  rSuite('rates-all', r12(), rate(24, 17, 11, 70.833333333333, 45.833333333333), SETUP12),
+  // R lines 45, 64-79 (a province): the names are the hivvl row's; compared ignoring case and trailing spaces. Southern = A + B: 17, 12, 8.
+  rSuite('rates-province', r12('Southern'), rate(17, 12, 8, 70.588235294117, 47.058823529411)),
+  rSuite('rates-province-fold', r12('southern  '), rate(17, 12, 8, 70.588235294117, 47.058823529411)),
+  rSuite('rates-lusaka', r12('Lusaka'), rate(5, 4, 2, 80, 40)),
+  rSuite('rates-western', r12('Western'), rate(2, 1, 1, 50, 50)),
+  // R lines 81, 101-116 (a district): the text list lacks 'ND' (line 110), so Nd One drops out: A 13, 8, 5 + B 3, 3, 2 = 16, 11, 7.
+  rSuite('rates-district', r12('Southern', 'Choma'), rate(16, 11, 7, 68.75, 43.75)),
+  rSuite('rates-district-fold', r12('SOUTHERN', 'choma '), rate(16, 11, 7, 68.75, 43.75)),
+  rSuite('rates-district-lusaka', r12('Lusaka', 'Lusaka'), rate(5, 4, 2, 80, 40)),
+  // R lines 118, 137-152 (a facility): also without 'ND' (line 146). A: 13, 8, 5.
+  rSuite('rates-facility', r12('Southern', 'Choma', 'Choma General Hospital'), rate(13, 8, 5, 61.538461538461, 38.461538461538)),
+  rSuite('rates-facility-fold', r12('Southern', 'Choma', 'choma general hospital '), rate(13, 8, 5, 61.538461538461, 38.461538461538)),
+  rSuite('rates-facility-clinic', r12('Southern', 'Choma', 'Choma Clinic'), rate(3, 3, 2, 100, 66.666666666666)),
+  rSuite('rates-facility-mongu', r12('Western', 'Mongu', 'Mongu Clinic'), rate(2, 1, 1, 50, 50)),
+  // The exists tests are aggregates without GROUP BY, so always true (measured): an area with no client gives 0 clients and NULL for the
+  // rest, not the all-zero row.
+  rSuite('rates-unknown-province', r12('Nowhere'), NULLS),
+  rSuite('rates-unknown-district', r12('Southern', 'Nowhere'), NULLS),
+  rSuite('rates-unknown-facility', r12('Southern', 'Choma', 'Nowhere'), NULLS),
+  // R line 154: any other combination of parameters gives five integer zeros.
+  rSuite('rates-district-alone', r12('', 'Choma'), ZEROS),
+  rSuite('rates-facility-alone', r12('', '', 'Mongu Clinic'), ZEROS),
+  rSuite('rates-province-facility', r12('Southern', '', 'Choma Clinic'), ZEROS),
+  rSuite('rates-district-facility', r12('', 'Choma', 'Choma Clinic'), ZEROS),
+  // The rank is over all time, so the window only picks the clients whose LATEST result falls in it (R lines 19-20).
+  // June: John Phiri's 4000 (S0 U0), Late Fee's 5000 (S0 U0) and Edge One's 100 at local June 1 00:30 (S1 U1; UTC would put it in May).
+  rSuite('rates-june', r12('', '', '', { from: '2026-06-01', to: '2026-06-30' }), rate(3, 1, 1, 33.333333333333, 33.333333333333)),
+  rSuite('rates-june-lusaka', r12('Lusaka', '', '', { from: '2026-06-01', to: '2026-06-30' }), NULLS),
+  // April: only Edge Four (local April 30 23:30 +02:00). Mary's April 3000 and Hope's April 100 are not their latest results.
+  rSuite('rates-april', r12('', '', '', { from: '2026-04-01', to: '2026-04-30' }), rate(1, 1, 1, 100, 100)),
+  rSuite('rates-empty-window', r12('', '', '', { from: '2025-01-01', to: '2025-01-31' }), NULLS),
+  // R line 20: cast(ResultDate as date) between two dates, so the whole last day is in (not only midnight).
+  rSuite('rates-last-day', r12('', '', '', { from: '2026-05-31', to: '2026-05-31' }), rate(1, 1, 0, 100, 0)),
+  rSuite('rates-first-day', r12('', '', '', { from: '2026-05-01', to: '2026-05-01' }), rate(1, 1, 1, 100, 100)),
+  // A date-only stamp is the day. The partial stamp '2026-05' (Partial Stamp) has no day: it is out and nothing raises.
+  rSuite('rates-date-only', r12('', '', '', { from: '2026-05-20', to: '2026-05-20' }), rate(1, 1, 1, 100, 100)),
+  {
+    name: 'rates-shape',
+    count: 8,
+    check() {
+      const bad = [];
+      if (!ratesQ) return ['query "Unique VL clients, 12-month rates" is missing'];
+      const ids = ratesQ.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['province', 'district', 'facility', 'from', 'to'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(ratesQ.params.map((p) => [p.id, p]));
+      for (const id of ['from', 'to']) if (!byId[id]?.required || byId[id].type !== 'text') bad.push(`${id} is a required text parameter (ruling 3)`);
+      for (const id of ['province', 'district']) if (byId[id]?.required || byId[id]?.type !== 'select') bad.push(`${id} is an optional select`);
+      if (byId.facility?.required || byId.facility?.type !== 'text') bad.push('facility is an optional text parameter');
+      if (BANNED9.test(ratesQ.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(ratesQ.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  },
+];
+
+// ---- M: expected rows ----
+
+const LM_COLUMNS = ['Year', 'Month', 'Laboratory', 'Requests', 'Tested'];
+const labQ = queries().find((q) => q.name === 'VL requests and tests by lab and month');
+const lm = (...v) => Object.fromEntries(LM_COLUMNS.map((c, i) => [c, v[i]]));
+const lmSuite = (name, params, rows) => orderedSuite10(name, labQ?.sql ?? 'select 1', params, LM_COLUMNS, rows);
+const NO_WINDOW = { from: '', to: '' };
+
+// Requests by registered month (M lines 21-22, 48), Tested by authorised MONTH over all years (M lines 31-32).
+// Lab T12X: May 2025 X1, X2 (2); March 2026 X9 ('T12x ') and X9b (2, shown as 'T12X', the smaller spelling); April X8 (1, one request in two OBR
+// sets); May 2026 X3, X4, X5, X7 (4); June 2026 X6, registered at local June 1 00:30 (1). X10 (panel HIVPC), X11 (blank lab) and X12 (no report) are out.
+// Tested by month for T12X: May X1 (2025), X3, X6 (authorised local May 1 00:30), X7 = 4 (X4 is not final, X5 is not HIVVL or HIVVC);
+// June X2 = 1; March X9, X9b = 2; April X8 = 1. So May 2025 shows Tested 4, from four different years' worth of requests (the v1 quirk).
+// Lab T12Y: March 2024 Y3 (1); March 2026 Y1 (and its twin 'T12-y1'), Y2, Y5 = 3 distinct requests; no date Y4 (1).
+// Tested for T12Y in month 3: Y1, Y3, Y4 (2026-03-20), Y5 = 4 (Y2 was never authorised).
+const LM_ALL = [
+  lm(null, null, 'T12Y', 1, 0),
+  lm(2024, 3, 'T12Y', 1, 4),
+  lm(2025, 5, 'T12X', 2, 4),
+  lm(2026, 3, 'T12X', 2, 2),
+  lm(2026, 3, 'T12Y', 3, 4),
+  lm(2026, 4, 'T12X', 1, 1),
+  lm(2026, 5, 'T12X', 4, 4),
+  lm(2026, 6, 'T12X', 1, 1),
+];
+
+const suitesLm = [
+  // No window is v1. The R clients (blank lab) and the B requests (no lab) are not rows: no lab code.
+  lmSuite('labmonth-all', NO_WINDOW, LM_ALL),
+  // A window cuts the Requests (by registered local date) and not Tested, which keeps counting May of every year.
+  lmSuite('labmonth-may-2026', { from: '2026-05-01', to: '2026-05-31' }, [lm(2026, 5, 'T12X', 4, 4)]),
+  lmSuite('labmonth-mid-month', { from: '2026-05-13', to: '2026-05-31' }, [lm(2026, 5, 'T12X', 3, 4)]),
+  // The local date of the stamp: X6 is registered at 2026-06-01T00:30+02:00 (June 1 locally, May 31 in UTC); X7 at 2026-05-31T23:30+02:00.
+  lmSuite('labmonth-june-1', { from: '2026-06-01', to: '2026-06-01' }, [lm(2026, 6, 'T12X', 1, 1)]),
+  lmSuite('labmonth-may-31', { from: '2026-05-31', to: '2026-05-31' }, [lm(2026, 5, 'T12X', 1, 4)]),
+  lmSuite('labmonth-from-only', { from: '2026-06-01', to: '' }, [lm(2026, 6, 'T12X', 1, 1)]),
+  lmSuite('labmonth-to-only', { from: '', to: '2024-12-31' }, [lm(2024, 3, 'T12Y', 1, 4)]),
+  lmSuite('labmonth-empty-window', { from: '2030-01-01', to: '2030-12-31' }, []),
+  {
+    name: 'labmonth-shape',
+    count: 6,
+    check() {
+      const bad = [];
+      if (!labQ) return ['query "VL requests and tests by lab and month" is missing'];
+      const ids = labQ.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: ${ids}`);
+      for (const p of labQ.params) if (p.required || p.type !== 'text') bad.push(`${p.id} is an optional text parameter (v1 has no window)`);
+      if (BANNED9.test(labQ.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(labQ.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  },
+];
+
+// ---- B: expected rows ----
+
+const BD_COLUMNS = ['Year', 'Month', 'Total', 'Target Not Detected', '< 20 copies/ml', '< 1000 copies/ml', '>= 1000 copies/ml'];
+const bandQ = queries().find((q) => q.name === 'VL result bands by month');
+const bd = (...v) => Object.fromEntries(BD_COLUMNS.map((c, i) => [c, v[i]]));
+const bdSuite = (name, params, rows) => orderedSuite10(name, bandQ?.sql ?? 'select 1', params, BD_COLUMNS, rows);
+
+// March 2026 (the collected date, D line 25): 16 requests. Target Not Detected: Bb02 (coded LDL), Bb11 (coded 'ldl' with a number: D line 34 first) = 2.
+// < 20: Bb01 (10), Bb07 (19.99), Bb08 (0), Bb12 (10), Bb18 (10, and its twin in another case: one request) = 5.
+// < 1000 (20 up to 1000): Bb03 (20), Bb04 (999), Bb13 (HIVVD 500), Bb15 (a blank rejection code is not a rejection) = 4.
+// >= 1000: Bb05 (1000, the boundary), Bb06 (1000.5), Bb12 (HIVVC 5000: one request in two bands) = 3.
+// Unknown, counted in Total only: Bb09 (-1), Bb10 ('Pending'), Bb19 (no value). Out: Bb14 (rejected), Bb16 (panel HIVPC), Bb17 (observation XXXX).
+const BD_ALL = [
+  bd(null, null, 1, 0, 1, 0, 0),   // Bb24: no date at all, a < 20 result
+  bd(2025, 2, 1, 1, 0, 0, 0),      // Bb23: coded LDL
+  bd(2026, 1, 1, 0, 0, 1, 0),      // Bb20: collected 2026-01-01T00:30+02:00, local Jan 1 (UTC Dec 31): 50
+  bd(2026, 3, 16, 2, 5, 4, 3),
+  bd(2026, 5, 1, 0, 0, 0, 1),      // Bb21: no collected date; received 2026-05-01T00:30+02:00 (local May 1) comes before the registered date (2025-02-01)
+  bd(2026, 6, 1, 0, 1, 0, 0),      // Bb22: no collected or received date; registered 2026-06-01T00:30+02:00 (local June 1)
+];
+
+const suitesBd = [
+  // No window is v1: every month. The R clients and M requests are rejected, so D drops them.
+  bdSuite('bands-all', NO_WINDOW, BD_ALL),
+  bdSuite('bands-march', { from: '2026-03-01', to: '2026-03-31' }, [bd(2026, 3, 16, 2, 5, 4, 3)]),
+  // Local dates: Bb20 (Jan 1) is in a window ending January 1; the NULL-date row is out as soon as a window is given.
+  bdSuite('bands-to-jan-1', { from: '', to: '2026-01-01' }, [BD_ALL[1], BD_ALL[2]]),
+  bdSuite('bands-may-1', { from: '2026-05-01', to: '2026-05-01' }, [bd(2026, 5, 1, 0, 0, 0, 1)]),
+  bdSuite('bands-from-june', { from: '2026-06-01', to: '' }, [bd(2026, 6, 1, 0, 1, 0, 0)]),
+  bdSuite('bands-empty-window', { from: '2030-01-01', to: '2030-12-31' }, []),
+  {
+    name: 'bands-shape',
+    count: 6,
+    check() {
+      const bad = [];
+      if (!bandQ) return ['query "VL result bands by month" is missing'];
+      const ids = bandQ.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: ${ids}`);
+      for (const p of bandQ.params) if (p.required || p.type !== 'text') bad.push(`${p.id} is an optional text parameter (v1 has no window)`);
+      if (BANNED9.test(bandQ.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(bandQ.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  },
+];
+
+// ---- The builder option: tndCte with rank: true (v1 TND.Rank, sp_GetPreviousVLResultforCohort2x lines 20-30) ----
+
+// Every result of the R clients, with no window, and its visit number: row_number() over province, district, facility, panel, sex code,
+// surname, first name and ART number (compared as SQL Server compares text), newest first. 42 results: A 28, B 7, C 2 (the partial stamp
+// has no date and is out), D 5; the unmapped facility is out. Visit is 1 unless listed; ties (Tom Zulu) go to the smaller lab number.
+const VISIT_NOT_1 = {
+  'T12-A01a': 2, 'T12-A02a': 2, 'T12-A03a': 2, 'T12-A05a': 2, 'T12-A08b': 2, 'T12-A09a': 2, 'T12-A13a': 2, 'T12-B06a': 2,
+};
+const RANK_LABS = [
+  ...['01a', '01b', '02a', '02b', '03a', '03b', '04', '05a', '05b', '06', '07a', '07b', '08a', '08b', '09a', '09b', '10', '11', '12', '13a', '13b',
+    '14a', '14b', '15a', '15b', '16', '17', '18'].map((s) => `T12-A${s}`),
+  ...['01', '02', '03', '04', '05', '06a', '06b'].map((s) => `T12-B${s}`),
+  ...['01', '03'].map((s) => `T12-C${s}`),
+  ...['01', '02', '03', '04', '05'].map((s) => `T12-D${s}`),
+];
+const rankSuite = {
+  name: 'tnd-rank-builder',
+  setup: '',
+  sql: `select 'tnd-rank-builder' || chr(9) || row_to_json(q)::text from (with ${tndCte('tn', { rank: true })}
+select lab_id, panel_code, visit, result_date from tn order by lab_id) q;`,
+  count: RANK_LABS.length + 7,
+  check(got) {
+    const failures = [];
+    if (got.length !== RANK_LABS.length) failures.push(`expected ${RANK_LABS.length} rows, got ${got.length}`);
+    for (const lab of RANK_LABS) {
+      const row = got.find((g) => g.lab_id === lab);
+      const want = VISIT_NOT_1[lab] ?? 1;
+      if (!row) failures.push(`missing ${lab}`);
+      else if (Number(row.visit) !== want) failures.push(`${lab}: expected visit ${want}, got ${row.visit}`);
+    }
+    // The panel is in the partition: Pan Els has a visit 1 in HIVVL and one in RTRI.
+    const pan = got.filter((g) => g.lab_id.startsWith('T12-A14')).map((g) => `${g.panel_code}:${g.visit}`).sort();
+    if (JSON.stringify(pan) !== JSON.stringify(['HIVVL:1', 'RTRI:1'])) failures.push(`Pan Els: expected HIVVL:1 and RTRI:1, got ${pan}`);
+    // The window is gone: April and June results are rows (the default builder, windowed to May, would drop them).
+    for (const lab of ['T12-A01a', 'T12-A02b', 'T12-B04']) if (!got.some((g) => g.lab_id === lab)) failures.push(`${lab} (outside May) must be a row`);
+    // No date, or a partial one, and an unmapped facility: no row.
+    for (const lab of ['T12-C02', 'T12-U01']) if (got.some((g) => g.lab_id === lab)) failures.push(`${lab} must not be a row`);
+    // The M and B requests have no requesting facility: none of them is a row.
+    if (got.some((g) => !g.lab_id.startsWith('T12-A') && !g.lab_id.startsWith('T12-B') && !g.lab_id.startsWith('T12-C') && !g.lab_id.startsWith('T12-D'))) failures.push('a row outside the R clients');
+    if (got.some((g) => g.lab_id.startsWith('T12-Bb'))) failures.push('a B request must not be a row');
+    return failures;
+  },
+};
+const rankShape = {
+  name: 'tnd-rank-shape',
+  count: 4,
+  check() {
+    const bad = [];
+    if (tndCte('x', { rank: true }).includes('{{param.')) bad.push('rank: must not mention a parameter (no window)');
+    if (!tndCte('x').includes('{{param.from}}')) bad.push('default: must keep the window');
+    try { tndCte('x', { rank: true, orRegistered: true }); bad.push('rank with orRegistered must throw'); } catch { /* expected */ }
+    if (!/visit/.test(tndCte('x', { rank: true })) || /visit/.test(tndCte('x'))) bad.push('only rank adds the visit column');
+    return bad;
+  },
+};
+
+const suites12all = [...suitesRates, ...suitesLm, ...suitesBd, rankSuite, rankShape];
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
-  { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] }];
+  { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
+  { name: 't12', suites: suites12all }];
