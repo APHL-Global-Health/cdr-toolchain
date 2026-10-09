@@ -13,6 +13,7 @@ import { spawnSync } from 'node:child_process';
 import {
   isNumericSql, reasonForTestSql, resultMergeSql, finalResultSql, vlCodedCte, VL_CODED_VALUE_SET,
 } from './vl-queries.mjs';
+import { pickCodedResultDisplays } from './vl-coded-results.mjs';
 
 const CONTAINER = process.env.PG_CONTAINER ?? 'openldr_ce-postgres-1';
 const DATABASE = process.env.PG_DATABASE ?? 'openldr_target';
@@ -151,6 +152,46 @@ suites.push(caseSuite('final', ['res', 'cap'], [
   { res: '540', cap: '< 20', expected: null },
   { res: 'abc', cap: '1000', expected: null },
 ], finalResultSql('res', 'cap')));
+
+// The duplicate rule, on the OpenLDRDict_MZ.dbo.LIMSCodedValues rows for these codes (2026-10-09).
+suites.push((() => {
+  const rows = [
+    ...Array(3).fill(['HIVVL', 'LDL', 'Target not detected']), ['HIVVL', 'LDL', 'Nível de detecção baixo'],
+    ...Array(3).fill(['HIVVL', 'NEG', 'Negative']), ['HIVVL', 'NEG', 'NOT DETECTED'],
+    ['HIVVL', 'POS', 'Positive'], ['HIVVL', 'POS', 'POS'], ['HIVVL', 'POS', 'POS'],
+    ['HIVVL', 'INVAL', 'Invalid'], ['HIVVL', 'INVAL', 'INVAL'],
+    ['HIVVL', 'NDET', 'NOT DETECTED'], ['HIVVL', 'NDET', 'NOT DETECTED'], ['HIVVL', 'NDET', 'Not Detected'],
+    ...Array(3).fill(['HIVVL', 'TND', 'Target not Detected']),
+    ['HIVVL', 'ACO', null],
+    ['HIVVL', '  ', 'blank code'],
+  ].map(([panel, code, description]) => ({ panel, code, description }));
+  const expected = {
+    concepts: [
+      { code: 'ACO', display: 'ACO' },
+      { code: 'INVAL', display: 'INVAL' },
+      { code: 'LDL', display: 'Target not detected' },
+      { code: 'NDET', display: 'NOT DETECTED' },
+      { code: 'NEG', display: 'Negative' },
+      { code: 'POS', display: 'POS' },
+      { code: 'TND', display: 'Target not Detected' },
+    ],
+    choiceCodes: ['INVAL', 'LDL', 'NDET', 'NEG', 'POS'],
+    leftOut: 1,
+  };
+  return {
+    name: 'pick',
+    count: 3,
+    check() {
+      const got = pickCodedResultDisplays(rows);
+      const failures = [];
+      if (JSON.stringify(got.concepts) !== JSON.stringify(expected.concepts)) failures.push(`concepts: got ${JSON.stringify(got.concepts)}`);
+      const codes = got.choices.map((c) => c.code);
+      if (JSON.stringify(codes) !== JSON.stringify(expected.choiceCodes)) failures.push(`choices: got ${JSON.stringify(codes)}`);
+      if (got.leftOut.length !== expected.leftOut) failures.push(`leftOut: got ${JSON.stringify(got.leftOut)}`);
+      return failures;
+    },
+  };
+})());
 
 // ---- Runner ----
 
