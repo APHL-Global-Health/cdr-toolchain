@@ -773,6 +773,20 @@ export const dateWeekSql = (dateExpr) => `((extract(doy from ${dateExpr})::int -
 const NUMBER_TEXT = String.raw`^\s*[-+]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?\s*$`;
 const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
 
+// A date text as 'YYYY-MM-DD', or NULL. Two forms are read: dd/mm/yyyy (the form cdr measured in LIMSRptResult for the
+// date results, apps/cli/src/compare/v1-coverage.ts) and yyyy-mm-dd, each with optional surrounding spaces. A date that
+// does not exist ('31/02/2026'), a year 0000, any other form and NULL give NULL. It never raises.
+const DMY_TEXT = String.raw`^\s*([0-9]{2})/([0-9]{2})/([0-9]{4})\s*$`;
+const YMD_TEXT = String.raw`^\s*([0-9]{4})-([0-9]{2})-([0-9]{2})\s*$`;
+const isoDateOfTextSql = (x) => `(select case
+      when p.y >= 1 and p.m between 1 and 12 and p.d between 1 and 31 then
+        case when extract(month from make_date(p.y, p.m, 1) + (p.d - 1)) = p.m then to_char(make_date(p.y, p.m, 1) + (p.d - 1), 'YYYY-MM-DD') end
+    end
+    from (select
+      coalesce((regexp_match(${x}, ${sqlLit(DMY_TEXT)}))[3], (regexp_match(${x}, ${sqlLit(YMD_TEXT)}))[1])::int as y,
+      coalesce((regexp_match(${x}, ${sqlLit(DMY_TEXT)}))[2], (regexp_match(${x}, ${sqlLit(YMD_TEXT)}))[2])::int as m,
+      coalesce((regexp_match(${x}, ${sqlLit(DMY_TEXT)}))[1], (regexp_match(${x}, ${sqlLit(YMD_TEXT)}))[3])::int as d) p)`;
+
 // ---- The recency and recency_surveillance copy tables ----
 
 // Panels and observations of both procedures (sp_getTestLevelRecency_CIDRZ lines 58, 66; sp_recency_surveillance
@@ -883,11 +897,14 @@ const reportingStatusSql = (recency, suppression) => `case
 //     empty baseline. Here the column stays as this table has it.
 //   - moh_facility_code is the national code of the mapped register row (the MFL code in ZMFAC).
 //   - recency_test_date: v1 reads LabResults.DateTimeValue, which CE does not carry. The text is in the result (v1
-//     LIMSRptResult holds the same text for 30,198 of 33,004 rows). The column is the reported text of the RTRTD
-//     result, as sent ('01/03/2013' stays that), not a date.
+//     LIMSRptResult holds the same text for 30,198 of 33,004 rows, as dd/mm/yyyy). The column is that text read as a
+//     date and shown as 'YYYY-MM-DD' (isoDateOfTextSql). yyyy-mm-dd is read as it is. Any other text, and a date that
+//     does not exist, gives NULL.
 //   - Dates are CE's ISO text with the offset DISA wrote. v1's are datetimes.
-//   - The 13 hardcoded lab prefixes are v1's. Any other lab number differs from v1 where Zambia's Laboratories
-//     dictionary names a lab differently from the report (ruling 8).
+//   - The 13 hardcoded lab prefixes are v1's. For any other lab number v1 joins its Laboratories dictionary on the
+//     lab-number prefix (line 103) and takes LabName. The port keys on the report's performer instead (ruling 8: the
+//     report's display, else the mapped register name, else the performer's code). So the key differs too, not only
+//     the name: a lab number whose prefix and performer name different labs gets another lab than in v1.
 export function recencyCte(name, { from, to } = {}) {
   const { finalRange } = copyWindow('recencyCte', from, to, 'lr.authored_at');
   const scope = recencyScopeSql(`${name}_ids`, finalRange);
@@ -942,7 +959,7 @@ export function recencyCte(name, { from, to } = {}) {
     s.recency_result, s.baseline_vl_result, s.suppression_status, s.testing_laboratory,
     s.sample_collection_date, s.date_registered, s.tested_date, s.reviewed_date,
     ${reportingStatusSql('s.recency_result', 's.suppression_status')} as reporting_status,
-    x.answer as modality, y.answer as pregnant, z.answer as breastfeeding, q.answer as recency_test_date
+    x.answer as modality, y.answer as pregnant, z.answer as breastfeeding, ${isoDateOfTextSql('q.answer')} as recency_test_date
   from ${name}_s s
   ${answerJoin('x', "= 'rtmod'")}
   ${answerJoin('y', "in ('vpreg', 'artpr')")}
@@ -1000,8 +1017,11 @@ export function recencyCte(name, { from, to } = {}) {
 //     under or over 1000 as it looks.
 //   - v1 groups the rows once before the joins (lines 74-111). The counts are of distinct lab numbers, so that step
 //     cannot change them and is left out.
-//   - v1 groups with SQL Server's default collation, so 'VCT' and 'vct', or 'Recent' and 'recent ', fall in one group.
-//     The port groups on the exact text. Real data come in one spelling; the checks avoid mixed spellings in a group.
+//   - v1 groups and counts with SQL Server's default collation (lines 186-201), so 'VCT' and 'vct ', or 'Recent' and
+//     'recent', fall in one group, and two spellings of a lab number are one lab. The port groups on foldSql (lower case,
+//     no trailing spaces) of province, district, facility, recency_result and modality, and counts distinct folded lab
+//     numbers. The text shown is min() of the spellings in the group. v1 shows one of them too, and which one is not
+//     defined, so a group of mixed spellings may show a different spelling than v1 did. The other keys are literals.
 //   - Dates are CE's ISO text; the local date comes from the text with no UTC shift.
 export function recencySurveillanceCte(name, { from, to } = {}) {
   const { finalRange } = copyWindow('recencySurveillanceCte', from, to, 'lr.authored_at');
@@ -1065,12 +1085,15 @@ export function recencySurveillanceCte(name, { from, to } = {}) {
     left join ${name}_xb xb on xb.lab_id = y.lab_id
     left join ${name}_z z on z.lab_id = y.lab_id
   )
-  select a.province, a.district, a.facility, null::text as implementing_partner, a.age_group, a.gender, a.recency_result,
+  select min(a.province) as province, min(a.district) as district, min(a.facility) as facility,
+    null::text as implementing_partner, a.age_group, a.gender, min(a.recency_result) as recency_result,
     a.suppression_status, ${reportingStatusSql('a.recency_result', 'a.suppression_status')} as reporting_status,
-    a.modality, a.reg_year, a.reg_quarter, a.month, a.week, count(distinct a.lab_id)::int as count
+    min(a.modality) as modality, a.reg_year, a.reg_quarter, a.month, a.week,
+    count(distinct ${foldSql('a.lab_id')})::int as count
   from ${name}_alpha a
-  group by a.province, a.district, a.facility, a.age_group, a.gender, a.recency_result, a.suppression_status,
-    ${reportingStatusSql('a.recency_result', 'a.suppression_status')}, a.modality, a.reg_year, a.reg_quarter, a.month, a.week
+  group by ${foldSql('a.province')}, ${foldSql('a.district')}, ${foldSql('a.facility')}, a.age_group, a.gender,
+    ${foldSql('a.recency_result')}, a.suppression_status, ${reportingStatusSql('a.recency_result', 'a.suppression_status')},
+    ${foldSql('a.modality')}, a.reg_year, a.reg_quarter, a.month, a.week
 )`;
 }
 
@@ -1084,6 +1107,7 @@ const VLEID_PANELS = ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'];
 const VLEID_WINDOWS = {
   registered: ['lr.authored_at', 'lr.authored_at'],
   period: ['coalesce(dr.effective, s.received_time, lr.authored_at)', 'coalesce(dr.effective, s.received_time, lr.authored_at)'],
+  specimen_or_registered: ['coalesce(dr.effective, lr.authored_at)', 'coalesce(dr.effective, lr.authored_at)'],
   analysis: ['lr.analysis_at', 'null::text'],
   authorised: ['dr.issued', 'null::text'],
 };
@@ -1156,15 +1180,22 @@ const VLEID_COLUMNS = [
 // v1 sp_UpdateVLEIDRequests merges every Requests row of four panels into the table (lines 19-87); it never deletes.
 // The CTE returns what the table holds when it is up to date: one row per lab request row (request number and OBR
 // set) of the panels HIVPC, HIVST, HIVVL and VIRAL (line 23), plus the VIRAL rows below. The view `Requests` of
-// Zambia's reporting database is `select *` from this table; vReceivedRequestsSummary, vVLReportData and
-// vVLReportDatab read it.
+// Zambia's reporting database is `select *` from this table. The v1 objects that read the copy table are the view
+// Requests, vVLReportData, vVLReportDatab and vReceivedRequestsSummary.
+// vWeeklyRequestTrend does NOT: it reads OpenLDRData.dbo.Requests, which holds every panel, so it must use plain
+// lab_requests, not this builder. fn_WeeklyLISUpdate reads OpenLDRData.dbo.Requests too; this builder only covers its
+// panels HIVPC and HIVVL (and none of its other filters), so it is a superset there, not the source.
 //
 // Window: `from` and `to` are parameter names, compared as in inRange (the local date of the stamp). The window only
 // limits the rows read; each consumer applies its own v1 edges on top. `on` picks the date column:
 //   'registered' (the default)  lab_requests.authored_at, v1 RegisteredDateTime
-//   'period'                    coalesce(specimen date, received date, registered date), the date vWeeklyRequestTrend
-//                               groups on. vReceivedRequestsSummary leaves the received date out of its coalesce, so
-//                               for that one read with a wider window and filter in the query.
+//   'specimen_or_registered'    coalesce(specimen date, registered date), the bucket date of vReceivedRequestsSummary
+//                               (View lines 25-28 and 62-65: year, quarter, month and week of
+//                               coalesce(SpecimenDateTime, RegisteredDateTime)). The local date of the stamp.
+//   'period'                    coalesce(specimen date, received date, registered date). No v1 consumer of this copy
+//                               table uses it (vWeeklyRequestTrend has that coalesce, but it does not read the copy
+//                               table). It differs from 'specimen_or_registered' for a request with no specimen date
+//                               and a received date.
 //   'analysis'                  lab_requests.analysis_at, v1 AnalysisDateTime
 //   'authorised'                diagnostic_reports.issued, v1 AuthorisedDateTime
 // A bad `on`, or only one of from and to, throws.
@@ -1229,6 +1260,10 @@ const VLEID_COLUMNS = [
 // (blankSql). lims_facility_code is lab_requests.requester_code: v1's LimsFacilityCode (the DISA facility) and
 // RequestingFacilityCode are one code in CE. hl7_priority_code and hl7_result_status_code are rebuilt from CE's words and
 // lose what CE folded (for status: v1's Y, Z and the like).
+// VIRAL gaps: the synthetic VIRAL row copies the host request's obr_set_id; v1's VIRAL row has its own OBR set (counts of
+// distinct RequestID are not affected). v1 has VIRAL rows the port cannot see: a specimen whose only panel is VIRAL
+// (cdr's toDocumentationFhir returns [] when there is no order graph to attach the form to) and a VIRAL panel with no
+// answers (no form is made).
 export function vleidRequestsCte(name, { from, to, on = 'registered' } = {}) {
   const windows = VLEID_WINDOWS[on];
   if (windows === undefined) throw new Error(`vleidRequestsCte: on must be one of ${Object.keys(VLEID_WINDOWS).join(', ')}`);

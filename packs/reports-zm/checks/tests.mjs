@@ -35,7 +35,8 @@ const facilityMapSql = (p) => `insert into facility_map (id, source_system, perf
   ('${p}-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka', '2002'),
   ('${p}-fm3', '', '', 'ZUNMP', null, null, null, null, null),
   ('${p}-fm4', '', '', 'ZNORG', 'reg-n', 'No Province Clinic', null, null, '3003'),
-  ('${p}-fm5', '', '', 'ZPERF', 'reg-p', 'Perf Lab Register', 'Southern', 'Choma', '4004');`;
+  ('${p}-fm5', '', '', 'ZPERF', 'reg-p', 'Perf Lab Register', 'Southern', 'Choma', '4004'),
+  ('${p}-fm6', '', '', 'ZLUS2', 'reg-l2', 'CHILENJE CLINIC ', 'LUSAKA', 'lusaka ', '2003');`;
 
 function makeFixture(p) {
   const patients = [];
@@ -79,8 +80,11 @@ const bind = (sqlText, params) => Object.entries(params)
 
 // A suite over `select * from <cte>`: column order, then the exact row set (duplicates counted) with its count.
 // `after` is SQL put after the CTE's name, for example a filter.
-function builderSuite({ name, setup, cteSql, columns, alias, rows, where = '' }) {
-  const key = (r) => JSON.stringify(columns.map((c) => r[c] ?? null));
+// `fold` names text columns compared ignoring case and trailing spaces: the builder shows one spelling of a group that
+// SQL Server merges, and which one is arbitrary (v1 shows any).
+function builderSuite({ name, setup, cteSql, columns, alias, rows, where = '', fold = [] }) {
+  const norm = (c, v) => (fold.includes(c) && typeof v === 'string' ? v.trimEnd().toLowerCase() : v);
+  const key = (r) => JSON.stringify(columns.map((c) => norm(c, r[c] ?? null)));
   return {
     name,
     setup,
@@ -266,7 +270,14 @@ lab('T5R-LAB-NONE', [{ display: null, performer: null }], [{ testing_laboratory:
 
 // ---- The answers (lines 123-148): from RTRI-panel rows of the lab number, with no window ----
 lab('T5R-ANS-ALL', [rtri('Recent', [{ obs: 'RTMOD', text: 'Index' }, { obs: 'VPREG', text: 'Yes' }, { obs: 'VBREA', text: 'No' }, { obs: 'RTRTD', text: '01/03/2026' }])],
-  [{ modality: 'Index', pregnant: 'Yes', breastfeeding: 'No', recency_test_date: '01/03/2026' }]);
+  [{ modality: 'Index', pregnant: 'Yes', breastfeeding: 'No', recency_test_date: '2026-03-01' }]);
+// The test date is a datetime in v1. cdr measured dd/mm/yyyy in the text, so that form (and ISO) becomes 'YYYY-MM-DD';
+// anything else, and a date that does not exist, is NULL.
+[['01/03/2026', '2026-03-01'], ['31/12/2026', '2026-12-31'], ['29/02/2024', '2024-02-29'], [' 05/06/2026 ', '2026-06-05'],
+  ['2026-04-20', '2026-04-20'], [' 2026-04-20', '2026-04-20'], ['29/02/2026', null], ['31/02/2026', null], ['13/13/2026', null],
+  ['00/01/2026', null], ['32/01/2026', null], ['2026-02-30', null], ['2026-13-01', null], ['0000-01-01', null], ['1/3/2026', null],
+  ['03/01/26', null], ['2026-04-20T10:00:00Z', null], ['garbage', null], ['', null]]
+  .forEach(([text, iso], i) => lab(`T5R-ANS-DATE-${i}`, [rtri('Recent', [{ obs: 'RTRTD', text }])], [{ recency_test_date: iso }]));
 // Modality is the raw text (line 123), not the six of the surveillance list.
 lab('T5R-ANS-MODRAW', [rtri('Recent', [{ obs: 'rtmod ', text: 'Anything' }])], [{ modality: 'Anything' }]);
 // VPREG and ARTPR both answer "pregnant" (line 135): two answers give two rows.
@@ -308,6 +319,7 @@ const recencySuites = [
 // Group t5-surveillance: the Recency_Surveillance table
 // ======================================================================
 
+const SURV_FOLD = ['province', 'district', 'facility', 'recency_result', 'modality'];
 const SURV_COLUMNS = ['province', 'district', 'facility', 'implementing_partner', 'age_group', 'gender', 'recency_result',
   'suppression_status', 'reporting_status', 'modality', 'reg_year', 'reg_quarter', 'month', 'week', 'count'];
 
@@ -440,6 +452,19 @@ rs.add('T5S-H-UNMAPPED', [{ ...rtri('Recent'), req: 'ZUNMP', authored: D19 }]);
 rs.add('T5S-H-NOPROV', [{ ...rtri('Recent'), req: 'ZNORG', authored: D19 }]);
 rs.add('T5S-H-OBSOTHER', [{ results: [{ obs: 'XYZ', text: 'Recent' }], req: 'ZLUSA', authored: D19 }]);
 
+// ---- Block I (Lusaka, female 18): v1 groups under SQL Server's collation (lines 190-201) ----
+// Spellings that differ in case or trailing spaces fall in one group: the recency result, the modality, the facility
+// name (two register rows 'Chilenje Clinic' and 'CHILENJE CLINIC ', region 'Lusaka' / 'LUSAKA', district 'Lusaka' /
+// 'lusaka ') and the lab number (count distinct is under the same collation). One group of 5 labs: I-1 to I-3 are three
+// labs, I-4 and I-5 are one lab number in two spellings.
+const I = { years: 18, authored: D18 };
+rs.add('T5S-I-1', [{ ...withModality('VCT'), ...I, req: 'ZLUSA' }]);
+rs.add('T5S-I-2', [{ ...rtri('RECENT ', [{ obs: 'RTMOD', text: 'vct ' }]), ...I, req: 'ZLUSA' }]);
+rs.add('T5S-I-3', [{ ...withModality('Vct'), ...I, req: 'ZLUS2' }]);
+rs.add('T5S-I-4', [{ ...withModality('VCT'), ...I, req: 'ZLUSA' }]);
+rs.add('t5s-i-4 ', [{ ...withModality('VCT'), ...I, req: 'ZLUS2' }]);
+group(LUSAKA, G('15 - 19', 'Female', 'Recent', null, 'Recent RTRI', 18, { modality: 'VCT' }), 4);
+
 // ---- The year boundary: local dates, quarter and week (lines 47-50) ----
 // 2026-12-31 is a Thursday, day 365: week 53 of 2026, quarter 4. 2027-01-01 is a Friday: week 1, quarter 1.
 // 23:50+02:00 on 12-31 is 21:50 UTC the same day; 00:10+02:00 on 01-01 is 22:10 UTC on 12-31, so a UTC date would
@@ -454,7 +479,7 @@ const yearRows = [
 
 const survSetup = rs.setup();
 const survSuites = [
-  builderSuite({ name: 'surveillance-window', setup: survSetup, cteSql: bind(recencySurveillanceCte('rs', { from: 'from', to: 'to' }), WINDOW), columns: SURV_COLUMNS, alias: 'rs', rows: wantedSurv }),
+  builderSuite({ name: 'surveillance-window', setup: survSetup, cteSql: bind(recencySurveillanceCte('rs', { from: 'from', to: 'to' }), WINDOW), columns: SURV_COLUMNS, alias: 'rs', rows: wantedSurv, fold: SURV_FOLD }),
   // No window: Choma's labs are all in May, so the filtered rows are block A either way.
   builderSuite({ name: 'surveillance-all-choma', setup: '', cteSql: recencySurveillanceCte('rs'), columns: SURV_COLUMNS, alias: 'rs',
     rows: wantedSurv.filter((r) => r.facility === 'Choma General Hospital'), where: "where facility = 'Choma General Hospital'" }),
