@@ -1,9 +1,9 @@
 // Custom queries for the vl reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
-  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql,
+  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS,
 } from '../zm-sql.mjs';
 
 // Area parameters in SQL. An optional parameter arrives as '' when blank. `same` matches a column on a
@@ -516,6 +516,226 @@ export const facilityClientsParams = () => [
   ...dateParams(true),
 ];
 
+// ---- Earlier VL results of high-VL clients, VL results history by client ------------------------------
+//
+// Both queries read one client's results over time. A client is a (facility name, ART number) pair. They share two row sets,
+// "x" (the history rows) and "z" (the cohort rows), built below from v1's CTEs x and z
+// (sp_GetPreviousVLResultforCohort lines 20-102, sp_GetPreviousVLResultforCohort2 lines 20-110; the _Prega copy has the same x and z).
+//
+// x, the history rows: one row per request x result x final report (v1 HL7ResultStatusCode F is diagnostic_reports.status
+// 'final'), with the mapped requesting facility (province, district and name of the register row; v1 inner-joins its facility
+// dictionary), the patient's sex, the ART number and the result text (rpt). Panel HIVVL; observation HIVVL and HIVVC (T1) or also
+// HIVVD (T2). The result text is not NULL and not one of 20 texts ('antibodies. @mat3', 'No', 'per request', 'Positive (Repeat
+// sample)', 'Weak Positive', 'Yes', '', INVAL, Please repeat, Insufficient serum received, Insufficient for further tests,
+// Indeterminate, Haemolysed, FAIL, Absent, Haemolysed ++, Icteric ++++, INV, This result has been checked, to confirm patient
+// identity.). NOT IN drops a NULL result. Lists compare ignoring case and trailing spaces, as SQL Server does.
+// History window (lines 55-56): datediff(dd, authorised, @StartDate) < 366 (T1) or < 730 (T2), and authorised < @EndDate. Dates are
+// LOCAL: datediff counts the boundaries between local calendar dates and `authorised < @EndDate` compares the local wall time with
+// the end date at 00:00:00. `authorised` is diagnostic_reports.issued; a partial stamp has no date and drops out.
+// Visit (v1 row_number, lines 23-33): per (province, district, facility, panel, sex, ART number) ordered by authorised time, oldest
+// first (T1) or newest first (T2). Equal times go to the lab number, then the row ids: v1 leaves them open.
+// The ART number is artNumberShortSql: the rule of lines 25-29 has the HOSPID steps, and HOSPID is not sent (ruling 7), so HOSPID is
+// read as blank. Then a blank REFNO sends the client to UNIQUEID, and the rule is the one of "Client by ART number".
+//
+// z, the cohort rows (T1 lines 74-102, T2 lines 74-110): request x result x final report with the mapped facility and the ART number
+// whose authorised time is BETWEEN @StartDate AND @EndDate. With dates v1 compares at 00:00:00, so the window runs from the start
+// date at 00:00:00 to the end date at 00:00:00, local time: the end day is out apart from its first instant, and a one-day window
+// holds only results at exactly midnight (the same decision as the facility report). A partial stamp drops out.
+//   T1 (lines 92-101): any panel, any observation; the result is a number of more than three characters (ISNUMERIC and
+//     LEN(RTRIM(LTRIM(x))) > 3). The test is on the result text, not the number.
+//   T2 (lines 92-108): panel HIVVL, observation HIVVL, HIVVC or HIVVD, result not NULL and not on the 20-text list.
+// x joins z on the facility NAME and the ART number, both ignoring case and trailing spaces.
+const COHORT_EXCLUDED_TEXTS = ['antibodies. @mat3', 'No', 'per request', 'Positive (Repeat sample)', 'Weak Positive', 'Yes', '', 'INVAL',
+  'Please repeat', 'Insufficient serum received', 'Insufficient for further tests', 'Indeterminate', 'Haemolysed', 'FAIL', 'Absent',
+  'Haemolysed ++', 'Icteric ++++', 'INV', 'This result has been checked', 'to confirm patient identity.'];
+
+const cohortFrom = '({{param.from}})::date';
+const cohortTo = '({{param.to}})::date::timestamp';
+// The window of z (BETWEEN with dates at 00:00:00, local) on a local-time SQL expression.
+const cohortWindow = (ts) => `${ts} >= ${cohortFrom}::timestamp and ${ts} <= ${cohortTo}`;
+const cohortArt = () => artNumberShortSql("coalesce(zi.reference_numbers, '')", "coalesce(zi.unique_id, '')");
+
+// The history rows x. `observations`: the observation codes; `days`: the history length; `direction`: 'asc' or 'desc'.
+function cohortHistoryCtes({ observations, days, direction }) {
+  const result = rpt('l');
+  return `x_src as (
+  select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
+    fmr.region as province, fmr.district as district, fmr.name as facility, lr.panel_code, p.sex,
+    ${localTs('dr.issued')} as issued_ts, ${cohortArt()} as art_no, ${result} as result_text
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  ${requesterJoin('lr', 'fmr')}
+  left join zm_ids zi on zi.lab_request_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  where ${inListSql('lr.panel_code', ['HIVVL'])}
+    and ${inListSql('l.observation_code', observations)}
+    and dr.status = 'final'
+    and (${cohortFrom} - ${localDate('dr.issued')}) < ${days}
+    and ${localTs('dr.issued')} < ${cohortTo}
+    and not ${inListSql(result, COHORT_EXCLUDED_TEXTS)}
+),
+x as (
+  select s.*, row_number() over (
+    partition by ${foldSql('s.province')}, ${foldSql('s.district')}, ${foldSql('s.facility')}, ${foldSql('s.panel_code')}, ${foldSql('s.sex')}, ${foldSql('s.art_no')}
+    order by s.issued_ts ${direction}, s.lab_id collate "C", s.request_row_id, s.result_row_id, s.report_row_id) as visit
+  from x_src s
+)`;
+}
+
+// The cohort rows z. `where` is the filter after the window (it reads the result text `result_text`).
+function cohortRowsCte(where) {
+  const result = rpt('l');
+  return `z as (
+  select fmr.name as facility, ${cohortArt()} as art_no
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  ${requesterJoin('lr', 'fmr')}
+  left join zm_ids zi on zi.lab_request_id = lr.id
+  where dr.status = 'final'
+    and ${cohortWindow(localTs('dr.issued'))}
+    and ${where(result)}
+)`;
+}
+
+const sameClient = (a, b) => `${foldSql(`${a}.facility`)} = ${foldSql(`${b}.facility`)} and ${foldSql(`${a}.art_no`)} = ${foldSql(`${b}.art_no`)}`;
+
+// ---- Earlier VL results of high-VL clients (v1 sp_GetPreviousVLResultforCohort) ----
+//
+// Params: from, to (required text, YYYY-MM-DD, ruling 3). One row per client with a cohort result in the window: Province, District,
+// Facility, ARTNumber, then the columns 1 to 10: the result text of visits 1 to 10, oldest first (v1 PIVOT with MAX, lines 114-119).
+// A client with no x row has no output row.
+//
+// Kept v1 quirks (ruling 1):
+//   - The cohort test has no panel or observation filter (lines 92-101): a result of ANY test that is a number of four characters or
+//     more puts the client in the cohort ('3000' of an HIVTM row, '1,500', '1.5E10' all count; '300' does not). The history shown is
+//     HIVVL and HIVVC only.
+//   - Visits are numbered inside (province, district, facility, panel, SEX, ART number): a client whose sex differs between requests has
+//     two series. The PIVOT groups by province, district, facility and ART number only, so the series are merged and MAX keeps the
+//     greater TEXT of each visit slot ('120' beats '110'; '99' beats '100'). The port takes the greater text in SQL Server's order
+//     (case and trailing spaces ignored), then byte order.
+//   - The client is the facility NAME and the ART number: ART numbers that differ only in case are one client (the case shown is the
+//     one that sorts first in byte order; v1 shows either). A blank ART number (no REFNO and no UNIQUEID) groups with every other
+//     such client of the facility.
+//   - v1 joins x to z, so an x row repeats once per cohort row of the client; MAX takes the same value again, so the port tests
+//     for a cohort row instead (same output).
+//   - Visits past 10 are not shown (the PIVOT lists 1 to 10); a result at exactly the end date is not in x (authorised < end date)
+//     though it can put the client in the cohort (BETWEEN includes it).
+//   - ORDER BY province, district, facility, ART number (line 121), comparing as SQL Server does, then byte order.
+//
+// CE gaps (spec ruling 7): HOSPID is not sent (see artNumberShortSql). Facility, district and province are the mapped register row's;
+// v1 also drops a facility whose province or district is missing from HealthcareAreas (lines 48-51), which the port does not do (as the
+// other queries). The register can spell a name differently from v1's dictionary (README).
+export function cohortSql() {
+  const visits = Array.from({ length: 10 }, (_, i) => i + 1);
+  const pick = (n) => `(array_agg(x.result_text order by ${foldSql('x.result_text')} collate "C" desc, x.result_text collate "C" desc) filter (where x.visit = ${n}))[1] as v${n}`;
+  return `with ${zmIdsCte('zm_ids')},
+${cohortHistoryCtes({ observations: ['HIVVL', 'HIVVC'], days: 366, direction: 'asc' })},
+${cohortRowsCte((result) => `${isNumericSql(result)} and length(btrim(${result})) > 3`)}
+select g.province as "Province", g.district as "District", g.facility as "Facility", g.art_no as "ARTNumber",
+  ${visits.map((n) => `g.v${n} as "${n}"`).join(', ')}
+from (
+  select min(x.province collate "C") as province, min(x.district collate "C") as district, min(x.facility collate "C") as facility,
+    min(x.art_no collate "C") as art_no,
+    ${visits.map(pick).join(',\n    ')}
+  from x
+  where exists (select 1 from z where ${sameClient('z', 'x')})
+  group by ${foldSql('x.province')}, ${foldSql('x.district')}, ${foldSql('x.facility')}, ${foldSql('x.art_no')}
+) g
+order by ${foldSql('g.province')} collate "C" nulls first, ${foldSql('g.district')} collate "C" nulls first,
+  ${foldSql('g.facility')} collate "C" nulls first, ${foldSql('g.art_no')} collate "C" nulls first,
+  g.province collate "C", g.district collate "C", g.facility collate "C", g.art_no collate "C"`;
+}
+
+export const cohortParams = () => dateParams(true);
+
+// ---- VL results history by client (v1 sp_GetPreviousVLResultforCohort2, with sp_GetPreviousVLResultforCohort2_Prega merged in) ----
+//
+// Params: from, to (required text, YYYY-MM-DD, ruling 3), province (select, blank = all; v1's Cohort2 fixed it to 'Lusaka', line 124),
+// pregnant_only (select 'no' or 'yes'; 'yes' is the _Prega copy, which had no province filter: leave province blank for it).
+// One row per client result (long format): Province, District, Facility, ARTNumber, Rank (1 = the newest result), SuppressionStatus,
+// ResultDate, Result. The rows are every x row of a client who has a cohort row (z) in the window. x reads 730 days of history and the
+// observations HIVVL, HIVVC and HIVVD (lines 53-56). z is the cohort of Cohort2 lines 74-110.
+//
+// SuppressionStatus (lines 114-117): 'Suppressed' when the result is not a number, or a number under 1000; else 'UnSuppressed'.
+// ResultDate (line 118): convert(varchar, authorised, 100), 'Mon dd yyyy hh:mmAM' with the day and the hour padded with a space
+// ('May  9 2026  8:00AM'), the local wall time, seconds cut.
+//
+// pregnant_only = yes (Prega lines 111-129 and 142-144): only clients (facility name + ART number) with a VIRAL-panel answer in the
+// window saying pregnant: ARTPR or VPREG answered Y (v1: LIMSCodedValue 'Y'), or ARTRS answered 'Pregnant Mother'. CE holds the VIRAL
+// panel as the form hiv_vl_documentation (ruling 6) and the answer is the reported TEXT, so the port reads Yes, Y or Yest (the rule of the
+// hivvl copy table; ignoring case and trailing spaces) for ARTPR and VPREG, and the text 'Pregnant Mother' for ARTRS. v1 reads the VIRAL
+// REQUEST (panel VIRAL, authorised between @StartDate and @EndDate). CE has no VIRAL request, so the port takes each request row that
+// holds the form (any panel), gets its facility and ART number from that row, and takes "authorised in the window" from the reports of
+// the same lab number (any status: v1 has no status test there): the lab number has a report authorised in the window (the BETWEEN of z).
+// y is distinct, so it adds no rows beyond the semi-join (Prega line 112 is select distinct).
+//
+// Kept v1 quirks (ruling 1):
+//   - x is joined to z, which has one row per cohort result (not per client), so every history row of a client is repeated once per
+//     result the client has in the window: a client with two valid results in the window shows each history row twice. The Prega
+//     copy joins y as well (distinct), which does not repeat rows.
+//   - SuppressionStatus calls any text that is not a number 'Suppressed', even junk the exclusion list misses.
+//   - Rank 1 is the newest result; visits count per sex (a client's two sexes give two series) and the rows are not merged.
+//   - The window is BETWEEN with dates (the end day is out apart from its first instant); a result at exactly the end date is a cohort
+//     row but not a history row (authorised < end date).
+//   - x joins z on the facility name and the ART number. A blank ART number groups with every such client of the facility.
+//   - The Prega copy's province is not filtered: a blank province gives that.
+//
+// Deviations (ruling 2):
+//   - cast(LIMSRptResult as int) (lines 115, 133) stops v1 for a decimal text ('123.4'), a thousands comma ('5,000') or an exponent
+//     ('1E3'). The port reads the number (commas dropped): '123.4' is Suppressed, '5,000' and '1E3' (1000) are not. A currency sign has
+//     no number here and counts as not a number (Suppressed).
+//   - The Prega copy's VIRAL request has no counterpart in CE (see above); the window comes from the lab number's reports.
+//
+// CE gaps (spec ruling 7): HOSPID is not sent (artNumberShortSql). Province, district and facility are the register row's.
+//
+// Rows come out ordered by province, district, facility, ART number (line 131, comparing as SQL Server does). v1 orders no further; the
+// port adds rank, then authorised time, then the result, so that paging is stable.
+export function historySql() {
+  const result = 'x.result_text';
+  const number = numberOfTextSql(result);
+  const t = 'x.issued_ts';
+  const resultDate = `to_char(${t}, 'Mon') || ' ' || lpad(extract(day from ${t})::int::text, 2) || ' ' || to_char(${t}, 'YYYY') || ' ' || lpad(to_char(${t}, 'FMHH12'), 2) || ':' || to_char(${t}, 'MI') || to_char(${t}, 'AM')`;
+  const pregnantAnswers = `${inListSql(formAnswerSql('q.id', 'VPREG'), YES_WORDS)} or ${inListSql(formAnswerSql('q.id', 'ARTPR'), YES_WORDS)} or ${inListSql(formAnswerSql('q.id', 'ARTRS'), ['Pregnant Mother'])}`;
+  return `with ${zmIdsCte('zm_ids')},
+${cohortHistoryCtes({ observations: ['HIVVL', 'HIVVC', 'HIVVD'], days: 730, direction: 'desc' })},
+${cohortRowsCte((r) => `${r} is not null and not ${inListSql(r, COHORT_EXCLUDED_TEXTS)} and ${inListSql('lr.panel_code', ['HIVVL'])} and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVVD'])}`)},
+y as (
+  select distinct fmr.name as facility, ${cohortArt()} as art_no
+  from lab_requests q
+  ${requesterJoin('q', 'fmr')}
+  left join zm_ids zi on zi.lab_request_id = q.id
+  where ${foldSql('{{param.pregnant_only}}')} = 'yes'
+    and (${pregnantAnswers})
+    and exists (select 1 from lab_requests q2 join diagnostic_reports d2 on d2.based_on_id = q2.id
+      where q2.request_id = q.request_id and ${cohortWindow(localTs('d2.issued'))})
+)
+select x.province as "Province", x.district as "District", x.facility as "Facility", x.art_no as "ARTNumber", x.visit as "Rank",
+  case when coalesce(${number} < 1000, true) then 'Suppressed' else 'UnSuppressed' end as "SuppressionStatus",
+  ${resultDate} as "ResultDate", ${result} as "Result"
+from x
+join z on ${sameClient('z', 'x')}
+where ({{param.province}} = '' or ${foldSql('x.province')} = ${foldSql('{{param.province}}')})
+  and (${foldSql('{{param.pregnant_only}}')} <> 'yes' or exists (select 1 from y where ${sameClient('y', 'x')}))
+order by ${foldSql('x.province')} collate "C" nulls first, ${foldSql('x.district')} collate "C" nulls first,
+  ${foldSql('x.facility')} collate "C" nulls first, ${foldSql('x.art_no')} collate "C" nulls first,
+  x.province collate "C", x.district collate "C", x.facility collate "C", x.art_no collate "C",
+  x.visit, x.issued_ts, x.result_text collate "C"`;
+}
+
+// pregnant_only is a select with the two answers; blank counts as no.
+const pregnantOnlyParam = () => ({
+  id: 'pregnant_only', label: 'Pregnant clients only (yes or no)', type: 'select', required: false,
+  optionsSql: "select 'no' as pregnant_only union all select 'yes'",
+});
+
+export const historyParams = () => [
+  ...dateParams(true),
+  provinceParam('province', false),
+  pregnantOnlyParam(),
+];
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
@@ -523,5 +743,7 @@ export function queries() {
     { name: 'VL monthly trend', sql: vlTrendSql(), params: vlTrendParams() },
     { name: 'Client by ART number', sql: artLookupSql(), params: artLookupParams() },
     { name: "VL results for a facility's clients", sql: facilityClientsSql(), params: facilityClientsParams() },
+    { name: 'Earlier VL results of high-VL clients', sql: cohortSql(), params: cohortParams() },
+    { name: 'VL results history by client', sql: historySql(), params: historyParams() },
   ];
 }

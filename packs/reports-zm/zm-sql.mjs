@@ -206,7 +206,7 @@ const HIVVL_VALID = ['<20 copies/mL', 'TAR', 'Target not detected', 'Target Not 
 const HIVVL_SUPPRESSED = ['<20 copies/mL', 'TAR', 'Target not detected', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected',
   '<30 copies/ml', '<30 copies/mL', '<40 copies/mL', 'NDET', 'DET', 'ND', '<20CP', '< 40', '<400 copies/mL', '<883 copies/mL', 'PLTT', 'PTLTV'];
 const HIVVL_UU = ['TAR', 'Target Not Detected', 'Target not detected', 'TARG', 'RNA not detected', 'NDET', 'ND', 'DET'];
-const YES_WORDS = ['Yes', 'Y', 'Yest'];
+export const YES_WORDS = ['Yes', 'Y', 'Yest'];
 
 // Stamps are CE's ISO text, and DISA's local wall time keeps its offset ('2026-05-01T01:00:00+02:00').
 // A FHIR dateTime may also be partial ('2026-07') or a date. Every cast is guarded: text that is not

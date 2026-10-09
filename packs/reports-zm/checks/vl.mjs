@@ -1227,4 +1227,369 @@ const suites8 = [
   },
 ];
 
-export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }];
+
+// ============================================================================================
+// Group t9: "Earlier VL results of high-VL clients" (v1 sp_GetPreviousVLResultforCohort, "T1" below) and "VL results
+// history by client" (v1 sp_GetPreviousVLResultforCohort2 with its _Prega copy merged in, "T2" below). Fixture ids start
+// with "t9-"; lab ids with "T9-". "T1 line N" is a line of StoredProcedure__dbo_sp_GetPreviousVLResultforCohort.sql,
+// "T2 line N" of ...Cohort2.sql, "T2P line N" of ...Cohort2_Prega.sql. Expected rows are worked out by hand from the
+// v1 text. Window used by most cases: from 2026-05-01, to 2026-05-31.
+// ============================================================================================
+
+const P9 = [];
+const R9 = [];
+const D9 = [];
+const L9 = [];
+const A9 = [];
+const F9 = [];
+let n9 = 0;
+const k9 = () => String(++n9).padStart(3, '0');
+const sqlNum9 = (v) => (v === null || v === undefined ? 'null' : String(v));
+
+// One lab number with one request row, one final report and one result. o: art (REFNO), uq (UNIQUEID), req, sex (null
+// = no patient), panel, status, obs, num, text, form [[linkId, answer]] (on this request row), viral [[linkId, answer]]
+// (a second request row of the lab number, panel VIRAL, holding the form: no report, no result).
+const L9_DEFAULTS = { req: 'ZSOUT', sex: 'F', panel: 'HIVVL', status: 'final', obs: 'HIVVL', uq: null, num: null, text: null };
+function res9(labId, art, issued, o = {}) {
+  const r = { ...L9_DEFAULTS, art, issued, ...o };
+  const k = k9();
+  const qid = `t9-q${k}`;
+  let pid = null;
+  if (r.sex !== null) {
+    pid = `t9-p${k}`;
+    P9.push(`(${lit(pid)}, 'P${k}', ${lit(r.sex)})`);
+  }
+  R9.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, null, null, ${lit(r.req)}, ${lit(pid)})`);
+  D9.push(`(${lit(`t9-d${k}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.issued)}, 'LUS')`);
+  L9.push(`(${lit(`t9-r${k}`)}, ${lit(qid)}, ${lit(r.obs)}, ${lit(r.text)}, ${sqlNum9(r.num)}, null)`);
+  A9.push(`(${lit(`t9-a${k}r`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(r.art)})`);
+  if (r.uq !== null) A9.push(`(${lit(`t9-a${k}u`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(UNQ)}, ${lit(r.uq)})`);
+  const form = (hostId, answers, suffix) => {
+    const items = answers.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    F9.push(`(${lit(`t9-f${k}${suffix}`)}, 'q', 'hiv_vl_documentation', ${lit(hostId)}, '2026-05-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  };
+  if (r.form) form(qid, r.form, '');
+  if (r.viral) {
+    const vid = `t9-q${k}v`;
+    R9.push(`(${lit(vid)}, ${lit(labId)}, 'VIRAL', null, null, ${lit(r.req)}, ${lit(pid)})`);
+    A9.push(`(${lit(`t9-a${k}vr`)}, ${lit(vid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(r.art)})`);
+    form(vid, r.viral, 'v');
+  }
+}
+
+// ---- Clients at Choma General Hospital (ZSOUT) unless said otherwise ----
+// 1001: two older results and one in the window. T1: [200, 450, 1500]. T2: ranks 3, 2, 1.
+res9('T9-01', '1001', '2025-06-10T08:00:00Z', { num: 200 });
+res9('T9-02', '1001', '2025-12-15T08:00:00Z', { num: 450 });
+res9('T9-03', '1001', '2026-05-10T08:00:00Z', { num: 1500 });
+// 2002: a high result before the window only: no cohort, no row.
+res9('T9-04', '2002', '2026-04-01T08:00:00Z', { num: 5000 });
+// 3003: a result of 300 in the window: under four characters, so not in T1's cohort; in T2's cohort (any valid result).
+res9('T9-05', '3003', '2026-05-12T08:00:00Z', { num: 300 });
+// 4004: INVAL is on the exclusion list (not shown, and not a cohort result); 1000 has four characters.
+res9('T9-06', '4004', '2026-03-01T08:00:00Z', { num: 100 });
+res9('T9-07', '4004', '2026-05-05T08:00:00Z', { text: 'INVAL' });
+res9('T9-08', '4004', '2026-05-20T08:00:00Z', { num: 1000 });
+// 5005: REFNO "ART.99" sends the ART number to UNIQUEID "AB-5 5": AB55. A text result below the cutoff.
+res9('T9-09', 'ART.99', '2026-02-01T08:00:00Z', { uq: 'AB-5 5', text: '<20 copies/mL' });
+res9('T9-10', 'ART.99', '2026-05-08T08:00:00Z', { uq: 'AB-5 5', num: 2500 });
+// 6006: the cohort test of T1 has no panel or observation filter: a high result of another test puts the client in.
+res9('T9-11', '6006', '2026-03-10T08:00:00Z', { num: 90 });
+res9('T9-12', '6006', '2026-05-11T08:00:00Z', { num: 3000, panel: 'POHVL', obs: 'HIVTM' });
+// 7007: two sexes under one ART number. Visits count per sex, the pivot merges them with Max.
+res9('T9-13', '7007', '2026-03-01T08:00:00Z', { num: 110, sex: 'F' });
+res9('T9-14', '7007', '2026-03-02T08:00:00Z', { num: 120, sex: 'M' });
+res9('T9-15', '7007', '2026-05-09T08:00:00Z', { num: 2000, sex: 'F' });
+// 8008: panel and observation compare ignoring case.
+res9('T9-16', '8008', '2026-04-10T08:00:00Z', { num: 800, panel: 'hivvl', obs: 'hivvc' });
+res9('T9-17', '8008', '2026-05-15T08:00:00Z', { num: 4000 });
+// Edges. T1 history is datediff(dd, authorised, from) < 366 (line 55) on LOCAL dates; the cohort window is authorised
+// between from and to as datetimes (line 92), so the end day is out apart from 00:00:00; x needs authorised < to (line 56).
+res9('T9-18', 'E101', '2025-05-01T00:30:00+02:00', { num: 150 });   // local 2025-05-01: 365 days before: in (UTC would say 366: out)
+res9('T9-19', 'E101', '2026-05-03T08:00:00Z', { num: 1200 });
+res9('T9-20', 'E102', '2025-04-30T23:30:00+02:00', { num: 160 });   // 366 days: out of T1's history, in T2's
+res9('T9-21', 'E102', '2026-05-03T08:00:00Z', { num: 1300 });
+res9('T9-22', 'E103', '2026-05-01T00:00:00+02:00', { num: 3500 });  // exactly the start, local (UTC is 04-30): in
+res9('T9-23', 'E104', '2026-05-31T00:00:00+02:00', { num: 3600 });  // exactly the end: in the cohort, out of x
+res9('T9-24', 'E104', '2026-04-01T08:00:00Z', { num: 170 });
+res9('T9-25', 'E105', '2026-05-31T00:00:01+02:00', { num: 3700 });  // one second after the end: out of both
+res9('T9-26', 'E105', '2026-04-02T08:00:00Z', { num: 180 });
+res9('T9-27', 'E106', '2026-04-30T23:59:59+02:00', { num: 3800 });  // one second before the start: not in the cohort
+// Status and observation.
+res9('T9-28', 'S101', '2026-03-01T08:00:00Z', { num: 130, status: 'cancelled' });
+res9('T9-29', 'S101', '2026-05-05T08:00:00Z', { num: 2200 });
+res9('T9-30', 'S102', '2026-05-06T08:00:00Z', { text: '5,000' });
+res9('T9-31', 'S103', '2026-04-20T08:00:00Z', { num: 700 });
+res9('T9-32', 'S103', '2026-05-14T08:00:00Z', { num: 1800, obs: 'HIVVD' });   // T1 reads HIVVL and HIVVC only; T2 adds HIVVD
+// Other facilities.
+res9('T9-33', 'F101', '2026-03-05T08:00:00Z', { num: 140, req: 'ZCHO2' });  // Choma Clinic
+res9('T9-34', 'F101', '2026-05-04T08:00:00Z', { num: 2100, req: 'ZCHO2' });
+res9('T9-35', 'F102', '2026-03-06T08:00:00Z', { num: 145, req: 'ZLUSA' });  // Chilenje Clinic, Lusaka
+res9('T9-36', 'F102', '2026-05-05T08:00:00Z', { num: 2300, req: 'ZLUSA' });
+res9('T9-37', 'F103', '2026-05-06T08:00:00Z', { num: 2400, req: 'ZKAFU' }); // Kafue District Hospital
+res9('T9-38', 'F104', '2026-05-07T08:00:00Z', { num: 2500, req: 'ZUNMP' }); // in the map, not in the register: no row
+res9('T9-39', 'F105', '2026-05-07T08:00:00Z', { num: 2500, req: 'ZNONE' }); // no map row: no row
+res9('T9-40', 'F106', '2026-05-07T08:00:00Z', { num: 2500, req: null });    // no facility: no row
+// One ART number at two facilities: the facility is part of the join. Lusaka has no result in the window.
+res9('T9-41', 'G101', '2026-03-07T08:00:00Z', { num: 155 });
+res9('T9-42', 'G101', '2026-05-08T08:00:00Z', { num: 2600 });
+res9('T9-43', 'G101', '2026-03-08T08:00:00Z', { num: 156, req: 'ZLUSA' });
+// A client with no ART number at all ('' for blank REFNO and UNIQUEID).
+res9('T9-44', '', '2026-05-09T08:00:00Z', { uq: '', num: 2700 });
+// ART numbers that differ only in case are one client.
+res9('T9-45', 'k101', '2026-03-09T08:00:00Z', { num: 165 });
+res9('T9-46', 'K101', '2026-05-10T08:00:00Z', { num: 2800 });
+// Twelve results: T1 shows visits 1 to 10 only.
+const M9 = ['2025-06-05', '2025-07-05', '2025-08-05', '2025-09-05', '2025-10-05', '2025-11-05', '2025-12-05', '2026-01-05', '2026-02-05', '2026-03-05', '2026-04-05'];
+M9.forEach((d, i) => res9(`T9-${47 + i}`, 'M101', `${d}T08:00:00Z`, { num: 201 + i }));
+res9('T9-58', 'M101', '2026-05-05T08:00:00Z', { num: 1111 });
+// No patient row: sex is empty, one partition.
+res9('T9-73', 'N101', '2026-03-01T08:00:00Z', { num: 175, sex: null });
+res9('T9-74', 'N101', '2026-05-19T08:00:00Z', { num: 3300, sex: null });
+// Two results in the window: T2 joins every x row to every cohort row of the client, so each row shows twice.
+res9('T9-75', 'D101', '2026-05-20T08:00:00Z', { num: 1100 });
+res9('T9-76', 'D101', '2026-05-21T08:00:00Z', { num: 1200 });
+// T2 history is under 730 days: 2024-05-02 local (729 days) in, 2024-05-01 local (730) out; UTC would flip the first.
+res9('T9-77', 'H101', '2024-05-02T00:30:00+02:00', { num: 190 });
+res9('T9-78', 'H101', '2024-05-01T23:30:00+02:00', { num: 191 });
+res9('T9-79', 'H101', '2026-05-22T08:00:00Z', { num: 2900 });
+// A text on the exclusion list is not a visit.
+res9('T9-80', 'V101', '2026-04-01T08:00:00Z', { text: 'Absent' });
+res9('T9-81', 'V101', '2026-05-23T08:00:00Z', { num: 1300 });
+// Pregnancy (T2 with pregnant_only = yes): the VIRAL form answers, T2P lines 111-129. Results under 1000, so T1 ignores them.
+res9('T9-60', 'P101', '2026-05-12T08:00:00Z', { num: 600, viral: [['ARTPR', 'Yes']] });   // form on a VIRAL row of the lab number
+res9('T9-61', 'P101', '2026-02-01T08:00:00Z', { num: 500 });
+res9('T9-62', 'P102', '2026-05-13T08:00:00Z', { num: 700, form: [['VPREG', 'Y']] });      // form on the result's own row
+res9('T9-63', 'P102', '2026-01-01T08:00:00Z', { num: 650 });
+res9('T9-64', 'P103', '2026-05-14T08:00:00Z', { num: 800, form: [['ARTRS', 'pregnant mother ']] });
+res9('T9-65', 'P104', '2026-05-15T08:00:00Z', { num: 900, form: [['ARTPR', 'No']] });      // not pregnant
+res9('T9-66', 'P105', '2026-05-16T08:00:00Z', { num: 950 });
+res9('T9-67', 'P105', '2026-02-10T08:00:00Z', { num: 500, form: [['ARTPR', 'Yes']] });     // pregnant, but a lab authorised before the window
+res9('T9-68', 'P106', '2026-05-17T08:00:00Z', { num: 960 });                               // pregnant at another facility only
+res9('T9-69', 'P106', '2026-05-17T08:00:00Z', { num: 990, req: 'ZLUSA', form: [['ARTPR', 'Yes']] });
+res9('T9-70', 'P107', '2026-05-31T00:00:00+02:00', { num: 970, form: [['ARTPR', 'Y']] }); // the form's lab is authorised at the end instant: in
+res9('T9-71', 'P107', '2026-05-02T08:00:00Z', { num: 980 });
+res9('T9-72', 'P108', '2026-05-18T08:00:00Z', { num: 995, form: [['VPREG', 'YES ']] });
+res9('T9-82', 'P109', '2026-05-19T08:00:00Z', { num: 996, form: [['ARTRS', 'Pregnant']] }); // not the exact text: not pregnant
+
+const SETUP9 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t9-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t9-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t9-fm3', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t9-fm4', '', '', 'ZUNMP', null, null, null, null),
+  ('t9-fm5', '', '', 'ZKAFU', 'reg-k', 'Kafue District Hospital', 'Lusaka', 'Kafue'),
+  ('t9-fm6', '', '', 'ZMISS', null, null, null, null);
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id) values ${R9.join(',\n  ')};
+insert into patients (id, surname, sex) values ${P9.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, issued, performer) values ${D9.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${L9.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${A9.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${F9.join(',\n  ')};`;
+
+// ---- Expected rows ----
+
+const CGH9 = ['Southern', 'Choma', 'Choma General Hospital'];
+const CCL9 = ['Southern', 'Choma', 'Choma Clinic'];
+const CHL9 = ['Lusaka', 'Lusaka', 'Chilenje Clinic'];
+const KDH9 = ['Lusaka', 'Kafue', 'Kafue District Hospital'];
+
+const cohortQuery = queries().find((q) => q.name === 'Earlier VL results of high-VL clients');
+const historyQuery = queries().find((q) => q.name === 'VL results history by client');
+
+// ---- T1: one row per client, results across visits 1 to 10 (oldest first) ----
+
+const T1_COLUMNS = ['Province', 'District', 'Facility', 'ARTNumber', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'];
+const pv = ([prov, dist, fac], art, visits) =>
+  Object.fromEntries(T1_COLUMNS.map((c, i) => [c, i < 4 ? [prov, dist, fac, art][i] : (visits[i - 4] ?? null)]));
+const wnd = (from, to) => ({ from, to });
+const win9 = wnd('2026-05-01', '2026-05-31');
+
+// Every client of the full window, in v1's order (province, district, facility, ART number; the port adds nothing else).
+// Expected-by-hand notes sit on the fixtures above. T1 selects LIMSRptResult 'Result' of each x row (line 107).
+const T1_ROWS = {
+  F103: pv(KDH9, 'F103', ['2400']),
+  F102: pv(CHL9, 'F102', ['145', '2300']),
+  F101: pv(CCL9, 'F101', ['140', '2100']),
+  BLANK: pv(CGH9, '', ['2700']),
+  1001: pv(CGH9, '1001', ['200', '450', '1500']),
+  4004: pv(CGH9, '4004', ['100', '1000']),
+  6006: pv(CGH9, '6006', ['90']),
+  7007: pv(CGH9, '7007', ['120', '2000']),
+  8008: pv(CGH9, '8008', ['800', '4000']),
+  AB55: pv(CGH9, 'AB55', ['<20 copies/mL', '2500']),
+  D101: pv(CGH9, 'D101', ['1100', '1200']),
+  E101: pv(CGH9, 'E101', ['150', '1200']),
+  E102: pv(CGH9, 'E102', ['1300']),
+  E103: pv(CGH9, 'E103', ['3500']),
+  E104: pv(CGH9, 'E104', ['170']),
+  G101: pv(CGH9, 'G101', ['155', '2600']),
+  H101: pv(CGH9, 'H101', ['2900']),
+  K101: pv(CGH9, 'K101', ['165', '2800']),
+  M101: pv(CGH9, 'M101', ['201', '202', '203', '204', '205', '206', '207', '208', '209', '210']),
+  N101: pv(CGH9, 'N101', ['175', '3300']),
+  S101: pv(CGH9, 'S101', ['2200']),
+  S102: pv(CGH9, 'S102', ['5,000', null, null, null, null, null, null, null, null, null]),
+  S103: pv(CGH9, 'S103', ['700']),
+  V101: pv(CGH9, 'V101', ['1300']),
+};
+// The clients of the full window, in v1's order. 2002 (no result in the window), 3003 (300 has three characters), E105 and E106 (their
+// high results are one second outside the window) have no row; 6006 is in through its HIVTM result.
+const T1_FULL = ['F103', 'F102', 'F101', 'BLANK', '1001', '4004', '6006', '7007', '8008', 'AB55', 'D101', 'E101', 'E102', 'E103', 'E104',
+  'G101', 'H101', 'K101', 'M101', 'N101', 'S101', 'S102', 'S103', 'V101'];
+// The pivot columns come from the full list in v1's sort order. Sorted by hand: Lusaka (Kafue, Lusaka), then Southern (Choma Clinic,
+// Choma General Hospital with ARTs '', 1001, 4004, 6006, 7007, 8008, AB55, D101, E101..E104, G101, H101, K101, M101, N101, S101..S103, V101).
+const t1Rows = (keys) => keys.map((k) => T1_ROWS[k]);
+
+// ---- T2: one row per client result (long format) ----
+
+const T2_COLUMNS = ['Province', 'District', 'Facility', 'ARTNumber', 'Rank', 'SuppressionStatus', 'ResultDate', 'Result'];
+const SUP = 'Suppressed';
+const UNS = 'UnSuppressed';
+const h9 = ([prov, dist, fac], art, rank, status, date, result) =>
+  Object.fromEntries(T2_COLUMNS.map((c, i) => [c, [prov, dist, fac, art, rank, status, date, result][i]]));
+// One client's rows: [rank, status, date, result] (x rows) at a facility.
+const cl = (fac, art, rows) => rows.map(([rank, status, date, result]) => h9(fac, art, rank, status, date, result));
+
+// Per client, the rows T2 gives for the window 2026-05-01..2026-05-31 and no area or pregnancy filter. The order inside a client
+// is the port's own (rank, then authorised time): v1 orders by province, district, facility, ART only.
+const T2_BLANK = cl(CGH9, '', [[1, UNS, 'May  9 2026  8:00AM', '2700']]);
+const T2_1001 = cl(CGH9, '1001', [[1, UNS, 'May 10 2026  8:00AM', '1500'], [2, SUP, 'Dec 15 2025  8:00AM', '450'], [3, SUP, 'Jun 10 2025  8:00AM', '200']]);
+const T2_3003 = cl(CGH9, '3003', [[1, SUP, 'May 12 2026  8:00AM', '300']]);
+const T2_4004 = cl(CGH9, '4004', [[1, UNS, 'May 20 2026  8:00AM', '1000'], [2, SUP, 'Mar  1 2026  8:00AM', '100']]);
+const T2_7007 = cl(CGH9, '7007', [[1, SUP, 'Mar  2 2026  8:00AM', '120'], [1, UNS, 'May  9 2026  8:00AM', '2000'], [2, SUP, 'Mar  1 2026  8:00AM', '110']]);
+const T2_8008 = cl(CGH9, '8008', [[1, UNS, 'May 15 2026  8:00AM', '4000'], [2, SUP, 'Apr 10 2026  8:00AM', '800']]);
+const T2_AB55 = cl(CGH9, 'AB55', [[1, UNS, 'May  8 2026  8:00AM', '2500'], [2, SUP, 'Feb  1 2026  8:00AM', '<20 copies/mL']]);
+const T2_D101 = [
+  ...cl(CGH9, 'D101', [[1, UNS, 'May 21 2026  8:00AM', '1200'], [1, UNS, 'May 21 2026  8:00AM', '1200'],
+    [2, UNS, 'May 20 2026  8:00AM', '1100'], [2, UNS, 'May 20 2026  8:00AM', '1100']]),
+];
+const T2_E101 = cl(CGH9, 'E101', [[1, UNS, 'May  3 2026  8:00AM', '1200'], [2, SUP, 'May  1 2025 12:30AM', '150']]);
+const T2_E102 = cl(CGH9, 'E102', [[1, UNS, 'May  3 2026  8:00AM', '1300'], [2, SUP, 'Apr 30 2025 11:30PM', '160']]);
+const T2_E103 = cl(CGH9, 'E103', [[1, UNS, 'May  1 2026 12:00AM', '3500']]);
+const T2_E104 = cl(CGH9, 'E104', [[1, SUP, 'Apr  1 2026  8:00AM', '170']]);
+const T2_G101 = cl(CGH9, 'G101', [[1, UNS, 'May  8 2026  8:00AM', '2600'], [2, SUP, 'Mar  7 2026  8:00AM', '155']]);
+const T2_H101 = cl(CGH9, 'H101', [[1, UNS, 'May 22 2026  8:00AM', '2900'], [2, SUP, 'May  2 2024 12:30AM', '190']]);
+const T2_K101 = [h9(CGH9, 'K101', 1, UNS, 'May 10 2026  8:00AM', '2800'), h9(CGH9, 'k101', 2, SUP, 'Mar  9 2026  8:00AM', '165')];
+const T2_M101 = cl(CGH9, 'M101', [[1, UNS, 'May  5 2026  8:00AM', '1111'], [2, SUP, 'Apr  5 2026  8:00AM', '211'], [3, SUP, 'Mar  5 2026  8:00AM', '210'],
+  [4, SUP, 'Feb  5 2026  8:00AM', '209'], [5, SUP, 'Jan  5 2026  8:00AM', '208'], [6, SUP, 'Dec  5 2025  8:00AM', '207'],
+  [7, SUP, 'Nov  5 2025  8:00AM', '206'], [8, SUP, 'Oct  5 2025  8:00AM', '205'], [9, SUP, 'Sep  5 2025  8:00AM', '204'],
+  [10, SUP, 'Aug  5 2025  8:00AM', '203'], [11, SUP, 'Jul  5 2025  8:00AM', '202'], [12, SUP, 'Jun  5 2025  8:00AM', '201']]);
+const T2_N101 = cl(CGH9, 'N101', [[1, UNS, 'May 19 2026  8:00AM', '3300'], [2, SUP, 'Mar  1 2026  8:00AM', '175']]);
+const T2_P101 = cl(CGH9, 'P101', [[1, SUP, 'May 12 2026  8:00AM', '600'], [2, SUP, 'Feb  1 2026  8:00AM', '500']]);
+const T2_P102 = cl(CGH9, 'P102', [[1, SUP, 'May 13 2026  8:00AM', '700'], [2, SUP, 'Jan  1 2026  8:00AM', '650']]);
+const T2_P103 = cl(CGH9, 'P103', [[1, SUP, 'May 14 2026  8:00AM', '800']]);
+const T2_P104 = cl(CGH9, 'P104', [[1, SUP, 'May 15 2026  8:00AM', '900']]);
+const T2_P105 = cl(CGH9, 'P105', [[1, SUP, 'May 16 2026  8:00AM', '950'], [2, SUP, 'Feb 10 2026  8:00AM', '500']]);
+const T2_P106 = cl(CGH9, 'P106', [[1, SUP, 'May 17 2026  8:00AM', '960']]);
+const T2_P107 = cl(CGH9, 'P107', [[1, SUP, 'May  2 2026  8:00AM', '980'], [1, SUP, 'May  2 2026  8:00AM', '980']]);
+const T2_P108 = cl(CGH9, 'P108', [[1, SUP, 'May 18 2026  8:00AM', '995']]);
+const T2_P109 = cl(CGH9, 'P109', [[1, SUP, 'May 19 2026  8:00AM', '996']]);
+const T2_S101 = cl(CGH9, 'S101', [[1, UNS, 'May  5 2026  8:00AM', '2200']]);
+const T2_S102 = cl(CGH9, 'S102', [[1, UNS, 'May  6 2026  8:00AM', '5,000']]);
+const T2_S103 = cl(CGH9, 'S103', [[1, UNS, 'May 14 2026  8:00AM', '1800'], [2, SUP, 'Apr 20 2026  8:00AM', '700']]);
+const T2_V101 = cl(CGH9, 'V101', [[1, UNS, 'May 23 2026  8:00AM', '1300']]);
+const T2_F101 = cl(CCL9, 'F101', [[1, UNS, 'May  4 2026  8:00AM', '2100'], [2, SUP, 'Mar  5 2026  8:00AM', '140']]);
+const T2_F102 = cl(CHL9, 'F102', [[1, UNS, 'May  5 2026  8:00AM', '2300'], [2, SUP, 'Mar  6 2026  8:00AM', '145']]);
+const T2_P106L = cl(CHL9, 'P106', [[1, SUP, 'May 17 2026  8:00AM', '990']]);
+const T2_F103 = cl(KDH9, 'F103', [[1, UNS, 'May  6 2026  8:00AM', '2400']]);
+
+const T2_LUSAKA = [...T2_F103, ...T2_F102, ...T2_P106L];
+const T2_CHOMA_CLINIC = T2_F101;
+const T2_CGH = [...T2_BLANK, ...T2_1001, ...T2_3003, ...T2_4004, ...T2_7007, ...T2_8008, ...T2_AB55, ...T2_D101, ...T2_E101, ...T2_E102,
+  ...T2_E103, ...T2_E104, ...T2_G101, ...T2_H101, ...T2_K101, ...T2_M101, ...T2_N101, ...T2_P101, ...T2_P102, ...T2_P103, ...T2_P104,
+  ...T2_P105, ...T2_P106, ...T2_P107, ...T2_P108, ...T2_P109, ...T2_S101, ...T2_S102, ...T2_S103, ...T2_V101];
+const T2_ALL = [...T2_LUSAKA, ...T2_CHOMA_CLINIC, ...T2_CGH];
+const T2_SOUTHERN = [...T2_CHOMA_CLINIC, ...T2_CGH];
+// Pregnant clients (the _Prega copy): CGH P101, P102, P103, P107, P108 and Chilenje Clinic P106. P104 answered No, P105's form is in a
+// lab authorised before the window, P109's text is not 'Pregnant Mother', and CGH's P106 is pregnant only at Chilenje Clinic.
+const T2_PREGNANT_CGH = [...T2_P101, ...T2_P102, ...T2_P103, ...T2_P107, ...T2_P108];
+const T2_PREGNANT = [...T2_P106L, ...T2_PREGNANT_CGH];
+
+// The pivot columns are named '1' to '10'. A JS object lists integer-like keys first, whatever their order in the row, so
+// orderedSuite cannot see the column order of this query; 't1-column-order' below reads it from the row's own JSON text.
+const t1Suite = (name, params, keys, setup = '') => {
+  const s = orderedSuite(name, cohortQuery?.sql ?? 'select 1', params, T1_COLUMNS, t1Rows(keys), setup);
+  const check = s.check;
+  s.check = (got) => check(got).filter((m) => !m.startsWith('columns not in v1 order') && !m.startsWith('expected 14 columns'));
+  s.name = name;
+  return s;
+};
+
+const t2Params = (province, pregnant, w = win9) => ({ ...w, province, pregnant_only: pregnant });
+const t2Suite = (name, params, rows, setup = '') => orderedSuite(name, historyQuery?.sql ?? 'select 1', params, T2_COLUMNS, rows, setup);
+const BANNED9 = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
+
+const suites9 = [
+  // T1 cohort + history: the first suite carries every t9 fixture row (the runner puts all setups in one transaction).
+  t1Suite('t1-full-window', win9, T1_FULL, SETUP9),
+  // The column order of v1 (Province, District, Facility, ARTNumber, then 1 to 10), read from the first row's JSON text.
+  {
+    name: 't1-column-order',
+    setup: '',
+    sql: 'select \'t1-column-order\' || chr(9) || json_build_object(\'raw\', row_to_json(q)::text)::text from (' + bind(cohortQuery?.sql ?? 'select 1', { from: '2026-05-01', to: '2026-05-31' }) + ') q limit 1;',
+    count: 1,
+    check(got) {
+      const raw = got[0]?.raw ?? '';
+      const keys = [...raw.matchAll(/(?:^\{|,)"([^"]+)":/g)].map((m) => m[1]);
+      return JSON.stringify(keys) === JSON.stringify(T1_COLUMNS) ? [] : ['columns: ' + keys.join(', ')];
+    },
+  },
+  // A window of the single day 05-31: the cohort result is E104's 3600 at exactly 05-31T00:00:00 (the end instant is in the window
+  // for the cohort, line 92). That result is not in x (line 56 needs authorised < to), so the row shows E104's 04-01 result only.
+  t1Suite('t1-last-day', wnd('2026-05-31', '2026-05-31'), ['E104']),
+  // A window of the single day 05-01: the cohort result is E103's 3500 at exactly 05-01T00:00:00, but it is not in x (authorised < to), so E103
+  // has no visit and no row. Nothing else is in the window.
+  t1Suite('t1-first-day', wnd('2026-05-01', '2026-05-01'), []),
+  // The window 05-04..05-10: cohort clients with a result in it. x needs authorised < 05-10 00:00:00.
+  t1Suite('t1-narrow-window', wnd('2026-05-04', '2026-05-10'), ['F103', 'F102', 'F101', 'BLANK', '7007', 'AB55', 'G101', 'M101', 'S101', 'S102']),
+  // The history edge (line 55, local dates): E101's result of 2025-05-01 00:30 +02:00 is in (365 days), E102's of 2025-04-30 23:30 +02:00 is out
+  // (366 days): both appear in the full-window rows above, E101 with two visits and E102 with one.
+  {
+    name: 't1-shape',
+    count: 5,
+    check() {
+      const bad = [];
+      if (!cohortQuery) return ['query "Earlier VL results of high-VL clients" is missing'];
+      const ids = cohortQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: ${ids}`);
+      if (!cohortQuery.params.every((p) => p.required && p.type === 'text')) bad.push('from and to are required text parameters (ruling 3)');
+      if (BANNED9.test(cohortQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+  // T2 with no filter: every client with a valid HIVVL, HIVVC or HIVVD result in the window, whole 730-day history, descending ranks.
+  t2Suite('t2-all-provinces', t2Params('', ''), T2_ALL),
+  t2Suite('t2-pregnant-blank-means-all', t2Params('', 'no'), T2_ALL),
+  // The Lusaka constant (T2 line 124) as a parameter: compared ignoring case and trailing spaces.
+  t2Suite('t2-province-lusaka', t2Params('Lusaka', ''), T2_LUSAKA),
+  t2Suite('t2-province-fold', t2Params('southern ', ''), T2_SOUTHERN),
+  t2Suite('t2-province-other', t2Params('Western', ''), []),
+  // The _Prega copy: pregnant clients only, any province.
+  t2Suite('t2-pregnant', t2Params('', 'yes'), T2_PREGNANT),
+  t2Suite('t2-pregnant-fold', t2Params('', 'YES '), T2_PREGNANT),
+  t2Suite('t2-pregnant-lusaka', t2Params('Lusaka', 'yes'), T2_P106L),
+  t2Suite('t2-pregnant-southern', t2Params('Southern', 'yes'), T2_PREGNANT_CGH),
+  // Window 05-04..05-10 and Lusaka: F102 (05-05) and F103 (05-06) only; P106 is on 05-17.
+  t2Suite('t2-narrow-window', t2Params('Lusaka', '', wnd('2026-05-04', '2026-05-10')), [...T2_F103, ...T2_F102]),
+  // A one-day window holds only results at exactly 00:00:00: nothing here (v1 end-date quirk).
+  t2Suite('t2-one-day-window', t2Params('', '', wnd('2026-05-06', '2026-05-06')), []),
+  {
+    name: 't2-shape',
+    count: 8,
+    check() {
+      const bad = [];
+      if (!historyQuery) return ['query "VL results history by client" is missing'];
+      const ids = historyQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to', 'province', 'pregnant_only'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(historyQuery.params.map((p) => [p.id, p]));
+      if (!byId.from?.required || !byId.to?.required) bad.push('from and to are required (ruling 3)');
+      if (byId.province?.type !== 'select' || byId.province?.required) bad.push('province is an optional select');
+      if (byId.pregnant_only?.type !== 'select' || byId.pregnant_only?.required) bad.push('pregnant_only is an optional select');
+      if (BANNED9.test(historyQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (BANNED9.test((byId.pregnant_only?.optionsSql ?? '').replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word in pregnant_only optionsSql');
+      return bad;
+    },
+  },
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }];
