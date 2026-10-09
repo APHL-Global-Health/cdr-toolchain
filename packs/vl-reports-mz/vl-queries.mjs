@@ -5,9 +5,9 @@
 // them as input so a test copy can swap in another country's codes without editing the SQL.
 //
 // Column names and order follow v1. A v1 column with no CE source is NULL under its v1 name.
-// The columns v1 computed with ViralLoadResultMerge, ViralLoadFinalResult and GetReasonForTest
-// are left out, because those functions are not in the views script. The raw reported value and
-// coded value of each input observation are returned in their place.
+// The columns v1 computed with GetReasonForTest, ViralLoadResultMerge and ViralLoadFinalResult
+// are ported as SQL expressions below. The merge reads the coded-result descriptions from the
+// pack's value set urn:openldr:mz:vl-coded-results.
 
 export const MOZ_CODES = {
   infoPanel: 'VIRAL',
@@ -26,6 +26,9 @@ const POC_VALUE_SET = 'urn:openldr:mz:poc-sites';
 const LINK_VALUE_SET = 'urn:openldr:mz:link-sites';
 const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 
+export const VL_CODED_SYSTEM = 'urn:openldr:mz:cs:vl-coded-results';
+export const VL_CODED_VALUE_SET = 'urn:openldr:mz:vl-coded-results';
+
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 // v1 LIMSRptResult: CE text value, else numeric value as text, else coded value.
@@ -33,6 +36,85 @@ const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 // the limit ("< 20"). A null numeric value makes the whole middle term null.
 const rpt = (a) =>
   `coalesce(${a}.text_value, coalesce(${a}.numeric_comparator || ' ', '') || ${a}.numeric_value::text, ${a}.coded_value)`;
+
+// ---- v1's VL functions as inline SQL. A custom query is one SELECT and cannot create SQL
+// functions, so each function is an expression. Source: the Mozambique team's
+// openldr-functions-script.sql (2026-10-09). v1 compares with SQL Server's default collation:
+// case-insensitive, and trailing spaces do not count. So the port compares lower(rtrim(x)).
+
+// SQL Server's ISNUMERIC: a sign, digits with thousands commas, a decimal point, an exponent, a
+// currency sign, surrounding spaces. It also accepts a lone "+", "$" or ".". This does not; none is
+// a plausible viral load result. Tabs around digits are accepted (\s matches them); only a lone tab
+// is rejected.
+const ISNUMERIC_RE = String.raw`^\s*[-+]?[$£€¥]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?\s*$`;
+
+export const isNumericSql = (x) => `coalesce(${x} ~ ${lit(ISNUMERIC_RE)}, false)`;
+
+// SQL Server's "x = ''" is also true for spaces only. NULL counts as blank here too.
+export const blankSql = (x) => `coalesce(rtrim(${x}), '') = ''`;
+const foldSql = (x) => `lower(rtrim(${x}))`;
+const inListSql = (x, words) => `${foldSql(x)} in (${words.map((w) => lit(w.toLowerCase())).join(', ')})`;
+
+// GetReasonForTest: v1's English text for Mozambique's reason-for-test answers. Mozambique
+// content, so it lives in the pack, not in CE.
+const REASON_FOR_TEST = [
+  ['Nao Prenchido', 'Not Specified'],
+  ['Suspect treatment failure', 'Suspected treatment failure'],
+  ['Repiticas apos AMA', 'Repeat after breastfeeding'],
+  ['Rotina', 'Routine'],
+];
+
+export function reasonForTestSql(x) {
+  const whens = REASON_FOR_TEST.map(([from, to]) => `when ${foldSql(x)} = ${lit(from.toLowerCase())} then ${lit(to)}`).join(' ');
+  return `case when ${blankSql(x)} then 'Reason Not Specified' ${whens} else ${x} end`;
+}
+
+// The reported value without rpt()'s coded fallback: text value, else comparator and numeric
+// value. ViralLoadResultMerge needs it blank when only a code was reported. With rpt() it would
+// never be blank, and the merge would return the code where v1 returns its description.
+export const reportedSql = (a) =>
+  `coalesce(${a}.text_value, coalesce(${a}.numeric_comparator || ' ', '') || ${a}.numeric_value::text)`;
+
+// The coded-result descriptions, read once per run. terminology_codes holds every value set and
+// is indexed on value_set_id only, so a lookup per row would scan it each time.
+export const vlCodedCte = `vl_coded as materialized (
+  select upper(code) as code, display from terminology_codes where value_set_url = ${lit(VL_CODED_VALUE_SET)}
+)`;
+
+// ViralLoadResultMerge(reported, coded): the reported value. When it is blank, the description of
+// the coded value. v1 reads the descriptions from OpenLDRDict.dbo.LIMSCodedValues; the pack ships
+// them as the coded-results value set. A code not in the set gives NULL, as in v1: its
+// "SELECT @OutString = ... WHERE Code = @code" matches no row and leaves @OutString NULL.
+export const resultMergeSql = (reported, coded) =>
+  `case when ${blankSql(reported)} then (select vc.display from vl_coded vc where vc.code = upper(rtrim(${coded})) limit 1) else ${reported} end`;
+
+// ViralLoadFinalResult's error list. v1 lists Indeterminado twice. Its rule 1 counts matches and
+// works; rules 2 and 3 use "(SELECT 1 ...) = 1", which raises SQL Server error 512 on two rows.
+// The port cannot raise an error per row, so it treats Indeterminado as the list means: NULL.
+const VL_ERROR_WORDS = ['POS', 'Positive', 'Invalid', 'INVAL', 'Valid', 'Indeterminado', 'NEGAT', 'Reactive', 'Negative'];
+const NOT_DETECTED = ['Target not detected', 'NOT DETECTED'];
+const hasRangeSql = (x) => `(${x} like '%<%' or ${x} like '%>%')`;
+// v1 rule 2: an error word gives NULL, a range keeps the value, anything else is INDETECTAVEL.
+// There is no numeric branch, so a plain number alone in HIVVD becomes INDETECTAVEL. v1 does this.
+const resultOnlySql = (x) =>
+  `case when ${inListSql(x, VL_ERROR_WORDS)} then null when ${hasRangeSql(x)} then ${x} else 'INDETECTAVEL' end`;
+
+// ViralLoadFinalResult(result, capctm). The rules, in v1's order:
+//   1. capctm set, result NULL: error word NULL; range or number keeps capctm; else INDETECTAVEL.
+//   2. capctm NULL, result set: resultOnlySql(result).
+//   3. otherwise: the two joined are numeric, capctm (v1 tests the joined text, '20'||'1000');
+//      either is "not detected", INDETECTAVEL; equal ignoring case, rule 2 on result; else NULL.
+// A numeric value comes back as CE stores it (61.736, where v1 shows 62).
+export function finalResultSql(result, capctm) {
+  return `case
+    when ${capctm} is not null and ${result} is null then
+      case when ${inListSql(capctm, VL_ERROR_WORDS)} then null when ${hasRangeSql(capctm)} then ${capctm} when ${isNumericSql(capctm)} then ${capctm} else 'INDETECTAVEL' end
+    when ${capctm} is null and ${result} is not null then ${resultOnlySql(result)}
+    when ${isNumericSql(`coalesce(${result}, '') || coalesce(${capctm}, '')`)} then ${capctm}
+    when ${inListSql(capctm, NOT_DETECTED)} or ${inListSql(result, NOT_DETECTED)} then 'INDETECTAVEL'
+    when ${foldSql(result)} = ${foldSql(capctm)} then ${resultOnlySql(result)}
+  end`;
+}
 
 // Request attributes (urn:openldr:cs:request-attribute), one row per request and code.
 const ATTRS = [
@@ -156,9 +238,13 @@ function facilityBlock(testingProvinceAlias) {
 
 export function vlResultSql(codes) {
   const r = codes.result;
-  const raw = (alias) => `  ${rpt(alias.toLowerCase())} as "${alias}_LIMSRptResult",
-  ${alias.toLowerCase()}.coded_value as "${alias}_LIMSCodedValue",`;
-  return `with ${attrCte}
+  const merged = (alias) => resultMergeSql(reportedSql(alias), `${alias}.coded_value`);
+  // Two lateral subqueries name each slot's merged value once, so the SQL stays readable. Postgres
+  // flattens them and evaluates each reference on its own. They also name FinalViralLoadResult's
+  // second input: the first of HIVVR, HIVVC, HIVVF with a reported value, else HIVVR. v1 tests
+  // LEN(LIMSRptResult) > 0, and LEN ignores trailing spaces, as blankSql does.
+  return `with ${attrCte},
+${vlCodedCte}
 select
   lr.request_id as "RequestID",
   lr.obr_set_id as "OBRSetID",
@@ -167,11 +253,12 @@ select
   dr.issued as "HIVVL_AuthorisedDateTime",
   lr.rejection_code as "HIVVL_LIMSRejectionCode",
   lr.rejection_reason as "HIVVL_LIMSRejectionDesc",
-${raw('HIVVD')}
-${raw('HIVVR')}
-${raw('HIVVC')}
-${raw('HIVVF')}
+  vlm.vd as "HIVVL_ViralLoadResult",
+  vlm.vr as "HIVVL_ViralLoadCAPCTM",
+  vlm.vc as "HIVVL_Low_value",
+  vlm.vf as "HIVVL_Viral",
   ${rpt('hivrl')} as "HIVVL_VRLogValue",
+  ${finalResultSql('vlm.vd', 'vlc.capctm')} as "FinalViralLoadResult",
   lr.age_years as "AgeInYears",
   lr.age_days as "AgeInDays",
   p.sex as "HL7SexCode",
@@ -191,6 +278,18 @@ ${obsJoin('hivvr', r.HIVVR)}
 ${obsJoin('hivvc', r.HIVVC)}
 ${obsJoin('hivvf', r.HIVVF)}
 ${obsJoin('hivrl', r.HIVRL)}
+cross join lateral (select
+  ${merged('hivvd')} as vd,
+  ${merged('hivvr')} as vr,
+  ${merged('hivvc')} as vc,
+  ${merged('hivvf')} as vf
+) vlm
+cross join lateral (select case
+  when not ${blankSql(reportedSql('hivvr'))} then vlm.vr
+  when not ${blankSql(reportedSql('hivvc'))} then vlm.vc
+  when not ${blankSql(reportedSql('hivvf'))} then vlm.vf
+  else vlm.vr end as capctm
+) vlc
 ${where(codes.resultPanel)}`;
 }
 
@@ -232,7 +331,7 @@ ${plain('virr1', 'LastViralLoadResult')}
 ${plain('labno', 'RequestingClinician')}
 ${plain('conse', 'ConsentimentoParaContacto')}
 ${plain('lablo', 'LocalDeColheita')}
-  ${rpt('motivo')} as "ESCOL_LIMSRptResult",
+  ${reasonForTestSql(rpt('motivo'))} as "ReasonForTest",
 ${facilityBlock('TestingProvinceName')}
 ${sharedTail()}
 from lab_requests lr

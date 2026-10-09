@@ -11,12 +11,14 @@ In this order:
 
 1. Code system and value set for the POC sites: `urn:openldr:mz:poc-sites`.
 2. Code system and value set for the link sites: `urn:openldr:mz:link-sites`.
-3. The lab register `urn:openldr:mz:laboratories` (laboratories and POC sites), code `MZLABS`.
-4. The health facility register `urn:openldr:mz:facilities`, code `MZFAC`. It has 2,830
+3. Code system and value set for the viral load result codes: `urn:openldr:mz:vl-coded-results`.
+   26 codes from the v1 dictionary list `LIMSCodedValues`, each with one description.
+4. The lab register `urn:openldr:mz:laboratories` (laboratories and POC sites), code `MZLABS`.
+5. The health facility register `urn:openldr:mz:facilities`, code `MZFAC`. It has 2,830
    facilities from the v1 dictionary view `viewFacilities`, keyed on the DISA facility code.
-5. Link-matching against the facility register.
-6. Link-matching against the lab register.
-7. The queries "VL info", "VL results" and "Mozambique facilities (v1 layout)".
+6. Link-matching against the facility register.
+7. Link-matching against the lab register.
+8. The queries "VL info", "VL results" and "Mozambique facilities (v1 layout)".
 
 Link-matching links each observed facility code to the register row with the same code. It does
 not look at whether the code came in as a testing lab or a requesting facility. 45 codes are in
@@ -24,7 +26,7 @@ both registers, and each pair names the same place. The facility register links 
 45 codes link to the facility rows, which carry province and district. Their testing labs show
 the facility register's name.
 
-Installing again is safe. It replaces the terminology and the two queries, and updates the
+Installing again is safe. It replaces the terminology and the three queries, and updates the
 register rows. A register you already loaded under the same URL is reused, not duplicated. A
 query you edited under one of these names is overwritten.
 
@@ -55,9 +57,13 @@ A report run stops at 1000 rows. Narrow the dates for a big lab.
 - The columns keep v1's names and order.
 - `HL7PriorityCode` is the FHIR priority (`routine`), not `R`.
 - `HL7ResultStatusCode` is the FHIR report status (`final`, `registered`), not `F`.
-- A reported value is the text value, else the numeric value, else the coded value. The full
-  numeric value is kept, so `61.736...` where v1 shows `62`. A value outside the reporting range
-  shows its comparator, as in `< 20`.
+- A reported value is the text value, else the numeric value, else the coded value. The four
+  `HIVVL_*` columns are the exception: they show the code's description (see "Columns v1 computed
+  with functions"). The full numeric value is kept, so `61.736...` where v1 shows `62`. A value
+  outside the reporting range shows its comparator, as in `< 20`.
+- `FinalViralLoadResult` keeps CE's full numeric value too.
+- v1 stops with an error when a request's only result is the code `I` (`Indeterminado`). The pack
+  gives an empty `FinalViralLoadResult` for that request.
 - A true or false fact prints `true` or `false`, not `1` or `0`.
 - `DateTimeStamp` is the time CE wrote the row, not v1's time.
 
@@ -75,22 +81,36 @@ A report run stops at 1000 rows. Narrow the dates for a big lab.
   specimen-site columns, `HL7EthnicGroupCode`, `HL7PatientClassCode`, `ReferringRequestID`,
   `WorkUnits`, `TargetTimeDays`, `TargetTimeMins`.
 
-## Columns not provided yet
+## Columns v1 computed with functions
 
-v1 computed these with database functions that are not available, so the raw inputs are
-returned instead:
+v1 worked out six columns with SQL functions. The pack does the same work in each query.
 
-| v1 column | Returned instead |
-|---|---|
-| `HIVVL_ViralLoadResult` | `HIVVD_LIMSRptResult`, `HIVVD_LIMSCodedValue` |
-| `HIVVL_ViralLoadCAPCTM` | `HIVVR_LIMSRptResult`, `HIVVR_LIMSCodedValue` |
-| `HIVVL_Low_value` | `HIVVC_LIMSRptResult`, `HIVVC_LIMSCodedValue` |
-| `HIVVL_Viral` | `HIVVF_LIMSRptResult`, `HIVVF_LIMSCodedValue` |
-| `FinalViralLoadResult` | the four pairs above |
-| `ReasonForTest` (info) | `ESCOL_LIMSRptResult` |
+- `ReasonForTest` (VL info): the reason for the test, in English. `Rotina` reads `Routine`,
+  `Nao Prenchido` reads `Not Specified`, and an empty reason reads `Reason Not Specified`.
+- `HIVVL_ViralLoadResult`, `HIVVL_ViralLoadCAPCTM`, `HIVVL_Low_value`, `HIVVL_Viral` (VL results):
+  the reported value. When only a code was reported, the code's description, such as
+  `Target not detected` for `LDL`. A code that is not in the pack's list gives an empty value, as
+  in v1.
+- `FinalViralLoadResult` (VL results): one result per request, by v1's rules. It is a number, a
+  range such as `< 20`, `INDETECTAVEL`, or empty.
+
+Where v1's rules look odd, the pack still follows them:
+
+- A plain number in `HIVVL_ViralLoadResult`, with the other three empty, gives `INDETECTAVEL`.
+- When both inputs are set, v1 tests whether the two joined together are a number.
+
+Some codes have more than one description in the v1 dictionary. The pack keeps the most frequent
+one: `LDL` reads `Target not detected`, `NEG` reads `Negative`, `NDET` reads `NOT DETECTED`,
+`POS` reads `POS`, and `INVAL` reads `INVAL`. v1 picks one with no fixed order.
 
 ## Known limits
 
 - A request with one observation code twice returns two rows, as v1 did.
 - The date filter compares text. A request registered near midnight at a UTC offset can fall on
   the other side of `from` or `to`.
+- When both inputs of `FinalViralLoadResult` are decimals, the column is empty. v1 joins two
+  whole numbers (`62` and `1501`) and finds a number. CE keeps the full values, so the join is
+  `61.736` and `1500.5`, which is not a number. The pack shows nothing where v1 shows a value.
+  Whole numbers are not affected.
+- v1 counts some odd text as a number, such as a lone `+`, `$` or `.`. The pack does not. No real
+  viral load result looks like that.

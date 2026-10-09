@@ -17,7 +17,7 @@ the xlsx had put on the dev CE were retired on 2026-10-07 (`register_state` drop
 **Still open:** why are the provinces rows in the facility view at all? Are they used as a fallback
 facility when a request names only a province?
 
-## 2. The three missing functions (answered)
+## 2. The three v1 functions (answered)
 
 The v1 views call `dbo.ViralLoadResultMerge`, `dbo.ViralLoadFinalResult` and `dbo.GetReasonForTest`.
 
@@ -32,9 +32,26 @@ more than once with different descriptions:
 - `NEG`: "Negative" three times, "NOT DETECTED" once
 - `POS`: "Positive" once, "POS" twice
 - `INVAL`: "Invalid" once, "INVAL" once
+- `NDET`: "NOT DETECTED" twice, "Not Detected" once
 
 The function picks one with no ordering, so SQL Server decides which. Ask which description v1
 actually shows for `LDL` and `NEG`. The sample data in question 4 would also show it.
+
+Until the team answers, the pack keeps the most frequent description, and on a tie the first in
+`(LIMSPanelCode, Description)` order.
+
+**Still open (found porting the functions, 2026-10-09):**
+
+- `ViralLoadFinalResult` turns a plain number in HIVVD into `INDETECTAVEL` when HIVVR, HIVVC and
+  HIVVF are empty. Its rule for that case has no numeric branch. Is that intended? The pack does
+  the same as v1.
+- The function's error list has `Indeterminado` twice. For a request whose only result is the code
+  `I` (`Indeterminado`), SQL Server raises error 512 and the whole `viewVL_Result` query fails. Has
+  the team seen that error? The pack returns an empty `FinalViralLoadResult` there.
+- A coded result whose code is not in `LIMSCodedValues` comes out empty in the four
+  `HIVVL_*` columns. Is that what the team sees in v1?
+- What rule does v1 use to round a viral load result for display (for example `61.736` shown as
+  `62`)? The port needs it to match `FinalViralLoadResult` when both inputs are decimals.
 
 ## 3. Facility type letters and HFStatus (partly answered)
 
