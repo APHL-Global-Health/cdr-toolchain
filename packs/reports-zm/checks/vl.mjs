@@ -120,6 +120,15 @@ lab('T2-DUPOLD', [
 ], { tested_date: '2026-04-20T10:00:00Z', tat: 5, collected_date: '2026-04-15T07:00:00Z',
   registered_date: '2026-04-16T08:00:00Z', run_date: '2026-04-17T09:00:00Z', received_date: '2026-04-15T12:00:00Z' });
 
+// A date-only tested date sorts as midnight of its date (v1 datetime), not as NULL: the 05-08 row wins over a
+// 05-09 date-only row. The date-only row's result (3000) would show suppressed 0 if it won.
+lab('T2-DUPDATEONLY', [
+  { issued: '2026-05-09', results: [{ obs: 'HIVVL', num: 3000 }] },
+  { issued: '2026-05-08T10:00:00Z', results: [{ obs: 'HIVVL', num: 540 }] },
+], { tested_date: '2026-05-08T10:00:00Z', tat: 7 });
+// Panel and observation compare like SQL Server: ignoring case and trailing spaces (v1 lines 120-121).
+lab('T2-CODECASE', [{ panel: 'hivvl ', results: [{ obs: 'hivvc ', num: 540 }] }], {});
+
 // The valid-result filter (v1 lines 123-133): a row passes only when the result is in the first list or is a
 // number. DET, PLTT and '<883 copies/mL' sit in the suppressed list (line 87) but not in this list.
 lab('T2-NOTVALID', [{ results: [

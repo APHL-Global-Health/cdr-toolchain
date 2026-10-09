@@ -111,7 +111,7 @@ const NEG = ['LDL', 'NDET', 'Negative*', 'Not Detected', 'Not Detected DBS', 'Ne
 POS.forEach((t, i) => lab(`T3-POS-${i}`, [{ results: res(t) }], { ...ZERO, positive: 1 }));
 NEG.forEach((t, i) => lab(`T3-NEG-${i}`, [{ results: res(t) }], { ...ZERO, negative: 1 }));
 lab('T3-INV-1', [{ results: res('Invalid') }], { ...ZERO, invalid: 1 });
-lab('T3-INV-2', [{ results: res('VALID') }], { ...ZERO, invalid: 1 });          // v1 line 58 says VALID
+lab('T3-INV-2', [{ results: res('VALID') }], { ...ZERO, invalid: 1 });          // v1 line 57 says VALID
 lab('T3-INV-INVAL', [{ results: res('INVAL') }], { ...ZERO });                  // not on the list: kept as v1
 lab('T3-ERR', [{ results: res('Error') }], { ...ZERO, error: 1 });
 lab('T3-IND-1', [{ results: res('Indeterminate') }], { ...ZERO, indeterminate: 1 });
@@ -147,6 +147,13 @@ lab('T3-DUPLOCAL', [
   { issued: '2026-05-12T09:00:00Z', results: res('Negative') },
   { issued: '2026-05-12T10:00:00+02:00', results: res('Positive') },
 ], { ...ZERO, negative: 1, tested_date: '2026-05-12T09:00:00Z', tat: 11 });
+
+// A date-only tested date sorts as midnight of its date (v1 datetime), not as NULL: the 05-08 row wins over a
+// 05-09 date-only row. The date-only row's result (Positive) would show positive 1 if it won.
+lab('T3-DUPDATEONLY', [
+  { issued: '2026-05-09', results: res('Positive') },
+  { issued: '2026-05-08T10:00:00Z', results: res('Negative') },
+], { tested_date: '2026-05-08T10:00:00Z', tat: 7 });
 
 // The window edges (tested date 2026-05-01 to 2026-05-31). TAT counts date boundaries from 2026-04-28.
 lab('T3-EDGE-IN1', [{ effective: '2026-04-28T10:00:00Z', issued: '2026-05-01T00:00:00Z' }],

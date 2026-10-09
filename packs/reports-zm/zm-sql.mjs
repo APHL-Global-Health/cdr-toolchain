@@ -177,12 +177,95 @@ const YES_WORDS = ['Yes', 'Y', 'Yest'];
 // the full pattern gives NULL and never raises.
 const FULL_STAMP = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}'";
 const DATE_START = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}'";
-// The LOCAL calendar date of a stamp, taken from its own text (v1 datediff(dd) counts local dates).
-const localDate = (x) => `(case when ${x} ~ ${DATE_START} then left(${x}, 10)::date end)`;
-// The local wall time of a stamp (offset dropped), for ordering as v1 does.
-const localTs = (x) => `substring(${x} from '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)')::timestamp`;
-// A UTC timestamp, for hour differences (the offsets are fixed whole hours).
-const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at time zone 'UTC' end)`;
+/** SQL for the LOCAL calendar date of a stamp, from its own text (v1 datediff(dd) counts local dates). NULL if no date. */
+export const localDate = (x) => `(case when ${x} ~ ${DATE_START} then left(${x}, 10)::date end)`;
+/** SQL for the local wall time of a stamp (offset dropped), for ordering as v1 does. A date-only stamp is midnight; a partial one is NULL. */
+export const localTs = (x) => `coalesce(substring(${x} from '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)')::timestamp, ${localDate(x)}::timestamp)`;
+/** SQL for a UTC timestamp of a full stamp (NULL otherwise), for hour differences; the offsets are fixed whole hours. */
+export const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at time zone 'UTC' end)`;
+
+// ---- Parts shared by the hivvl and eid copy tables ----
+// Both rebuild a v1 table that has the same shape: one row per result, the earliest tested date per
+// lab id, the same request facts. The builders below call these; each helper returns SQL text.
+
+// The `from`/`to` window of a builder: `prefilter` goes in the source CTE (it keeps every row of the
+// lab ids that have a report issued in the window, so the dedupe sees them all) and `finalRange` goes
+// after the dedupe. Both are '' without a window. Giving only one of the two throws.
+export function copyWindow(who, from, to) {
+  if ((from === undefined) !== (to === undefined)) throw new Error(`${who}: give both from and to, or neither`);
+  if (from === undefined) return { prefilter: '', finalRange: '' };
+  return {
+    prefilter: `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`,
+    finalRange: `and ${inRange('r.tested_date', from, to)}`,
+  };
+}
+
+// The source rows: a request with a result and a report. `columns` are the builder's own select items
+// (no trailing comma); `where` is its filter. The mapped requesting facility is required (v1
+// inner-joins its dictionary).
+export const reportSourceSql = ({ columns, where, prefilter }) => `select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
+      fmr.region as province, fmr.district as district, fmr.name as facility, p.sex,
+      dr.issued as tested_date, lr.analysis_at as run_date, s.received_time as received_date,
+      lr.authored_at as registered_date, dr.effective as collected_date,
+      dr.performer as testing_code, null::text as receiving_code,
+      ${columns}
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr')}
+    join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join specimens s on s.id = dr.specimen_id
+    left join patients p on p.id = lr.patient_id
+    where ${where}
+      ${prefilter}`;
+
+// The dedupe order (sp_remove_dupsHIVVLEID): earliest tested date per lab id, NULL first as SQL Server sorts.
+// Ties go to the request, report and result row ids; v1 keeps either one. `seq = 1` is the kept row.
+export const rankedSql = (srcName) => `select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
+    from ${srcName} s`;
+
+// v1's gender case of the copy tables: F, M, I and U only; everything else is NULL.
+export const genderFmiuSql = (sexExpr) => `case upper(rtrim(${sexExpr})) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end`;
+
+// The text value of one request attribute (spec section 3) of the request row `rowIdExpr`; NULL when absent.
+export const requestAttrSql = (rowIdExpr, code) => `(select max(a.value_text) from lab_request_attributes a where a.lab_request_id = ${rowIdExpr} and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = ${sqlLit(code)})`;
+
+// TestedAt: a 3-character ZU code other than ZUE and ZUA becomes ZUL. SQL Server LIKE ignores trailing
+// blanks in the matched text, so 'ZUB ' also becomes ZUL (the port trims first). `baseExpr` is the testing
+// code, or the receiving code when the testing code is blank (see rowFactsSql).
+export const testedAtSql = (baseExpr, testingExpr) => `case when rtrim(${baseExpr}) ilike 'ZU_' and ${foldSql(testingExpr)} not in ('zue', 'zua') then 'ZUL' else ${baseExpr} end`;
+
+// Referral: 1 when a receiving code differs from the testing code, else 0. NULL while the receiving code is
+// not carried (ruling 7); it is never coalesced to 0.
+export const referralSql = (receivingExpr, testingExpr) => `case
+      when ${receivingExpr} is null then null::int
+      when length(rtrim(${receivingExpr})) > 0 and ${foldSql(receivingExpr)} <> ${foldSql(testingExpr)} then 1
+      else 0
+    end`;
+
+// Disalink: a pre-registration facility code, or a referring request id that starts with a known
+// 5-character facility code that is not a number. `digitPrefix` adds hivvl's third term: a referring id
+// whose first 3 characters are numeric (HIVVL line 82; EID line 41 has no such term).
+export const disalinkSql = (preregExpr, referringExpr, { digitPrefix = false } = {}) => `case
+      when length(rtrim(${preregExpr})) > 0 then 1
+      when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql(`left(${referringExpr}, 5)`)})
+        and not ${isNumericSql(`left(${referringExpr}, 5)`)} then 1${digitPrefix ? `
+      when ${isNumericSql(`left(${referringExpr}, 3)`)} then 1` : ''}
+      else 0
+    end`;
+
+// The per-row facts both builders need, as select items for a lateral subquery over the ranked rows `r`
+// (columns tested_date, collected_date, testing_code, receiving_code, lab_id, request_row_id):
+//   tat           date boundaries (datediff dd) between the LOCAL collected and tested dates
+//   hours_taken   hour boundaries (datediff hh) between them, for poc_w48h
+//   is_poc        a numeric testing code, or a lab id whose first 3 characters are numeric, or `pocExtra`
+//   base_code     the testing code, else the receiving code when the testing code is blank
+//   prereg_facility, referring_id   the two request attributes behind disalink
+export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_date`)} - ${localDate(`${r}.collected_date`)} as tat,
+    extract(epoch from date_trunc('hour', ${utcTs(`${r}.tested_date`)}) - date_trunc('hour', ${utcTs(`${r}.collected_date`)})) / 3600 as hours_taken,
+    ${pocExtra} or ${isNumericSql(`${r}.testing_code`)} or ${isNumericSql(`left(${r}.lab_id, 3)`)} as is_poc,
+    case when length(rtrim(${r}.testing_code)) = 0 then ${r}.receiving_code else ${r}.testing_code end as base_code,
+    ${requestAttrSql(`${r}.request_row_id`, 'prereg-registration-facility')} as prereg_facility,
+    ${requestAttrSql(`${r}.request_row_id`, 'referring-request-id')} as referring_id`;
 
 // Zambia's `hivvl` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
 //   hivvlCte('hv')                              all rows
@@ -242,38 +325,21 @@ const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at 
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
 export function hivvlCte(name, { from, to } = {}) {
-  if ((from === undefined) !== (to === undefined)) throw new Error('hivvlCte: give both from and to, or neither');
-  const windowed = from !== undefined && to !== undefined;
+  const { prefilter, finalRange } = copyWindow('hivvlCte', from, to);
   const result = rpt('l');
-  // Rows of the lab ids that have a report issued in the window: the dedupe needs their other rows too.
-  const prefilter = windowed
-    ? `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`
-    : '';
-  const finalRange = windowed ? `and ${inRange('r.tested_date', from, to)}` : '';
   return `${name} as (
   with ${name}_src as (
-    select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
-      fmr.region as province, fmr.district as district, fmr.name as facility,
-      p.sex, lr.age_years,
-      dr.issued as tested_date, lr.analysis_at as run_date, s.received_time as received_date,
-      lr.authored_at as registered_date, dr.effective as collected_date,
-      dr.performer as testing_code, null::text as receiving_code,
-      ${result} as result_text, l.numeric_value
-    from lab_requests lr
-    join lab_results l on l.request_id = lr.id
-    ${requesterJoin('lr', 'fmr')}
-    join diagnostic_reports dr on dr.based_on_id = lr.id
-    left join specimens s on s.id = dr.specimen_id
-    left join patients p on p.id = lr.patient_id
-    where lr.panel_code in ('HIVVL', 'POCVR', 'POHVL')
-      and l.observation_code in ('HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC')
+    ${reportSourceSql({
+      columns: `lr.age_years, ${result} as result_text, l.numeric_value`,
+      where: `${inListSql('lr.panel_code', ['HIVVL', 'POCVR', 'POHVL'])}
+      and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC'])}
       and dr.status = 'final'
-      and (${inListSql(result, HIVVL_VALID)} or ${isNumericSql(result)})
-      ${prefilter}
+      and (${inListSql(result, HIVVL_VALID)} or ${isNumericSql(result)})`,
+      prefilter,
+    })}
   ),
   ${name}_ranked as (
-    select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
-    from ${name}_src s
+    ${rankedSql(`${name}_src`)}
   ),
   ${name}_flags as (
     select q.request_id as lab_id,
@@ -290,7 +356,7 @@ export function hivvlCte(name, { from, to } = {}) {
     group by q.request_id
   )
   select r.province, r.district, r.facility, r.lab_id,
-    case upper(rtrim(r.sex)) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end as gender,
+    ${genderFmiuSql('r.sex')} as gender,
     case
       when r.age_years = 0 then '<01'
       when r.age_years between 1 and 4 then '01-04'
@@ -312,31 +378,16 @@ export function hivvlCte(name, { from, to } = {}) {
     case when c.tat <= 14 then 1 else 0 end as tat_within14,
     f.pregnant, f.breastfeeding, f.baseline_vl,
     r.run_date, r.received_date, r.registered_date, r.collected_date,
-    case when rtrim(c.base_code) ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
-    case
-      when r.receiving_code is null then null::int
-      when length(rtrim(r.receiving_code)) > 0 and ${foldSql('r.receiving_code')} <> ${foldSql('r.testing_code')} then 1
-      else 0
-    end as referral,
-    case
-      when length(rtrim(c.prereg_facility)) > 0 then 1
-      when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql('left(c.referring_id, 5)')})
-        and not ${isNumericSql('left(c.referring_id, 5)')} then 1
-      when ${isNumericSql('left(c.referring_id, 3)')} then 1
-      else 0
-    end as disalink,
+    ${testedAtSql('c.base_code', 'r.testing_code')} as tested_at,
+    ${referralSql('r.receiving_code', 'r.testing_code')} as referral,
+    ${disalinkSql('c.prereg_facility', 'c.referring_id', { digitPrefix: true })} as disalink,
     f.three_m_post_unsuppressed,
     case when c.is_poc then 1 else 0 end as poc,
     case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
   from ${name}_ranked r
   left join ${name}_flags f on f.lab_id = r.lab_id
   cross join lateral (select
-    ${localDate('r.tested_date')} - ${localDate('r.collected_date')} as tat,
-    extract(epoch from date_trunc('hour', ${utcTs('r.tested_date')}) - date_trunc('hour', ${utcTs('r.collected_date')})) / 3600 as hours_taken,
-    ${isNumericSql('r.testing_code')} or ${isNumericSql('left(r.lab_id, 3)')} as is_poc,
-    case when length(rtrim(r.testing_code)) = 0 then r.receiving_code else r.testing_code end as base_code,
-    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'prereg-registration-facility') as prereg_facility,
-    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'referring-request-id') as referring_id) c
+    ${rowFactsSql('r')}) c
   where r.seq = 1
     ${finalRange}
 )`;
@@ -344,7 +395,7 @@ export function hivvlCte(name, { from, to } = {}) {
 
 // ---- The eid copy table ----
 
-// v1 sp_update_EIDTable: the five result lists (lines 45, 51, 62, 63, 69). Compared as in hivvl.
+// v1 sp_update_EIDTable: the five result lists (lines 45, 51, 57, 63, 69). Compared as in hivvl.
 const EID_POSITIVE = ['Positive', 'Positive*', 'POS', 'Detected DBS', 'Detected', 'DET'];
 const EID_NEGATIVE = ['LDL', 'NDET', 'Negative*', 'Not Detected', 'Not Detected DBS', 'Negative', 'NDDB', 'NDT', 'NDTD'];
 const EID_INVALID = ['Invalid', 'VALID'];
@@ -393,12 +444,12 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //     characters are numeric (line 75). poc_w48h: poc and datediff(hh) from collected to tested <= 24 (line 76).
 //
 // Kept v1 quirks (spec ruling 1):
-//   - invalid lists 'VALID', not 'INVAL' (line 59); 'INVAL' sets no class.
+//   - invalid lists 'VALID', not 'INVAL' (line 57); 'INVAL' sets no class.
 //   - poc_w48h tests 24 hours, although its name says 48, and counts hour boundaries, not elapsed time.
 //   - tat counts date boundaries of the LOCAL dates, each date taken from the stamp's own text, not
 //     shifted to UTC. tat_within14 is 0, not NULL, when tat is NULL.
 //   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
-//   - disalink does not count a referring id that starts with digits; hivvl's line does (line 41 has no such term).
+//   - disalink does not count a referring id that starts with digits; HIVVL's does (HIVVL line 82; EID line 41 has no such term).
 //   - tested_at: SQL Server LIKE ignores trailing blanks in the matched text, so 'ZUB ' also becomes ZUL.
 //   - Partial stamps ('2026-07') give NULL TAT and never raise. A date-only stamp gives its date.
 //   - v1's table has narrow columns (lab_id 26, tested_at 10, facility 50); a longer value would stop v1's
@@ -412,41 +463,23 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //     and referring-request-id (ReferringRequestID). cdr-toolchain does not fill them yet, so disalink is 0
 //     until it does. v1's facility list is the mapped facility_map codes.
 export function eidCte(name, { from, to } = {}) {
-  if ((from === undefined) !== (to === undefined)) throw new Error('eidCte: give both from and to, or neither');
-  const windowed = from !== undefined && to !== undefined;
-  const result = rpt('l');
-  // Rows of the lab ids that have a report issued in the window: the dedupe needs their other rows too.
-  const prefilter = windowed
-    ? `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`
-    : '';
-  const finalRange = windowed ? `and ${inRange('r.tested_date', from, to)}` : '';
+  const { prefilter, finalRange } = copyWindow('eidCte', from, to);
   const flag = (words) => `case when ${inListSql('r.result_text', words)} then 1 else 0 end`;
   return `${name} as (
   with ${name}_src as (
-    select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
-      fmr.region as province, fmr.district as district, fmr.name as facility,
-      p.sex, lr.age_days,
-      dr.issued as tested_date, lr.analysis_at as run_date, s.received_time as recieved_date,
-      lr.authored_at as registered_date, dr.effective as collected_date,
-      dr.performer as testing_code, null::text as receiving_code,
-      l.observation_code as obs_code, ${result} as result_text
-    from lab_requests lr
-    join lab_results l on l.request_id = lr.id
-    ${requesterJoin('lr', 'fmr')}
-    join diagnostic_reports dr on dr.based_on_id = lr.id
-    left join specimens s on s.id = dr.specimen_id
-    left join patients p on p.id = lr.patient_id
-    where ${inListSql('lr.panel_code', ['HIVPC', 'POCGH', 'POEID'])}
+    ${reportSourceSql({
+      columns: `lr.age_days, l.observation_code as obs_code, ${rpt('l')} as result_text`,
+      where: `${inListSql('lr.panel_code', ['HIVPC', 'POCGH', 'POEID'])}
       and ${inListSql('l.observation_code', ['HIVPC', 'HIVPR', 'PGHIV'])}
-      and dr.status = 'final'
-      ${prefilter}
+      and dr.status = 'final'`,
+      prefilter,
+    })}
   ),
   ${name}_ranked as (
-    select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
-    from ${name}_src s
+    ${rankedSql(`${name}_src`)}
   )
   select r.province, r.district, r.facility, r.lab_id,
-    case upper(rtrim(r.sex)) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end as gender,
+    ${genderFmiuSql('r.sex')} as gender,
     case
       when r.age_days between 0 and 6 then 'At Birth'
       when r.age_days between 7 and 48 then '1 - 6 Weeks'
@@ -461,19 +494,10 @@ export function eidCte(name, { from, to } = {}) {
     ${flag(EID_POSITIVE)} as positive,
     c.tat,
     case when c.tat <= 14 then 1 else 0 end as tat_within14,
-    r.run_date, r.recieved_date, r.registered_date, r.collected_date,
-    case when rtrim(c.base_code) ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
-    case
-      when r.receiving_code is null then null::int
-      when length(rtrim(r.receiving_code)) > 0 and ${foldSql('r.receiving_code')} <> ${foldSql('r.testing_code')} then 1
-      else 0
-    end as referral,
-    case
-      when length(rtrim(c.prereg_facility)) > 0 then 1
-      when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql('left(c.referring_id, 5)')})
-        and not ${isNumericSql('left(c.referring_id, 5)')} then 1
-      else 0
-    end as disalink,
+    r.run_date, r.received_date as recieved_date, r.registered_date, r.collected_date,
+    ${testedAtSql('c.base_code', 'r.testing_code')} as tested_at,
+    ${referralSql('r.receiving_code', 'r.testing_code')} as referral,
+    ${disalinkSql('c.prereg_facility', 'c.referring_id')} as disalink,
     ${flag(EID_ERROR)} as error,
     ${flag(EID_INVALID)} as invalid,
     ${flag(EID_NEGATIVE)} as negative,
@@ -482,12 +506,7 @@ export function eidCte(name, { from, to } = {}) {
     case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
   from ${name}_ranked r
   cross join lateral (select
-    ${localDate('r.tested_date')} - ${localDate('r.collected_date')} as tat,
-    extract(epoch from date_trunc('hour', ${utcTs('r.tested_date')}) - date_trunc('hour', ${utcTs('r.collected_date')})) / 3600 as hours_taken,
-    ${foldSql('r.obs_code')} = 'pghiv' or ${isNumericSql('r.testing_code')} or ${isNumericSql('left(r.lab_id, 3)')} as is_poc,
-    case when length(rtrim(r.testing_code)) = 0 then r.receiving_code else r.testing_code end as base_code,
-    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'prereg-registration-facility') as prereg_facility,
-    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'referring-request-id') as referring_id) c
+    ${rowFactsSql('r', `${foldSql('r.obs_code')} = 'pghiv'`)}) c
   where r.seq = 1
     ${finalRange}
 )`;
