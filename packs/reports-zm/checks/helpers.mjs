@@ -110,6 +110,35 @@ suites.push(caseSuite('in-range-names', ['d'], [
   { d: '2026-02-01', expected: false },
 ], bind(inRange('d', 'start', 'end'), { start: '2026-01-15', end: '2026-01-31' })));
 
+// extraDays moves the end of the window later (the dashboard procedures add a day to their end date).
+suites.push(caseSuite('in-range-extra-day', ['d'], [
+  { d: '2026-05-31T10:00:00Z', expected: true },
+  { d: '2026-06-01T23:30:00+02:00', expected: true },
+  { d: '2026-06-02T00:30:00+02:00', expected: false },
+  { d: '2026-04-30T23:59:59Z', expected: false },
+  { d: null, expected: null },
+], bind(inRange('d', 'from', 'to', 1), { from: '2026-05-01', to: '2026-05-31' })));
+// A year-end roll: the day after 2026-12-31 is 2027-01-01, and 2027-01-02 is out.
+suites.push(caseSuite('in-range-extra-day-year-end', ['d'], [
+  { d: '2026-12-31T23:59:59Z', expected: true },
+  { d: '2027-01-01T00:30:00+02:00', expected: true },
+  { d: '2027-01-01', expected: true },
+  { d: '2027-01-02', expected: false },
+  { d: '2026-12-01', expected: true },
+], bind(inRange('d', 'from', 'to', 1), { from: '2026-12-01', to: '2026-12-31' })));
+// Two extra days, and the other parameter names.
+suites.push(caseSuite('in-range-extra-days-names', ['d'], [
+  { d: '2026-03-01', expected: true },
+  { d: '2026-03-02', expected: false },
+  { d: '2026-02-28', expected: true },
+], bind(inRange('d', 'start', 'end', 2), { start: '2026-02-27', end: '2026-02-27' })));
+suites.push(jsSuite('in-range-extra-days-guard', [
+  ['0 adds nothing', same(inRange('d', 'from', 'to', 0), inRange('d'))],
+  ['negative throws', (() => { try { inRange('d', 'from', 'to', -1); return 'did not throw'; } catch { return null; } })()],
+  ['fractional throws', (() => { try { inRange('d', 'from', 'to', 1.5); return 'did not throw'; } catch { return null; } })()],
+  ['text throws', (() => { try { inRange('d', 'from', 'to', '1'); return 'did not throw'; } catch { return null; } })()],
+]));
+
 // ---- sqlList ----
 suites.push(caseSuite('sql-list', ['x'], [
   { x: 'a', expected: true },

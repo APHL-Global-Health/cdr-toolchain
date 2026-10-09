@@ -5,20 +5,25 @@ import { hivvlCte, provinceParam, districtParam, facilityParam, dateParams } fro
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
 //
-// Replaces sp_dash_getHIVVL_v2 (the target) and folds in three other v1 objects:
+// Replaces sp_dash_getHIVVL_v2 (the target) and folds in one other v1 object:
 //   sp_dash_getHIVVL   an older cut of the same procedure. Its 22 columns (Province, District, Facility, Tests,
 //                      Suppressed, Unsuppressed, Undetectable, SuppressionRate, AverageTAT and the age bands) are all
-//                      columns of this query. Two things of its own are NOT carried: its rate counts baseline tests (this
-//                      query's rate leaves them out, as v2 does), and it reads Requests and LabResults with shorter
-//                      result lists (it lacks ND, <20CP, < 40, DET, PLTT), so its counts differ slightly from v2's.
-//   vSuppressionByFacility, vVLQuarterlyFacilitySuppressionRate
-//                      Both are broken in v1 (spec ruling 2). The first selects Quarter, Month and Week, which its source
-//                      vVLReportData does not have. The second tests the label '>= 1000 copies/ml', which its source never
-//                      makes, so its rate is always 100. What this query covers of them: suppressed and unsuppressed
-//                      counts for ONE facility (give province, district and facility), split by sex and age group, over
-//                      one date window. What it does NOT cover: one row per facility for many facilities at once, the
-//                      year, quarter, month and week columns, RequestingFacilityCode, and the views' coarse age groups
-//                      (0-14 and 15+). This query's age groups are the finer hivvl bands.
+//                      columns of this query. These things of its own are NOT carried:
+//                        - its rate counts baseline tests (this query's rate leaves them out, as v2 does);
+//                        - it reads Requests and LabResults directly, with shorter result lists (it lacks ND, <20CP,
+//                          < 40, DET, PLTT), so its counts differ slightly from v2's;
+//                        - it has no dedupe per lab id, so the HIVVL and HIVVC rows of one request both count;
+//                        - it LEFT joins the facility dictionary, so an unmapped facility counts in the national row
+//                          (here it is left out, as the hivvl table leaves it out);
+//                        - it reads panel HIVVL only (no POCVR or POHVL).
+//
+// What this query gives by sex and age: TESTS. Every sex and age column (Male, Female, lt01 ... 50plus, the age-by-sex
+// columns) counts tests; none of them splits suppressed from unsuppressed (v1 lines 37-119 never test Suppressed).
+// Suppressed is a total (Suppressed, Suppressed_POC, Unsuppressed) plus the pregnant, breastfeeding and baseline splits.
+//
+// vSuppressionByFacility and vVLQuarterlyFacilitySuppressionRate (both broken in v1, spec ruling 2) are NOT covered here.
+// They give suppressed and unsuppressed counts by sex and age group. "VL dashboard by sex and age"
+// (sp_dash_getHIVVL_v2_List, which gives Suppressed and UnSuppressed per Gender and AgeGroup) covers them.
 //
 // Rows come from the hivvl copy table (v1 sp_update_HIVVLTable), rebuilt by hivvlCte. v1 filters
 // cast(TestedDate as date) between @StDate and @EDate (lines 130, 242, 357, 470, 583).
@@ -43,15 +48,18 @@ import { hivvlCte, provinceParam, districtParam, facilityParam, dateParams } fro
 //     that is never set is NULL (ThreeMPostUnSuppressed) rather than 0.
 //   - TatWithin48h_POC tests 24 hours, as the hivvl column does.
 //   - With no test in the window, the national row has Tests = 0 and every other count is NULL (a sum over no rows).
+//   - v1's @Facility is varchar(40) (line 8) but HIVVL.Facility is nvarchar(50). A name over 40 characters is cut,
+//     never matches, and v1 returns the zero row. This query matches the full name (evident intent).
+//
+// Result shape (not a ruling 2 case: v1 runs):
+//   - v1 lists [AgeMissing] twice in the province, district and facility branches (lines 165-166, 279-280, 393-394,
+//     506-507) and once in the national branch (line 54): 109 columns against 108. A result keyed by column name
+//     cannot hold two columns of one name, so one AgeMissing is kept: 108 columns in every branch.
 //
 // Deviations (spec ruling 2):
-//   - v1 lists [AgeMissing] twice in the province, district and facility branches (lines 165-166, 279-280, 393-394,
-//     506-507) and once in the national branch (line 54): 109 columns against 108. This query has the national shape in
-//     every branch, one AgeMissing. The second column repeated the first, and a result keyed by column name cannot hold
-//     two of one name.
 //   - SuppressionRate divides by (tests - baseline tests). When every test is a baseline test that is zero and v1
 //     stops with "divide by zero" (lines 31, 142, 256, 370, 483). This query gives NULL, as v1 already does for
-//     SuppressionRate_POC (nullif). TatWithin14 divides by the test count in the same way.
+//     SuppressionRate_POC (nullif).
 //
 // CE gaps (spec ruling 7): none of its own. Everything comes from hivvlCte, so its gaps carry over: Referral and Disalink
 // are not used by this report. Pregnant, BreastFeeding, BaselineVL and ThreeMPostUnSuppressed read the VIRAL form's text
