@@ -15,12 +15,13 @@ under the same name is overwritten.
 ## The facility register
 
 Each facility has its MFL code, name, province, district, status, ownership and ward. Where the list
-has a valid pair, it also has latitude and longitude. Status comes from the list's operational
+has a valid pair inside Zambia, it also has latitude and longitude. The build leaves out 42 pairs
+that are not valid or fall outside Zambia (for example a position in Paris). Status comes from the list's operational
 status. Functional is active. Closed and Permanent closure are inactive. Temporarily closure is
 suspended. In CE a facility's status is information only. An inactive facility is still listed and
 reported.
 
-The register keeps six more list values in each facility's `extras`, exactly as the list has them:
+The register keeps six more list values in each facility's `extras`, as the list has them, trimmed of spaces:
 `hims_code`, `dhis2_uid`, `type`, `ownership_type`, `constituency` and `location`.
 
 **Map your lab's facility codes.** DISA*Lab names facilities with its own codes, not MFL codes, so
@@ -39,22 +40,28 @@ CollectedDate, RegisteredDate, ResultDate, Result, Suppressed.
 
 It lists, for the range:
 
-- every valid viral load result, by result date. Suppressed is Yes under 1000 copies or for a
-  below-limit text.
-- every rejected viral load request, by registered date, with Result `REJECTED`.
-- every result that is neither a number nor a below-limit text, by result date, as written.
+- every valid viral load result, by result date. Suppressed is Yes under 1000 copies, or for a
+  not-detected or under-limit text on Zambia's list (for example "Target Not Detected" or
+  "<20 copies/mL").
+- every rejected viral load request (HIVVL), by registered date, with Result `REJECTED`. It leaves
+  out requests already listed as valid.
+- every viral load result (HIVVL) that is neither a number nor one of Zambia's listed under-limit or
+  over-limit texts (for example "< 20" or "> 10000000"), by result date, as written. It leaves out
+  requests already listed as valid.
 
-A report run stops at 1000 rows. Narrow the dates or pick a province for a big range.
+A report run refuses to return more than 1000 rows. The Query page pages through more. For a big
+range, narrow the dates or pick a province.
 
 ## How it differs from v1
 
 - Province, District and Facility names come from the master facility list, not from v1's
   dictionary. Some spellings can differ.
-- Gender, CollectedDate and RegisteredDate are always filled. v1 left them blank for some results.
+- Gender and RegisteredDate are always filled. v1 left them blank for some results. CollectedDate
+  and ResultDate are empty when the report has no date.
 - Rejected means a cancelled result. v1 also counted statuses Y and Z, which reach CE only as
   "unknown", so they cannot be picked out.
 - The ART number is built as v1 builds it, from the reference number, else the unique ID. v1 also
   used a hospital number, which CE does not receive yet.
 - v1 kept results from 2017-01-01 only. This query has no such floor. The date range decides.
-- The data must come from a DISA*Lab that cdr-toolchain has measured. Until then results have no
-  status or result date, and the report is empty.
+- The DISA*Lab data export for Zambia has to be checked first against Zambia's own DISA*Lab and v1
+  data. Until then results carry no status or result date, and the report is empty.

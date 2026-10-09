@@ -1,7 +1,7 @@
 # Questions for the Zambia team
 
-Open questions about the v1 reporting database and the DISA*Lab data. Raise them with the Zambia
-team. Opened 2026-10-09. None is answered yet.
+Open questions about the v1 reporting database and the DISA*Lab data. Opened 2026-10-09. None is
+answered yet.
 
 ## 1. A backup of OpenLDRDict
 
@@ -18,8 +18,10 @@ longer map them by hand. We can also compare province spellings, for example `No
 No Zambia result data has been available. The query has only run on made-up cases.
 
 Please send a few hundred viral load requests from one lab, twice. Once as DISA*Lab data
-(`DisalabData`). Once as v1 `OpenLDRData` for the same requests. Patient names and IDs can be removed
-first, but please keep the request numbers so the two sets line up.
+(`DisalabData`). Once as v1 `OpenLDRData` for the same requests. Patient names can be removed first. Please
+keep the request numbers so the two sets line up. Please also keep `RefNos`, `UniqueID` and
+`HOSPID`, because question 3 and the ART number comparison need them. If they must go, replace each
+with a stand-in, the same stand-in for the same value.
 
 We need the DISA*Lab copy to measure your DISA*Lab with `cdr probe-review`. Until then results have
 no status and no result date, and the report is empty. We need the v1 copy to run "VL clients by
@@ -29,8 +31,8 @@ province" beside v1's procedures and compare the rows one by one.
 
 v1 builds the ART number from three patient fields: `REFNO`, `HOSPID` and `UNIQUEID`. We read two
 of them from DISA*Lab record `REGDAT4`: `RefNos` (offsets 66 to 121) as `REFNO`, and `UniqueID`
-(offsets 32 to 41) as `UNIQUEID`. We matched them by name and by the values, which start `,ELABS`.
-We have not seen them in your data.
+(offsets 32 to 41) as `UNIQUEID`. We matched them by name. The `,ELABS` shape comes from v1's
+script, not from your data. We have not seen these fields in your data.
 
 Please confirm both. Please also tell us which DISA*Lab field fills `HOSPID`. The folder number is
 already v1's `OrderingNotes`, so we think it is not that one. Until we know, the query treats

@@ -340,7 +340,8 @@ function buildLabRequest(
   if (codes.therapy !== null && therapyText !== null) attributes.push({ code: codes.therapy, valueString: therapyText });
   const folderNo = nz(s.FolderNo);
   if (codes.folderNumber !== null && folderNo !== null) attributes.push({ code: codes.folderNumber, valueString: folderNo });
-  // v1 Patients.REFNO and UNIQUEID, which Zambia's reports build the ART number from.
+  // v1 Patients.REFNO and UNIQUEID. Every deployment sends them (the codes come from
+  // request-attributes.yaml, not a country file). Zambia's reports use them to build the ART number.
   const referenceNumbers = nz(s.ReferenceNumber);
   if (codes.referenceNumbers !== null && referenceNumbers !== null) attributes.push({ code: codes.referenceNumbers, valueString: referenceNumbers });
   const uniqueId = nz(s.UniqueID);

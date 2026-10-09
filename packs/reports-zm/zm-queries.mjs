@@ -81,7 +81,8 @@ export const provinceOptionsSql = (registerUrl) =>
 //   zm_unclear  final HIVVL results that are neither a number nor a below-limit text, not in zm_valid.
 // v1 reads its copy tables TND and hivvl; this rebuilds them from the warehouse. Province, district
 // and facility come from the requesting facility's mapped ZMFAC row; unmapped facilities drop out,
-// as v1's inner joins drop facilities missing from its dictionary. Gender and the two dates always
+// as v1's inner joins drop facilities missing from its dictionary. zm_req pre-filters by panel and date, so the
+// query reads only the requests in the range. Gender and the two dates always
 // come from the request (v1 part 1 leaves them blank when its hivvl table lacks the request).
 // Part 1 builds the ART number with artNumberSql; parts 2 and 3 show the unique id raw, as v1 does.
 export function provinceClientsSql(codes) {
@@ -107,6 +108,8 @@ zm_req as (
   left join patients p on p.id = lr.patient_id
   left join zm_ids zi on zi.lab_request_id = lr.id
   where ({{param.province}} = '' or fmr.region = {{param.province}})
+    and lr.panel_code in (${sqlList([...new Set([...codes.validPanels, codes.vlPanel])])})
+    and (${inRange('dr.issued')} or ${inRange('lr.authored_at')})
 ),
 zm_valid as (
   select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.age_years, q.gender,

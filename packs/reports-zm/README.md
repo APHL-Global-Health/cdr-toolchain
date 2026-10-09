@@ -11,7 +11,7 @@ reports. This is the source of the pack. The signed bundle is built from it.
 |---|---|
 | `build.mjs` | Reads Zambia's master facility list (a CSV) and writes `dist/`. It needs no database. |
 | `zm-queries.mjs` | The SQL of "VL clients by province", the three text lists, the ART number rule and the province picker. |
-| `check-reports-zm.mjs` | Runs the ART number rule and the query against the dev Postgres over a table of cases. 33 checks. Run it by hand before a release. |
+| `check-reports-zm.mjs` | Runs the ART number rule and the query against the dev Postgres over a table of cases. 35 checks. Run it by hand before a release. |
 | `QUESTIONS-FOR-ZM.md` | Open questions for the Zambia team. |
 | `PACK.md` | The text an admin reads in the marketplace before installing. It becomes the manifest readme. |
 | `.gitignore` | Keeps `dist/` out of git. |
@@ -39,8 +39,10 @@ stops the build.
 
     node packs/reports-zm/check-reports-zm.mjs
 
-It runs 33 checks: 15 ART number cases, 1 province picker case, and the full query twice (9 checks
-for all provinces, 8 for Southern only). It runs in the CE dev Postgres container on temporary
+It runs 35 checks: 15 ART number cases, 1 province picker case, and the full query twice (10 checks
+for all provinces, 9 for Southern only). One case is a lab number with two requests: a valid RTRI
+result and a cancelled HIVVL request. Only the valid row may appear. The query checks also fail when
+the row count is wrong. It runs in the CE dev Postgres container on temporary
 copies of the warehouse tables and rolls back, so it reads no warehouse rows. It exits 1 on any
 mismatch.
 
@@ -88,9 +90,12 @@ One row per row of the master facility list (3,788 rows, 21 columns).
   extras. The step lists the six extras in `extraColumns`, so CE keeps them and still refuses any
   other unknown column. The headers are lowercase because CE stores extras keys in lowercase.
 - CE uses status for display and filtering only. An inactive facility is still listed and reported.
-- CE drops a row's coordinates unless both are valid, so the build keeps both or neither. It left
-  them out on 12 rows because the pair is not valid (for example a longitude of `29580210`).
-  98 rows have none. `build-summary.json` names the 12.
+- CE drops a row's coordinates unless both are valid, so the build keeps both or neither. A pair is
+  valid only inside Zambia's box: latitude -18.5 to -8.0 and longitude 21.5 to 34.0 (Zambia's extent
+  with a small margin). It left them out on 42 rows. 12 are not a valid pair (for example a
+  longitude of `29580210`). 30 are valid numbers outside Zambia (MFL 4434 is a position in Paris,
+  4159 has latitude and longitude swapped, 4418 lost its minus sign). 98 rows have none in the list.
+  `build-summary.json` names the 42.
 - Left out of the register: `Zone`, `Mobility status`, `Accesibility`, and the catchment and
   household counts. No output uses them.
 - A blank code, a blank name or a repeated code is left out and named in `build-summary.json`.
@@ -166,9 +171,12 @@ regular expression.
 - **Rejected means cancelled only.** cdr-toolchain maps v1 `X` to `cancelled` and sends `Y` and `Z`
   as `unknown` (`fhir-transform.ts:109-118`), so they cannot be picked out. Listed, not fixed. See
   `QUESTIONS-FOR-ZM.md`.
-- **Gender, CollectedDate and RegisteredDate are always filled.** v1 part 1 takes them from its
-  `hivvl` table, which has a row only when the request also has VIRAL or RTRI data. So v1 shows
-  them blank otherwise. Where v1 shows a value, it is the same value.
+- **Gender and RegisteredDate are always filled.** v1 part 1 takes them from its `hivvl` table,
+  which has a row only when the request also has VIRAL or RTRI data. So v1 shows them blank
+  otherwise. Where v1 shows a value, it is the same value. CollectedDate and ResultDate are empty
+  when the report has no date.
+- **A request with no patient still lists.** v1's `TND` needs a `Patients` row (an inner join). The
+  port uses a left join, so such a request lists with an empty name.
 - **No 2017 floor.** v1's `TND` keeps results from 2017-01-01. The date range replaces it.
 - **The ART number has no `HOSPID` step** until its DISA*Lab source is known.
 - **ART number per part.** v1 builds it in part 1 only. Parts 2 and 3 show the raw unique ID, and

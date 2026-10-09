@@ -52,7 +52,7 @@ suites.push({
   },
 });
 
-// Requests for the full query. W1-W5, W7, W9 are in range; W6's facility is unmapped; W8 and W10
+// Requests for the full query. W1-W5, W7, W9 and W11 are in range; W6's facility is unmapped; W8 and W10
 // fall outside 2026-05-01..2026-05-31. W9's result date is the last evening of the range.
 const ATTR = "'urn:openldr:cs:request-attribute'";
 const WIRING_ROWS = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
@@ -63,7 +63,7 @@ insert into patients (id, firstname, surname, sex) values
   ('p1', 'Mary', 'Banda', 'F'), ('p2', 'John', 'Phiri', 'M'), ('p3', 'Ruth', 'Mwale', 'F'),
   ('p4', null, 'Zulu', null), ('p5', 'Grace', 'Tembo', 'F'), ('p6', 'Ann', 'Moyo', 'F'),
   ('p7', 'Peter', 'Lungu', 'M'), ('p8', 'Joy', 'Bwalya', 'F'), ('p9', 'Esther', 'Daka', 'F'),
-  ('p10', 'Paul', 'Sakala', 'M');
+  ('p10', 'Paul', 'Sakala', 'M'), ('p11', 'Lisa', 'Mumba', 'F');
 insert into lab_requests (id, request_id, panel_code, authored_at, requester_code, patient_id, age_years) values
   ('w1', 'V1', 'HIVVL', '2026-05-02T08:00:00Z', 'ZSOUT', 'p1', 30),
   ('w2', 'V2', 'HIVVL', '2026-05-02T09:00:00Z', 'ZSOUT', 'p2', 41),
@@ -74,7 +74,9 @@ insert into lab_requests (id, request_id, panel_code, authored_at, requester_cod
   ('w7', 'V7', 'HIVVL', '2026-05-05T08:00:00Z', 'ZLUSA', 'p7', 28),
   ('w8', 'V8', 'HIVVL', '2026-06-20T08:00:00Z', 'ZSOUT', 'p8', 36),
   ('w9', 'V9', 'RTRI', '2026-05-06T08:00:00Z', 'ZSOUT', 'p9', 22),
-  ('w10', 'V10', 'HIVVL', '2026-04-25T08:00:00Z', 'ZSOUT', 'p10', 44);
+  ('w10', 'V10', 'HIVVL', '2026-04-25T08:00:00Z', 'ZSOUT', 'p10', 44),
+  ('w11a', 'V11', 'RTRI', '2026-05-07T08:00:00Z', 'ZSOUT', 'p11', 27),
+  ('w11b', 'V11', 'HIVVL', '2026-05-07T09:00:00Z', 'ZSOUT', 'p11', 27);
 insert into diagnostic_reports (id, based_on_id, status, effective, issued) values
   ('d1', 'w1', 'final', '2026-05-01T07:00:00Z', '2026-05-10T10:00:00Z'),
   ('d2', 'w2', 'final', '2026-05-01T08:00:00Z', '2026-05-11T10:00:00Z'),
@@ -85,7 +87,9 @@ insert into diagnostic_reports (id, based_on_id, status, effective, issued) valu
   ('d7', 'w7', 'final', '2026-05-04T08:00:00Z', '2026-05-14T10:00:00Z'),
   ('d8', 'w8', 'final', '2026-06-19T08:00:00Z', '2026-07-01T10:00:00Z'),
   ('d9', 'w9', 'final', '2026-05-05T08:00:00Z', '2026-05-31T23:00:00Z'),
-  ('d10', 'w10', 'cancelled', '2026-04-24T08:00:00Z', null);
+  ('d10', 'w10', 'cancelled', '2026-04-24T08:00:00Z', null),
+  ('d11a', 'w11a', 'final', '2026-05-06T08:00:00Z', '2026-05-16T10:00:00Z'),
+  ('d11b', 'w11b', 'cancelled', '2026-05-06T09:00:00Z', null);
 insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
   ('r1', 'w1', 'HIVVL', null, 540, null, null),
   ('r2a', 'w2', 'HIVVL', 'Target Not Detected', null, null, null),
@@ -96,7 +100,8 @@ insert into lab_results (id, request_id, observation_code, text_value, numeric_v
   ('r6', 'w6', 'HIVVL', null, 540, null, null),
   ('r7', 'w7', 'HIVVL', null, 300, null, null),
   ('r8', 'w8', 'HIVVL', null, 100, null, null),
-  ('r9', 'w9', 'HIVVL', '<20 copies/mL', null, null, null);
+  ('r9', 'w9', 'HIVVL', '<20 copies/mL', null, null, null),
+  ('r11', 'w11a', 'HIVVL', null, 50, null, null);
 insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values
   ('a1', 'w1', ${ATTR}, 'reference-numbers', ',ELABS 12AT.3456'),
   ('a2', 'w1', ${ATTR}, 'unique-id', 'ZM-001'),
@@ -119,6 +124,9 @@ const EXPECTED_SOUTHERN = [
   row(...S, 'V2', 'John Phiri', 41, 'Male', '123456', '2026-05-01T08:00:00Z', '2026-05-02T09:00:00Z', '2026-05-11T10:00:00Z', '1500', 'No'),
   row(...S, 'V5', 'Grace Tembo', 33, 'Female', '', '2026-05-03T08:00:00Z', '2026-05-04T08:00:00Z', '2026-05-13T10:00:00Z', '200', 'Yes'),
   row(...S, 'V9', 'Esther Daka', 22, 'Female', 'U9', '2026-05-05T08:00:00Z', '2026-05-06T08:00:00Z', '2026-05-31T23:00:00Z', '<20 copies/mL', 'Yes'),
+  // V11 has two requests with one lab number: a final RTRI with a result, and a cancelled HIVVL.
+  // The lab number is in part 1, so part 2 adds no REJECTED row.
+  row(...S, 'V11', 'Lisa Mumba', 27, 'Female', '', '2026-05-06T08:00:00Z', '2026-05-07T08:00:00Z', '2026-05-16T10:00:00Z', '50', 'Yes'),
   // Part 2, rejected: raw unique id, no surname-only trim, Gender Missing.
   row(...S, 'V4', ' Zulu', 19, 'Missing', 'ZM 44', '2026-05-02T08:00:00Z', '2026-05-03T08:00:00Z', null, 'REJECTED', null),
   // Part 3, unclear: raw unique id. V5's "Please repeat" is not here: V5 is in part 1.
@@ -140,6 +148,7 @@ function querySuite(name, params, expected, setup = '') {
     count: expected.length + 1,
     check(rows) {
       const failures = [];
+      if (rows.length !== expected.length) failures.push(`expected ${expected.length} rows, got ${rows.length}`);
       if (rows[0]) failures.push(...inOrder(Object.keys(rows[0]), COLUMNS));
       if (rows[0] && Object.keys(rows[0]).length !== COLUMNS.length) failures.push(`expected ${COLUMNS.length} columns, got ${Object.keys(rows[0]).length}`);
       const key = (r) => JSON.stringify(COLUMNS.map((c) => r[c] ?? null));

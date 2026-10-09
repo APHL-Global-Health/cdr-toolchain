@@ -49,14 +49,22 @@ function parseCsv(text) {
   return rows.filter((r) => r.some((c) => c.trim() !== ''));
 }
 
-// CE drops a row's coordinates unless both are valid, so the build keeps both or neither.
+// Zambia's extent with a small margin. The list has pairs that are valid numbers but not in Zambia
+// (a Paris position, a swapped latitude and longitude, a lost minus sign).
+const ZAMBIA_LAT = [-18.5, -8.0];
+const ZAMBIA_LON = [21.5, 34.0];
+
+// CE drops a row's coordinates unless both are valid, so the build keeps both or neither. A pair is
+// valid only inside Zambia's box.
 function coordinates(latRaw, lonRaw) {
   const lat = clean(latRaw), lon = clean(lonRaw);
   if (!lat && !lon) return { latitude: '', longitude: '', problem: null };
   const la = Number(lat), lo = Number(lon);
-  const ok = lat !== '' && lon !== '' && Number.isFinite(la) && Number.isFinite(lo) && la >= -90 && la <= 90 && lo >= -180 && lo <= 180;
-  return ok ? { latitude: lat, longitude: lon, problem: null }
-    : { latitude: '', longitude: '', problem: `coordinates "${lat}", "${lon}" are not a valid pair; both left out` };
+  const numeric = lat !== '' && lon !== '' && Number.isFinite(la) && Number.isFinite(lo) && la >= -90 && la <= 90 && lo >= -180 && lo <= 180;
+  if (!numeric) return { latitude: '', longitude: '', problem: `coordinates "${lat}", "${lon}" are not a valid pair; both left out` };
+  const inside = la >= ZAMBIA_LAT[0] && la <= ZAMBIA_LAT[1] && lo >= ZAMBIA_LON[0] && lo <= ZAMBIA_LON[1];
+  return inside ? { latitude: lat, longitude: lon, problem: null }
+    : { latitude: '', longitude: '', problem: `coordinates "${lat}", "${lon}" are outside Zambia (lat ${ZAMBIA_LAT[0]} to ${ZAMBIA_LAT[1]}, lon ${ZAMBIA_LON[0]} to ${ZAMBIA_LON[1]}); both left out` };
 }
 
 function writeJson(name, value) {
