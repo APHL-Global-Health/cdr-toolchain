@@ -7,6 +7,7 @@
 
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, hivvlCte } from '../zm-sql.mjs';
+import { queries } from '../queries/vl.mjs';
 
 // ---- Fixture builder ----
 
@@ -338,4 +339,306 @@ const suites = [
   },
 ];
 
-export const groups = [{ name: 't2', suites }];
+
+// ============================================================================================
+// Group t6: "VL dashboard summary" (v1 sp_dash_getHIVVL_v2, merging sp_dash_getHIVVL,
+// vSuppressionByFacility and vVLQuarterlyFacilitySuppressionRate). Fixture ids start with "t6-";
+// lab ids start with "T6-". "v1 line N" is a line of StoredProcedure__dbo_sp_dash_getHIVVL_v2.sql.
+//
+// The window is [from, to + 1 day] on the local date of the authorised date (v1 lines 21, 130: the
+// end date is moved one day forward and the filter is cast(TestedDate as date) between the two).
+// ============================================================================================
+
+// The 108 columns of the national branch (v1 lines 24-128), copied from the inventory
+// (zm-inv-all.json). The other branches list [AgeMissing] twice (lines 165-166 and so on); the port
+// keeps one.
+const DASH_COLUMNS = [
+  'Province', 'District', 'Facility', 'Tests', 'Tests_POC', 'Suppressed', 'Suppressed_POC', 'Unsuppressed',
+  'Undetectable', 'Undetectable_POC', 'SuppressionRate', 'SuppressionRate_POC', 'AverageTAT',
+  'AverageTAT_POC', 'TatWithin14', 'TatWithin48h_POC', 'Male', 'Female', 'IndeterminateGender',
+  'UnknownGender', 'MissingGender', 'lt01', '1to4', '5to9', '10to14', '15to19', '20to24', '25to29', '30to34',
+  '35to39', '40to44', '45to49', '50plus', 'AgeMissing', 'lt01m', '1to4m', '5to9m', '10to14m', '15to19m',
+  '20to24m', '25to29m', '30to34m', '35to39m', '40to44m', '45to49m', '50plusm', 'AgeMissingm', 'lt01f',
+  '1to4f', '5to9f', '10to14f', '15to19f', '20to24f', '25to29f', '30to34f', '35to39f', '40to44f', '45to49f',
+  '50plusf', 'AgeMissingf', 'lt01i', '1to4i', '5to9i', '10to14i', '15to19i', '20to24i', '25to29i', '30to34i',
+  '35to39i', '40to44i', '45to49i', '50plusi', 'AgeMissingi', 'lt01u', '1to4u', '5to9u', '10to14u', '15to19u',
+  '20to24u', '25to29u', '30to34u', '35to39u', '40to44u', '45to49u', '50plusu', 'AgeMissingu', 'lt01x',
+  '1to4x', '5to9x', '10to14x', '15to19x', '20to24x', '25to29x', '30to34x', '35to39x', '40to44x', '45to49x',
+  '50plusx', 'AgeMissingx', 'Pregnant', 'PregnantSup', 'BreastFeeding', 'BreastFeedingSup', 'BaselineVL',
+  'BaselineVLSup', 'NonBaselineTests', 'NonBaselineVLSuppressed', 'ThreeMPostUnSuppressed',
+];
+
+// ---- Fixture rows ----
+
+const P6 = [];
+const R6 = [];
+const D6 = [];
+const L6 = [];
+const F6 = [];
+let n6 = 0;
+const sql6 = (v) => (v === null || v === undefined ? 'null' : String(v));
+// One lab id: a request with one result and one report. `o`: req (facility code), sex (null: no patient),
+// age, num or text (the result), coll (collected), iss (authorised), perf (the testing code), form
+// (VIRAL answers), rtri (a second request on the RTRI panel), status.
+function lab6(labId, o) {
+  const k = String(++n6).padStart(2, '0');
+  const qid = `t6-q${k}`;
+  let pid = null;
+  if (o.sex !== null && o.sex !== undefined) {
+    pid = `t6-p${k}`;
+    P6.push(`(${lit(pid)}, ${lit('P' + k)}, ${lit(o.sex)})`);
+  }
+  R6.push(`(${lit(qid)}, ${lit(labId)}, ${lit(o.panel ?? 'HIVVL')}, '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(o.req)}, ${lit(pid)}, ${sql6(o.age)})`);
+  D6.push(`(${lit(`t6-d${k}`)}, ${lit(qid)}, ${lit(o.status ?? 'final')}, ${lit(o.coll)}, ${lit(o.iss)}, ${lit(o.perf ?? 'LUS')})`);
+  L6.push(`(${lit(`t6-r${k}`)}, ${lit(qid)}, 'HIVVL', ${lit(o.text ?? null)}, ${sql6(o.num)}, null)`);
+  if (o.form) {
+    const items = o.form.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    F6.push(`(${lit(`t6-f${k}`)}, 'q', 'hiv_vl_documentation', ${lit(qid)}, '2026-05-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  }
+  if (o.rtri) {
+    const rq = `t6-q${k}b`;
+    R6.push(`(${lit(rq)}, ${lit(labId)}, 'RTRI', '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(o.req)}, null, null)`);
+    L6.push(`(${lit(`t6-r${k}b`)}, ${lit(rq)}, 'RTRI', 'Recent', null, null)`);
+  }
+}
+
+const CHO = 'ZSOUT';   // Southern / Choma / Choma General Hospital
+const CL2 = 'ZCHO2';   // Southern / Choma / Choma Clinic
+const MAZ = 'ZMAZA';   // Southern / Mazabuka / Mazabuka Hospital
+const LUS = 'ZLUSA';   // Lusaka / Lusaka / Chilenje Clinic
+const MAY1 = '2026-05-01T07:00:00Z';
+
+// Choma General Hospital. The comment gives the hivvl row the builder makes (gender, age group, suppressed, ...).
+lab6('T6-L01', { req: CHO, sex: 'F', age: 30, num: 540, coll: MAY1, iss: '2026-05-10T10:00:00Z' });                    // Female 30-34, supp 1, uu 0, tat 9
+lab6('T6-L02', { req: CHO, sex: 'F', age: 28, text: 'Target Not Detected', coll: '2026-05-01T08:00:00Z', iss: '2026-05-11T10:00:00Z',
+  form: [['ARTPR', 'Yes']] });                                                                                         // Female 25-29, supp 1, uu 1, tat 10, pregnant
+lab6('T6-L03', { req: CHO, sex: 'M', age: 41, num: 1500, coll: '2026-05-09T08:10:00Z', iss: '2026-05-10T08:50:00Z', perf: '4567' }); // Male 40-44, supp 0, tat 1, POC, 24 hour boundaries
+lab6('T6-L04', { req: CHO, sex: 'F', age: 0, num: 100, coll: '2026-05-10T10:00:00Z', iss: '2026-05-12T10:00:00Z', perf: '4567',
+  form: [['ARTRS', 'Baseline VL']] });                                                                                 // Female <01, supp 1, uu 1, tat 2, POC, 48 hours, baseline
+lab6('T6-L05', { req: CHO, sex: 'U', age: 50, num: 3000, coll: MAY1, iss: '2026-05-16T10:00:00Z',
+  form: [['VISIT', '3 months post unsuppressed VL result'], ['VBREA', 'Y']] });                                         // Unknown 50+, supp 0, tat 15 (not within 14), 3 months, breastfeeding
+// Choma Clinic.
+lab6('T6-L06', { req: CL2, sex: 'I', age: 47, text: '<20 copies/mL', coll: MAY1, iss: '2026-05-06T10:00:00Z',
+  form: [['VBREA', 'Y']] });                                                                                           // Indeterminate 45-49, supp 1, uu 0, tat 5, breastfeeding
+lab6('T6-L07', { req: CL2, sex: 'X', age: 12, num: 250, coll: '2026-05-20T10:00:00Z', iss: '2026-05-22T10:00:00Z', perf: '12' });   // gender NULL 10-14, supp 1, uu 0, tat 2, POC, 48 hours
+lab6('T6-L08', { req: CL2, sex: 'F', age: null, num: 950, coll: MAY1, iss: '2026-05-04T10:00:00Z' });                  // Female, age group NULL, supp 1, tat 3
+lab6('T6-L09', { req: CL2, sex: null, age: null, num: 1000, coll: MAY1, iss: '2026-05-08T10:00:00Z',
+  form: [['ARTPR', 'Yes']] });                                                                                         // gender NULL, age group NULL, supp 0, tat 7, pregnant
+// Mazabuka Hospital: every test is a baseline test.
+lab6('T6-L10', { req: MAZ, sex: 'F', age: 22, num: 10, coll: MAY1, iss: '2026-05-05T10:00:00Z', rtri: true });        // Female 20-24, supp 1, uu 1, tat 4, baseline (RTRI request)
+lab6('T6-L11', { req: MAZ, sex: 'M', age: 33, num: 5000, coll: MAY1, iss: '2026-05-07T10:00:00Z',
+  form: [['ARTRS', 'BASE']] });                                                                                        // Male 30-34, supp 0, tat 6, baseline
+// Chilenje Clinic, with stamps that carry +02:00 near midnight.
+lab6('T6-L12', { req: LUS, sex: 'F', age: 25, num: 100, coll: '2026-05-31T23:30:00+02:00', iss: '2026-06-01T23:30:00+02:00', perf: '5551' }); // Female 25-29, supp 1, uu 1, tat 1, POC; local 06-01, the day after 05-31: in
+lab6('T6-L13', { req: LUS, sex: 'M', age: 60, num: 800, coll: '2026-06-01T10:00:00+02:00', iss: '2026-06-02T00:30:00+02:00' });  // Male 50+, local date 06-02 (UTC 06-01): out of a window ending 05-31
+lab6('T6-L14', { req: LUS, sex: 'F', age: 35, num: 500, coll: '2026-05-30T10:00:00Z', iss: '2026-06-02T10:00:00Z' });    // Female 35-39, date 06-02: out
+lab6('T6-L15', { req: LUS, sex: 'M', age: 18, num: 600, coll: '2026-04-29T10:00:00+02:00', iss: '2026-05-01T00:30:00+02:00' }); // Male 15-19, supp 1, tat 2; local 05-01 (UTC 04-30): in
+lab6('T6-L16', { req: LUS, sex: 'F', age: 40, num: 700, coll: '2026-04-28T10:00:00Z', iss: '2026-04-30T23:30:00Z' });    // date 04-30: out
+lab6('T6-L17', { req: LUS, sex: 'F', age: 29, num: 300, coll: '2026-05-12T10:00:00Z', iss: '2026-05-09T10:00:00Z' });   // Female 25-29, supp 1, tat -3
+lab6('T6-L18', { req: LUS, sex: 'M', age: 31, num: 300, coll: '2026-05-15T10:00:00Z', iss: '2026-05-10T10:00:00Z' });   // Male 30-34, supp 1, tat -5
+// Left out whatever the window: a facility that is not in the register, and a cancelled report.
+lab6('T6-UNMAPPED', { req: 'ZUNMP', sex: 'F', age: 30, num: 100, coll: MAY1, iss: '2026-05-10T10:00:00Z' });
+lab6('T6-CANC', { req: CHO, sex: 'F', age: 30, num: 100, coll: MAY1, iss: null, status: 'cancelled' });
+
+const SETUP6 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t6-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t6-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t6-fm3', '', '', 'ZMAZA', 'reg-m', 'Mazabuka Hospital', 'Southern', 'Mazabuka'),
+  ('t6-fm4', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t6-fm5', '', '', 'ZUNMP', null, null, null, null);
+insert into patients (id, surname, sex) values ${P6.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years) values ${R6.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values ${D6.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${L6.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${F6.join(',\n  ')};`;
+
+// ---- Expected rows, worked out by hand from v1 lines 24-128 ----
+
+// A row spec names only the columns that are not 0. Rates, averages and the 3-month sum default to NULL.
+const NULLABLE = new Set(['SuppressionRate', 'SuppressionRate_POC', 'AverageTAT', 'AverageTAT_POC', 'TatWithin14',
+  'TatWithin48h_POC', 'ThreeMPostUnSuppressed']);
+const dash = (spec) => Object.fromEntries(DASH_COLUMNS.map((c) => [c, c in spec ? spec[c] : (NULLABLE.has(c) ? null : 0)]));
+const allNull = (spec) => Object.fromEntries(DASH_COLUMNS.map((c) => [c, c in spec ? spec[c] : null]));
+
+// All of Zambia, 2026-05-01 to 2026-05-31 (so tested dates 05-01 to 06-01, line 21). 15 labs: L01 to L12,
+// L15, L17, L18 (L13 and L14 are on 06-02, L16 on 04-30).
+//   Tests 15; POC L03 L04 L07 L12 = 4; suppressed L01 L02 L04 L06 L07 L08 L10 L12 L15 L17 L18 = 11, of POC L04 L07 L12 = 3;
+//   undetectable L02 L04 L10 L12 = 4, of POC L04 L12 = 2; baseline L04 L10 L11 = 3, suppressed L04 L10 = 2.
+//   line 31: (11 - 2) / (15 - 3) = 0.75. line 32: POC suppressed (L03 0, L04 1, L07 1, L12 1 = 3) - 1 (L04) = 2, over (4 - 1) = 3.
+//   tat L01..: 9 10 1 2 15 5 2 3 7 4 6 1 2 -3 -5 = 59; 59 / 15 = 3.93, and AVG of an int column is an int: 3.
+//   POC tat 1 2 2 1 = 6 / 4 = 1.5 -> 1. Within 14 days: all but L05 = 14 / 15. POC within 24 hours: L03 and L12 = 2 / 4.
+const NATIONAL = {
+  Province: 'All', District: 'All', Facility: 'All', Tests: 15, Tests_POC: 4, Suppressed: 11, Suppressed_POC: 3,
+  Unsuppressed: 4, Undetectable: 4, Undetectable_POC: 2, SuppressionRate: 9 / 12, SuppressionRate_POC: 2 / 3,
+  AverageTAT: 3, AverageTAT_POC: 1, TatWithin14: 14 / 15, TatWithin48h_POC: 2 / 4,
+  Male: 4, Female: 7, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 2,
+  lt01: 1, '10to14': 1, '15to19': 1, '20to24': 1, '25to29': 3, '30to34': 3, '40to44': 1, '45to49': 1, '50plus': 1, AgeMissing: 2,
+  '15to19m': 1, '30to34m': 2, '40to44m': 1,
+  lt01f: 1, '20to24f': 1, '25to29f': 3, '30to34f': 1, AgeMissingf: 1,
+  '45to49i': 1, '50plusu': 1, '10to14x': 1, AgeMissingx: 1,
+  Pregnant: 2, PregnantSup: 1, BreastFeeding: 2, BreastFeedingSup: 1, BaselineVL: 3, BaselineVLSup: 2,
+  NonBaselineTests: 12, NonBaselineVLSuppressed: 9, ThreeMPostUnSuppressed: 1,
+};
+
+// Southern: L01 to L11 (11 labs). Suppressed 7 (L01 L02 L04 L06 L07 L08 L10), of POC (L03 L04 L07) 2; undetectable 3, of POC 1;
+// baseline 3, suppressed 2. line 31: (7 - 2) / (11 - 3) = 5/8. line 32: (2 - 1) / (3 - 1) = 1/2.
+// tat 9 10 1 2 15 5 2 3 7 4 6 = 64 / 11 = 5.8 -> 5; POC 1 2 2 = 5 / 3 -> 1. Within 14: 10 / 11. POC within 24 hours: L03 = 1 / 3.
+const SOUTHERN = {
+  Province: 'Southern', District: 'All', Facility: 'All', Tests: 11, Tests_POC: 3, Suppressed: 7, Suppressed_POC: 2,
+  Unsuppressed: 4, Undetectable: 3, Undetectable_POC: 1, SuppressionRate: 5 / 8, SuppressionRate_POC: 1 / 2,
+  AverageTAT: 5, AverageTAT_POC: 1, TatWithin14: 10 / 11, TatWithin48h_POC: 1 / 3,
+  Male: 2, Female: 5, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 2,
+  lt01: 1, '10to14': 1, '20to24': 1, '25to29': 1, '30to34': 2, '40to44': 1, '45to49': 1, '50plus': 1, AgeMissing: 2,
+  '30to34m': 1, '40to44m': 1,
+  lt01f: 1, '20to24f': 1, '25to29f': 1, '30to34f': 1, AgeMissingf: 1,
+  '45to49i': 1, '50plusu': 1, '10to14x': 1, AgeMissingx: 1,
+  Pregnant: 2, PregnantSup: 1, BreastFeeding: 2, BreastFeedingSup: 1, BaselineVL: 3, BaselineVLSup: 2,
+  NonBaselineTests: 8, NonBaselineVLSuppressed: 5, ThreeMPostUnSuppressed: 1,
+};
+
+// Southern / Choma: L01 to L09 (9 labs). Suppressed 6 (L01 L02 L04 L06 L07 L08), POC 2; undetectable 2, POC 1; baseline L04.
+// (6 - 1) / (9 - 1) = 5/8; (2 - 1) / (3 - 1) = 1/2. tat 54 / 9 = 6; POC 5 / 3 -> 1. Within 14: 8 / 9. POC within 24 hours: 1 / 3.
+const CHOMA = {
+  Province: 'Southern', District: 'Choma', Facility: 'All', Tests: 9, Tests_POC: 3, Suppressed: 6, Suppressed_POC: 2,
+  Unsuppressed: 3, Undetectable: 2, Undetectable_POC: 1, SuppressionRate: 5 / 8, SuppressionRate_POC: 1 / 2,
+  AverageTAT: 6, AverageTAT_POC: 1, TatWithin14: 8 / 9, TatWithin48h_POC: 1 / 3,
+  Male: 1, Female: 4, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 2,
+  lt01: 1, '10to14': 1, '25to29': 1, '30to34': 1, '40to44': 1, '45to49': 1, '50plus': 1, AgeMissing: 2,
+  '40to44m': 1,
+  lt01f: 1, '25to29f': 1, '30to34f': 1, AgeMissingf: 1,
+  '45to49i': 1, '50plusu': 1, '10to14x': 1, AgeMissingx: 1,
+  Pregnant: 2, PregnantSup: 1, BreastFeeding: 2, BreastFeedingSup: 1, BaselineVL: 1, BaselineVLSup: 1,
+  NonBaselineTests: 8, NonBaselineVLSuppressed: 5, ThreeMPostUnSuppressed: 1,
+};
+
+// Southern / Choma / Choma General Hospital: L01 to L05. Suppressed 3 (L01 L02 L04), POC 1; undetectable 2 (L02 L04), POC 1; baseline L04.
+// (3 - 1) / (5 - 1) = 1/2. POC: (1 - 1) / (2 - 1) = 0. tat 37 / 5 = 7.4 -> 7; POC 3 / 2 -> 1. Within 14: 4 / 5. POC within 24 hours: 1 / 2.
+const FACILITY = {
+  Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', Tests: 5, Tests_POC: 2, Suppressed: 3,
+  Suppressed_POC: 1, Unsuppressed: 2, Undetectable: 2, Undetectable_POC: 1, SuppressionRate: 2 / 4, SuppressionRate_POC: 0,
+  AverageTAT: 7, AverageTAT_POC: 1, TatWithin14: 4 / 5, TatWithin48h_POC: 1 / 2,
+  Male: 1, Female: 3, UnknownGender: 1,
+  lt01: 1, '25to29': 1, '30to34': 1, '40to44': 1, '50plus': 1,
+  '40to44m': 1, lt01f: 1, '25to29f': 1, '30to34f': 1, '50plusu': 1,
+  Pregnant: 1, PregnantSup: 1, BreastFeeding: 1, BreastFeedingSup: 0, BaselineVL: 1, BaselineVLSup: 1,
+  NonBaselineTests: 4, NonBaselineVLSuppressed: 2, ThreeMPostUnSuppressed: 1,
+};
+
+// Southern / Mazabuka: L10 and L11, both baseline. Line 31 divides by (2 - 2) = 0: v1 stops with an error. The port gives NULL
+// (spec ruling 2). No POC test: line 32 and line 36 divide by nullif(0, 0) = NULL, and the POC average has no rows.
+const MAZABUKA = {
+  Province: 'Southern', District: 'Mazabuka', Facility: 'All', Tests: 2, Tests_POC: 0, Suppressed: 1, Suppressed_POC: 0,
+  Unsuppressed: 1, Undetectable: 1, Undetectable_POC: 0, SuppressionRate: null, SuppressionRate_POC: null,
+  AverageTAT: 5, AverageTAT_POC: null, TatWithin14: 1, TatWithin48h_POC: null,
+  Male: 1, Female: 1, '20to24': 1, '30to34': 1, '30to34m': 1, '20to24f': 1,
+  BaselineVL: 2, BaselineVLSup: 1, NonBaselineTests: 0, NonBaselineVLSuppressed: 0, ThreeMPostUnSuppressed: null,
+};
+
+// Lusaka: L12, L15, L17, L18. All suppressed; L12 is POC and undetectable; no baseline. Rates are 4/4 and 1/1.
+// tat 1 2 -3 -5 = -5 / 4 = -1.25, and the int average truncates toward zero: -1. POC tat 1.
+const LUSAKA = {
+  Province: 'Lusaka', District: 'All', Facility: 'All', Tests: 4, Tests_POC: 1, Suppressed: 4, Suppressed_POC: 1,
+  Unsuppressed: 0, Undetectable: 1, Undetectable_POC: 1, SuppressionRate: 1, SuppressionRate_POC: 1,
+  AverageTAT: -1, AverageTAT_POC: 1, TatWithin14: 1, TatWithin48h_POC: 1,
+  Male: 2, Female: 2, '15to19': 1, '25to29': 2, '30to34': 1, '15to19m': 1, '30to34m': 1, '25to29f': 2,
+  NonBaselineTests: 4, NonBaselineVLSuppressed: 4,
+};
+
+// Windows that end on the 31st or the 1st of June (L12 is on local 06-01; L13 and L14 on 06-02).
+const DAY_0531 = {
+  Province: 'All', District: 'All', Facility: 'All', Tests: 1, Tests_POC: 1, Suppressed: 1, Suppressed_POC: 1,
+  Unsuppressed: 0, Undetectable: 1, Undetectable_POC: 1, SuppressionRate: 1, SuppressionRate_POC: 1,
+  AverageTAT: 1, AverageTAT_POC: 1, TatWithin14: 1, TatWithin48h_POC: 1,
+  Female: 1, '25to29': 1, '25to29f': 1, NonBaselineTests: 1, NonBaselineVLSuppressed: 1,
+};
+// L12, L13, L14: all suppressed, tat 1 1 3 = 5 / 3 -> 1; POC is L12 only.
+const DAY_0601 = {
+  Province: 'All', District: 'All', Facility: 'All', Tests: 3, Tests_POC: 1, Suppressed: 3, Suppressed_POC: 1,
+  Unsuppressed: 0, Undetectable: 1, Undetectable_POC: 1, SuppressionRate: 1, SuppressionRate_POC: 1,
+  AverageTAT: 1, AverageTAT_POC: 1, TatWithin14: 1, TatWithin48h_POC: 1,
+  Male: 1, Female: 2, '25to29': 1, '35to39': 1, '50plus': 1, '25to29f': 1, '35to39f': 1, '50plusm': 1,
+  NonBaselineTests: 3, NonBaselineVLSuppressed: 3,
+};
+
+// Nothing in the window: the national branch still returns its one row (lines 24-130). count() is 0 and every sum is NULL.
+const EMPTY_NATIONAL = { Province: 'All', District: 'All', Facility: 'All', Tests: 0 };
+// The facility branch with no rows returns the all-zero row with blank names (lines 587-693).
+const NOT_FOUND = Object.fromEntries(DASH_COLUMNS.map((c) => [c, ['Province', 'District', 'Facility'].includes(c) ? '' : 0]));
+
+// ---- Suites ----
+
+const dashQuery = queries().find((q) => q.name === 'VL dashboard summary');
+const win = { from: '2026-05-01', to: '2026-05-31' };
+const area = (province, district, facility) => ({ province, district, facility });
+const noArea = area('', '', '');
+
+function dashSuite(name, params, expectedRows, setup = '') {
+  const key = (r) => JSON.stringify(DASH_COLUMNS.map((c) => r[c] ?? null));
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${bind(dashQuery.sql, params)}) q;`,
+    count: expectedRows.length + 1,
+    check(got) {
+      const failures = [];
+      if (got.length !== expectedRows.length) failures.push(`expected ${expectedRows.length} rows, got ${got.length}`);
+      if (got[0]) {
+        failures.push(...inOrder(Object.keys(got[0]), DASH_COLUMNS));
+        if (Object.keys(got[0]).length !== DASH_COLUMNS.length) failures.push(`expected ${DASH_COLUMNS.length} columns, got ${Object.keys(got[0]).length}`);
+      }
+      const have = got.map(key).sort();
+      const want = expectedRows.map(key).sort();
+      for (const w of want) if (!have.includes(w)) failures.push(`missing row ${w}`);
+      for (const g of have) if (!want.includes(g)) failures.push(`unexpected row ${g}`);
+      return failures;
+    },
+  };
+}
+
+const suites6 = [
+  // The four branches (v1 lines 22, 132, 246, 360).
+  dashSuite('dash-national', { ...noArea, ...win }, [dash(NATIONAL)], SETUP6),
+  dashSuite('dash-province', { ...area('Southern', '', ''), ...win }, [dash(SOUTHERN)]),
+  dashSuite('dash-district', { ...area('Southern', 'Choma', ''), ...win }, [dash(CHOMA)]),
+  dashSuite('dash-facility', { ...area('Southern', 'Choma', 'Choma General Hospital'), ...win }, [dash(FACILITY)]),
+  // Names compare as SQL Server does (case and trailing spaces ignored); the row shows the stored names.
+  dashSuite('dash-names-fold', { ...area('SOUTHERN', 'choma', 'choma general hospital  '), ...win }, [dash(FACILITY)]),
+  dashSuite('dash-lusaka', { ...area('Lusaka', '', ''), ...win }, [dash(LUSAKA)]),
+  dashSuite('dash-lusaka-district', { ...area('Lusaka', 'Lusaka', ''), ...win }, [dash({ ...LUSAKA, District: 'Lusaka' })]),
+  dashSuite('dash-lusaka-facility', { ...area('Lusaka', 'Lusaka', 'Chilenje Clinic'), ...win }, [dash({ ...LUSAKA, District: 'Lusaka', Facility: 'Chilenje Clinic' })]),
+  // Every test is baseline: v1 divides by zero; the port gives NULL.
+  dashSuite('dash-all-baseline', { ...area('Southern', 'Mazabuka', ''), ...win }, [dash(MAZABUKA)]),
+  // Nothing found. National still returns its row; province and district return none; facility returns the zero row.
+  dashSuite('dash-empty-national', { ...noArea, from: '2026-01-01', to: '2026-01-31' }, [allNull(EMPTY_NATIONAL)]),
+  dashSuite('dash-empty-province', { ...area('Western', '', ''), ...win }, []),
+  dashSuite('dash-empty-district', { ...area('Southern', 'Kafue', ''), ...win }, []),
+  dashSuite('dash-empty-facility', { ...area('Southern', 'Choma', 'Nowhere'), ...win }, [NOT_FOUND]),
+  dashSuite('dash-empty-facility-window', { ...area('Southern', 'Choma', 'Choma General Hospital'), from: '2026-01-01', to: '2026-01-31' }, [NOT_FOUND]),
+  // A facility in another district does not match (v1 line 471 tests all three).
+  dashSuite('dash-facility-wrong-district', { ...area('Southern', 'Mazabuka', 'Choma General Hospital'), ...win }, [NOT_FOUND]),
+  // v1 has no branch for these (lines 22, 132, 246, 360): no result set at all.
+  dashSuite('dash-district-only', { ...area('', 'Choma', ''), ...win }, []),
+  dashSuite('dash-facility-only', { ...area('', '', 'Choma General Hospital'), ...win }, []),
+  dashSuite('dash-province-facility', { ...area('Southern', '', 'Choma General Hospital'), ...win }, []),
+  dashSuite('dash-district-facility', { ...area('', 'Choma', 'Choma General Hospital'), ...win }, []),
+  // The window: the day after the end date is included (line 21), and the date is the local date of the stamp.
+  dashSuite('dash-window-end-0531', { ...noArea, from: '2026-05-31', to: '2026-05-31' }, [dash(DAY_0531)]),
+  dashSuite('dash-window-end-0601', { ...noArea, from: '2026-06-01', to: '2026-06-01' }, [dash(DAY_0601)]),
+  {
+    name: 'dash-shape',
+    count: 6,
+    check() {
+      const bad = [];
+      const ids = dashQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['province', 'district', 'facility', 'from', 'to'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(dashQuery.params.map((p) => [p.id, p]));
+      if (byId.province.type !== 'select' || byId.district.type !== 'select' || byId.facility.type !== 'text') bad.push('area parameter types');
+      if (byId.province.required || byId.district.required || byId.facility.required) bad.push('area parameters are optional');
+      if (!byId.from.required || !byId.to.required) bad.push('from and to are required (ruling 3)');
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(dashQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }];

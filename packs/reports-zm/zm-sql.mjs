@@ -18,8 +18,13 @@ export const sqlList = (values) => values.map(sqlLit).join(', ');
 // A window on a date column: `left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
 // characters of the stamp's own text (YYYY-MM-DD), so it is the LOCAL date: '2026-05-31T23:30:00+02:00' and
 // '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside. The parameters are YYYY-MM-DD.
-export const inRange = (expr, fromParam = 'from', toParam = 'to') =>
-  `left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= {{param.${toParam}}}`;
+// `extraDays` moves the end of the window later by that many days, for the v1 reports that add a day to
+// their end date (the dashboard procedures run @EDate = dateadd(dd, 1, @EDate)). It is 0 for every other caller.
+export function inRange(expr, fromParam = 'from', toParam = 'to', extraDays = 0) {
+  if (!Number.isInteger(extraDays) || extraDays < 0) throw new Error('inRange: extraDays must be a whole number, 0 or more');
+  const end = extraDays === 0 ? `{{param.${toParam}}}` : `to_char(({{param.${toParam}}})::date + ${extraDays}, 'YYYY-MM-DD')`;
+  return `left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= ${end}`;
+}
 
 // ---- Parameters ----
 
@@ -214,13 +219,14 @@ export const copyAgeGroupSql = (yearsExpr) => {
 // The `from`/`to` window of a builder: `prefilter` goes in the source CTE (it keeps every row of the
 // lab ids that have a report issued in the window, so the dedupe sees them all) and `finalRange` goes
 // after the dedupe. Both are '' without a window. Giving only one of the two throws. `finalDate` is the
-// date column `finalRange` tests (a builder with no dedupe passes its own source column).
-export function copyWindow(who, from, to, finalDate = 'r.tested_date') {
+// date column `finalRange` tests (a builder with no dedupe passes its own source column). `extraDays` moves
+// the end of both windows later (see inRange).
+export function copyWindow(who, from, to, finalDate = 'r.tested_date', extraDays = 0) {
   if ((from === undefined) !== (to === undefined)) throw new Error(`${who}: give both from and to, or neither`);
   if (from === undefined) return { prefilter: '', finalRange: '' };
   return {
-    prefilter: `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`,
-    finalRange: `and ${inRange(finalDate, from, to)}`,
+    prefilter: `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to, extraDays)})`,
+    finalRange: `and ${inRange(finalDate, from, to, extraDays)}`,
   };
 }
 
@@ -299,6 +305,8 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //   hivvlCte('hv')                              all rows
 //   hivvlCte('hv', { from: 'from', to: 'to' })  only rows whose tested_date is in the window; the two
 //                                               values are parameter names, compared as in inRange
+//   hivvlCte('hv', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many
+//                                               days (sp_dash_getHIVVL_v2 reads up to the day after its end date)
 // v1 fills the table with sp_update_HIVVLTable (a MERGE that also deletes rows missing from its source)
 // and then sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
 //
@@ -352,8 +360,8 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //     reported text, so v1's coded-value test (LIMSCodedValue = 'BASE', line 22) is covered by the text
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
-export function hivvlCte(name, { from, to } = {}) {
-  const { prefilter, finalRange } = copyWindow('hivvlCte', from, to);
+export function hivvlCte(name, { from, to, extraDays = 0 } = {}) {
+  const { prefilter, finalRange } = copyWindow('hivvlCte', from, to, 'r.tested_date', extraDays);
   const result = rpt('l');
   return `${name} as (
   with ${name}_src as (
