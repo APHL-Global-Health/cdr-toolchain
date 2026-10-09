@@ -2,7 +2,7 @@
 
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
+  hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
   requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
 } from '../zm-sql.mjs';
 
@@ -841,6 +841,280 @@ export const vlTestingSummaryParams = (level) => ({
   facility: () => [requiredDistrict(), ...dateParams(true)],
 })[level]();
 
+// ---- Unique VL clients, Unique VL clients by facility (12 months) ------------------------------------------------------
+//
+// "Unique VL clients" replaces sp_getUniqueVLClientsInfo ("I", the target) and folds in two v1 objects:
+//   sp_getUniqueVLClientsInfoList  ("L") the same counts as one row per sub-area. It has the same 72 column names as I, so it is
+//                                  the `rows` parameter below ("One row per sub-area"), not a second query.
+//   sp_getUniqueVLClientsInfo_bkup an exact copy of I (a diff of the two files shows the procedure name on line 6 only). Nothing to port.
+// "Unique VL clients by facility (12 months)" replaces sp_getUniqueVLClientsLast12Months_SPHO_WPHO ("S"). It has other column names
+// (Suppressed, UnSuppressed) and no age or sex columns, so it is its own query (the controller's rule: one query per output shape).
+//
+// Both read v1's TND copy table (tndCte) joined to the hivvl copy table (hivvlCte, labsInWindow) by lab number. Each client's newest
+// result in the window counts. A client is the first name, surname and ART number at one facility (the same person at two facilities
+// counts twice).
+//
+// Columns of "Unique VL clients" (v1 names and order): Province, District, Facility, Clients, SuppressedC, UnsuppressedC, UndetectableC,
+// then 65 columns, each <band><sex>: the bands lt01, 1to4, 5to9, 10to14, 15to19, 20to24, 25to29, 30to34, 35to39, 40to44, 45to49,
+// 50plus, AgeMissing; the sexes m, f, i, u, x (x = blank sex). Columns of S: Province, District, Facility, Clients, Suppressed,
+// UnSuppressed.
+//
+// Parameters of "Unique VL clients": province and district (optional selects), facility (optional text, matched on the register name),
+// from and to (required, ruling 3), rows (optional select: "Totals", the default, or "One row per sub-area").
+//
+// Which row, and how clients are ranked, depends on `rows` and on which of province, district and facility are given. The fold of a name
+// ignores case and trailing spaces, as SQL Server does.
+//   Totals (I lines 21, 107, 191, 277):
+//     none given                       1  'All', 'All', 'All'        I line 21.  Always a row, even with no client (sums over no row are NULL).
+//     province                         2  <Province>, 'All', 'All'   I line 107. Names rank first.
+//     province, district               3  <Province>, <District>, 'All'          I line 191. Names rank first.
+//     province, district, facility     4  <Province>, <District>, <Facility>     I line 277. Ranked by ART number only (line 282).
+//   One row per sub-area (L lines 20, 104, 186):
+//     none given                       5  one row per province  (<Province>, 'All', 'All').  Names rank first (L line 23).
+//     province                         6  one row per district  (<Province>, <District>, 'All').  Ranked by ART number only (L line 107).
+//     province, district               7  one row per facility.  Ranked by ART number only (L line 189).
+//   Each branch needs a TND row for the area in the window (I lines 21, 107, 191, 278; L lines 20, 104, 186). Without one, or for any other
+//   combination of parameters (a district alone, a facility without a district), v1 answers the all-zero row with blank names (I lines
+//   365-430). With a TND row but no client left after the hivvl join, branch 1 answers one row of NULL sums and the grouped branches no row.
+//   L has no facility parameter: with rows = sub-area a facility is ignored.
+//
+// Rules shared by every branch:
+//   - Window (I lines 27, 113, 197, 285): cast(ResultDate as datetime) between two DATES, so from 00:00:00 up to and including to 00:00:00,
+//     local wall time. A result later on the end day is out; a one-day window holds only results at exactly midnight. Spec ruling 1: kept.
+//   - Baseline labs are left out BEFORE the ranking: the join to hivvl has "BaseLineVL = 0 or null" (lines 26, 112, 196, 284), so the rank is
+//     among the client's non-baseline results in the window. A lab with no hivvl row (an RTRI-only lab, a result such as '<883 copies/mL'
+//     that is not a valid hivvl result) is dropped by the join.
+//   - Ranking is rank(), not row_number(): results of one client at the same time all rank 1 and all count.
+//   - Names rank, partition and compare as SQL Server compares text (fold). Where the order of first name and surname picks the client
+//     (branches 4, 6, 7), the order is ssTextKey; a hyphen or apostrophe in a name that SQL Server uses only to break a tie is ignored.
+//   - A group's names are shown as stored (the smallest spelling in byte order, as v1 shows either).
+//
+// Counts for I (branches 1-4), over the ranked rows (rank 1):
+//   Clients       the rows whose result is a number (ISNUMERIC) or one of 15 texts (I line 29). A result such as 'PTLTT' is not counted.
+//   SuppressedC   the rows that are Clients and TND.Suppressed = 1.
+//   UnsuppressedC Clients - SuppressedC.
+//   UndetectableC the rows that are Clients and TND.UU = 1.
+//   <band><sex>   every ranked row, whatever its result (lines 33-97): the sex-by-age columns can add up to more than Clients.
+// Counts for L (branches 5-7): Clients = count(*), SuppressedC = sum(Suppressed), UnsuppressedC = count(*) - sum(Suppressed),
+// UndetectableC = sum(UU), with no test on the result text (L line 29): the two procedures give different Clients for one scope when a
+// client's newest result is a text outside the 15.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Branch 3's UndetectableC list has 14 texts: it lacks '<883 copies/mL' (I line 202). A client whose newest result is '<883 copies/mL'
+//     with a number under 200 is undetectable in branches 1, 2, 4 and not in 3.
+//   - Branch 4 (and L's 6 and 7) ranks by ART number only. Two people with one ART number at a facility are one client: the one whose
+//     first name (then surname) sorts first; all other branches count both. The partition of branches 1, 2, 3 and 5 includes first name and
+//     surname; ties on a name rank together (a person with equal names and time ranks 1 twice).
+//   - A client with no patient row, or a blank first name, has empty names: all such clients of a facility with one ART number are one person.
+//   - The exists test is on TND alone (not on hivvl or baseline), and in the window of ResultDate.
+//   - Branch 1 and branch 5 leave out a facility whose register row has no province (I line 102, L line 99); the other branches match a
+//     province by name.
+//   - Negative ages, and sex codes other than M, F, I, U and blank, fall in no sex-by-age column (but count in Clients).
+//   - The sums of an empty branch 1 are NULL, not 0 (Clients, SuppressedC, UnsuppressedC, UndetectableC and all 65 columns).
+//
+// CE gaps (spec ruling 7) and CE choices:
+//   - A NULL patients.sex counts as blank (the `x` columns): v1 holds '' for a blank sex code, and a NULL cannot be told apart in CE.
+//     A NULL first name or surname is read as ''. A request with no patient row keeps its result (slice 1's left join); v1 inner-joins Patients.
+//   - HOSPID is not sent, so the ART number is artNumberSql's with HOSPID read as blank. The register name is the facility, province and
+//     district name (a facility not in the register drops out, as in v1's dictionary joins).
+//   - The hivvl row is found by lab number, compared ignoring case and trailing spaces; hivvlCte keeps one row per lab number.
+//   - v1's TND holds only results authorised from 2017-01-01 to the day the table was filled; the port has no floor or ceiling.
+//   - v1 varchar parameters (Province 20, District 40, Facility 40) cut a longer name, which then matches nothing; the port compares the
+//     whole name.
+//
+// Deviations (spec ruling 2): none for "Unique VL clients"; `from` and `to` are required (v1 defaults them to the previous month).
+const UNIQUE_OK_TEXTS = ['<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml', '<30 copies/mL',
+  '<40 copies/mL', 'NDET', 'ND', '<20CP', '< 40', '<400 copies/mL', '<883 copies/mL'];
+const UNIQUE_OK_UU_DISTRICT_TEXTS = UNIQUE_OK_TEXTS.filter((t) => t !== '<883 copies/mL');
+const UNIQUE_BANDS = [
+  ['lt01', (a) => `${a} = 0`], ['1to4', (a) => `${a} between 1 and 4`], ['5to9', (a) => `${a} between 5 and 9`],
+  ['10to14', (a) => `${a} between 10 and 14`], ['15to19', (a) => `${a} between 15 and 19`], ['20to24', (a) => `${a} between 20 and 24`],
+  ['25to29', (a) => `${a} between 25 and 29`], ['30to34', (a) => `${a} between 30 and 34`], ['35to39', (a) => `${a} between 35 and 39`],
+  ['40to44', (a) => `${a} between 40 and 44`], ['45to49', (a) => `${a} between 45 and 49`], ['50plus', (a) => `${a} >= 50`],
+  ['AgeMissing', (a) => `${a} is null`],
+];
+const UNIQUE_SEXES = ['m', 'f', 'i', 'u', 'x'];
+
+// The window of TND on its ResultDate (a datetime) against two dates: from 00:00:00 up to and including to 00:00:00, local wall time.
+const midnightWindow = (ts) => `${ts} >= ({{param.from}})::date::timestamp and ${ts} <= ({{param.to}})::date::timestamp`;
+
+// The shared head of both queries. `w` holds TND rows of the window whose lab number has a hivvl row, with the lower-cased keys v1's
+// text comparison ignores (case, trailing spaces) and `not_baseline` (hivvl.BaseLineVL = 0 or null). `wWhere` is the condition on w.
+function uniqueClientsHead(wWhere) {
+  const key = (x) => `lower(rtrim(${x}))`;
+  return `${tndCte('tnd')},
+tw as (
+  select * from (select t.*, ${localTs('t.result_date')} as result_ts from tnd t) t
+  where ${midnightWindow('t.result_ts')}
+),
+${hivvlCte('hv', { from: 'from', to: 'to', labsInWindow: true })},
+hvk as (
+  select ${key('h.lab_id')} as lab_key, bool_or(h.baseline_vl = 0 or h.baseline_vl is null) as not_baseline
+  from hv h
+  group by ${key('h.lab_id')}
+),
+w as (
+  select t.province, t.district, t.facility, t.art_number, t.firstname, t.surname, t.result, t.age_years, t.sex,
+    t.suppressed_flag, t.uu_flag, t.result_ts, k.not_baseline,
+    ${key('t.province')} as k_province, ${key('t.district')} as k_district, ${key('t.facility')} as k_facility,
+    ${key('t.art_number')} as k_art, ${key("coalesce(t.firstname, '')")} as k_first, ${key("coalesce(t.surname, '')")} as k_last
+  from tw t
+  join hvk k on k.lab_key = ${key('t.lab_id')}
+  where ${wWhere}
+)`;
+}
+
+export function uniqueClientsSql() {
+  const eq = (column, id) => `${foldSql(column)} = ${foldSql(`{{param.${id}}}`)}`;
+  const ok = (list) => `(${isNumericSql('r.result')} or ${inListSql('r.result', list)})`;
+  const sub = `${foldSql('{{param.rows}}')} = 'one row per sub-area'`;
+  const age = 'r.age_years';
+  const band = `case ${UNIQUE_BANDS.map(([name, test]) => `when ${test(age)} then '${name}'`).join(' ')} end`;
+  const sexClass = `case upper(rtrim(r.sex)) when 'M' then 'm' when 'F' then 'f' when 'I' then 'i' when 'U' then 'u' else case when coalesce(rtrim(r.sex), '') = '' then 'x' end end`;
+  const live = 'filter (where p.live = 1)';
+  const cells = UNIQUE_SEXES.flatMap((s) => UNIQUE_BANDS.map(([name]) => `sum(case when p.band = '${name}' and p.sex_class = '${s}' then 1 else 0 end) ${live} as "${name}${s}"`));
+  // A TND row for the area in the window decides the branch (the exists tests of v1).
+  const hasTnd = (...conds) => `exists (select 1 from tw${conds.length > 0 ? ` where ${conds.join(' and ')}` : ''})`;
+  const inProvince = eq('tw.province', 'province');
+  const inDistrict = eq('tw.district', 'district');
+  const inFacility = eq('tw.facility', 'facility');
+  return `with ${uniqueClientsHead('k.not_baseline')},
+ranked as (
+  select w.*,
+    rank() over (partition by w.k_province, w.k_district, w.k_facility, w.k_art, w.k_first, w.k_last order by w.result_ts desc) as rk_names,
+    rank() over (partition by w.k_province, w.k_district, w.k_facility, w.k_art
+      order by ${ssTextKey("coalesce(w.firstname, '')")} collate "C", ${ssTextKey("coalesce(w.surname, '')")} collate "C", w.result_ts desc) as rk_art
+  from w
+),
+scope as (
+  select case
+    when ${sub} then case
+      when ${blank('province')} and ${blank('district')} and ${hasTnd()} then 5
+      when ${given('province')} and ${blank('district')} and ${hasTnd(inProvince)} then 6
+      when ${given('province')} and ${given('district')} and ${hasTnd(inProvince, inDistrict)} then 7
+      else 0 end
+    else case
+      when ${blank('province')} and ${blank('district')} and ${blank('facility')} and ${hasTnd()} then 1
+      when ${given('province')} and ${blank('district')} and ${blank('facility')} and ${hasTnd(inProvince)} then 2
+      when ${given('province')} and ${given('district')} and ${blank('facility')} and ${hasTnd(inProvince, inDistrict)} then 3
+      when ${given('province')} and ${given('district')} and ${given('facility')} and ${hasTnd(inProvince, inDistrict, inFacility)} then 4
+      else 0 end
+    end as branch
+),
+pick as (
+  select case s.branch when 1 then 'All' else r.province end as l_province,
+    case when s.branch in (3, 4, 6, 7) then r.district else 'All' end as l_district,
+    case when s.branch in (4, 7) then r.facility else 'All' end as l_facility,
+    case when s.branch in (5, 6, 7) then 1 when ${ok(UNIQUE_OK_TEXTS)} then 1 else 0 end as c,
+    case when s.branch in (5, 6, 7) then r.suppressed_flag when r.suppressed_flag = 1 and ${ok(UNIQUE_OK_TEXTS)} then 1 else 0 end as s_flag,
+    case when s.branch in (5, 6, 7) then r.uu_flag
+      when r.uu_flag = 1 and (case when s.branch = 3 then ${ok(UNIQUE_OK_UU_DISTRICT_TEXTS)} else ${ok(UNIQUE_OK_TEXTS)} end) then 1 else 0 end as u_flag,
+    ${band} as band, ${sexClass} as sex_class, 1 as live
+  from ranked r
+  cross join scope s
+  where case s.branch
+    when 1 then r.rk_names = 1 and r.province is not null
+    when 2 then r.rk_names = 1 and ${eq('r.province', 'province')}
+    when 3 then r.rk_names = 1 and ${eq('r.province', 'province')} and ${eq('r.district', 'district')}
+    when 4 then r.rk_art = 1 and ${eq('r.province', 'province')} and ${eq('r.district', 'district')} and ${eq('r.facility', 'facility')}
+    when 5 then r.rk_names = 1 and r.province is not null
+    when 6 then r.rk_art = 1 and ${eq('r.province', 'province')}
+    when 7 then r.rk_art = 1 and ${eq('r.province', 'province')} and ${eq('r.district', 'district')}
+    else false end
+  union all
+  select 'All', 'All', 'All', null::int, null::int, null::int, null::text, null::text, null::int
+  from scope s where s.branch = 1
+  union all
+  select '', '', '', 0, 0, 0, null::text, null::text, 1
+  from scope s where s.branch = 0
+)
+select g.*
+from (
+  select min(p.l_province collate "C") as "Province", min(p.l_district collate "C") as "District", min(p.l_facility collate "C") as "Facility",
+    sum(p.c) ${live} as "Clients",
+    sum(p.s_flag) ${live} as "SuppressedC",
+    sum(p.c) ${live} - sum(p.s_flag) ${live} as "UnsuppressedC",
+    sum(p.u_flag) ${live} as "UndetectableC",
+    ${cells.join(',\n    ')}
+  from pick p
+  group by lower(rtrim(p.l_province)), lower(rtrim(p.l_district)), lower(rtrim(p.l_facility))
+) g
+order by ${ssTextKey('g."Province"')} collate "C" nulls first, ${ssTextKey('g."District"')} collate "C" nulls first,
+  ${ssTextKey('g."Facility"')} collate "C" nulls first,
+  g."Province" collate "C" nulls first, g."District" collate "C" nulls first, g."Facility" collate "C" nulls first`;
+}
+
+const uniqueRowsParam = () => ({
+  id: 'rows', label: 'Rows (blank for totals)', type: 'select', required: false,
+  optionsSql: "select 'Totals' as choice union all select 'One row per sub-area'",
+});
+
+export const uniqueClientsParams = () => [
+  provinceParam('province', false),
+  districtParam('district', false),
+  facilityParam(),
+  ...dateParams(true),
+  uniqueRowsParam(),
+];
+
+// ---- Unique VL clients by facility (12 months) ----
+//
+// Replaces sp_getUniqueVLClientsLast12Months_SPHO_WPHO ("S"). One row per facility of the provinces asked, with the unique clients
+// (Clients), how many are suppressed (Suppressed) and the rest (UnSuppressed). Columns as v1: Province, District, Facility, Clients,
+// Suppressed, UnSuppressed. Order: province, district, facility (S line 121), comparing as SQL Server does.
+//
+// The three things v1 fixes become parameters (ruling 3 and the inventory): the 12-month window is `from` and `to` (v1: the 12 full months
+// before the current one); the province pair 'Southern' and 'Western' (S line 120) is the default of `province`, a blank province, and a
+// province given replaces the pair. The query keeps its v1 name, whatever window is asked.
+//
+// Rules (S lines 10-17 and 87-95):
+//   - x ranks every TND row of a lab that has a hivvl row, baseline or not, per client (province, district, facility, ART number, first
+//     name, surname; newest result first; rank(), so equal times all rank 1). ART number must have a length (line 16).
+//   - The baseline lab is dropped AFTER the ranking (line 93, rank 1 only): a client whose newest result is a baseline test leaves the
+//     report entirely, where "Unique VL clients" falls back to the client's newest non-baseline result.
+//   - Clients = count of the rank 1 rows, Suppressed = their TND.Suppressed, UnSuppressed = Clients - Suppressed. There is no test on the
+//     result text (unlike I), so a text outside the 15 counts as a client.
+//   - Window: ResultDate against two dates, up to and including `to` 00:00:00 (line 15), as "Unique VL clients".
+//   - A facility whose register row has no province drops out (line 92).
+//
+// Deviations (spec ruling 2):
+//   - v1 cannot run as dumped. Its select at line 93 names BaselineVL without a qualifier, and both x (TND.BaselineVL, Table__dbo_TND.sql
+//     line 20) and the second hivvl join h (HIVVL.BaseLineVL, Table__dbo_HIVVL.sql line 19) have the column. The same shape (a CTE of t.*
+//     joined to a table with that column, one unqualified name) was run on the local SQL Server and stops with "Ambiguous column name"
+//     (Msg 209). The port reads the hivvl flag (h.BaseLineVL): it is the reason the procedure joins hivvl a second time, and the other
+//     unique-client procedures use it. If Zambia's live TND lacks the column, v1 runs and reads the same flag.
+//   - `from` and `to` replace the current-month arithmetic; `province` replaces the constant pair.
+//
+// Kept v1 quirks (ruling 1): the baseline test after the ranking, as above; the hivvl join of x with no baseline test; the end date
+// at 00:00:00; names compared as SQL Server compares text, groups shown as stored (the smallest spelling in byte order).
+//
+// CE gaps (spec ruling 7): as "Unique VL clients" (HOSPID, NULL names read as blank, the lab number join, no TND floor or ceiling).
+export function uniqueClientsFacilitySql() {
+  const key = (x) => `lower(rtrim(${x}))`;
+  const provinceTest = `case when {{param.province}} = '' then ${inListSql('x.province', ['Southern', 'Western'])} else ${foldSql('x.province')} = ${foldSql('{{param.province}}')} end`;
+  return `with ${uniqueClientsHead('length(rtrim(t.art_number)) > 0')},
+x as (
+  select w.*, rank() over (partition by w.k_province, w.k_district, w.k_facility, w.k_art, w.k_first, w.k_last order by w.result_ts desc) as rk
+  from w
+)
+select g.*
+from (
+  select min(x.province collate "C") as "Province", min(x.district collate "C") as "District", min(x.facility collate "C") as "Facility",
+    count(*) as "Clients", sum(x.suppressed_flag) as "Suppressed", count(*) - sum(x.suppressed_flag) as "UnSuppressed"
+  from x
+  where x.rk = 1 and x.province is not null and x.not_baseline and ${provinceTest}
+  group by ${key('x.province')}, ${key('x.district')}, ${key('x.facility')}
+) g
+order by ${ssTextKey('g."Province"')} collate "C" nulls first, ${ssTextKey('g."District"')} collate "C" nulls first,
+  ${ssTextKey('g."Facility"')} collate "C" nulls first,
+  g."Province" collate "C" nulls first, g."District" collate "C" nulls first, g."Facility" collate "C" nulls first`;
+}
+
+export const uniqueClientsFacilityParams = () => [
+  ...dateParams(true),
+  { ...provinceParam('province', false), label: 'Province (blank for Southern and Western)' },
+];
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
@@ -853,5 +1127,7 @@ export function queries() {
     { name: 'VL testing summary by province', sql: vlTestingSummarySql('province'), params: vlTestingSummaryParams('province') },
     { name: 'VL testing summary by district', sql: vlTestingSummarySql('district'), params: vlTestingSummaryParams('district') },
     { name: 'VL testing summary by facility', sql: vlTestingSummarySql('facility'), params: vlTestingSummaryParams('facility') },
+    { name: 'Unique VL clients', sql: uniqueClientsSql(), params: uniqueClientsParams() },
+    { name: 'Unique VL clients by facility (12 months)', sql: uniqueClientsFacilitySql(), params: uniqueClientsFacilityParams() },
   ];
 }

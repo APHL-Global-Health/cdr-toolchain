@@ -657,6 +657,10 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //                                               values are parameter names, compared as in inRange
 //   hivvlCte('hv', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many
 //                                               days (sp_dash_getHIVVL_v2 reads up to the day after its end date)
+//   hivvlCte('hv', { from, to, labsInWindow: true })  one row for every lab id that has a report in the window, whatever
+//                                               the kept row's tested_date (for a report that joins the table by lab id,
+//                                               as sp_getUniqueVLClientsInfo does; a lab whose earliest row is before the
+//                                               window still has its row, as in v1's full table)
 // v1 fills the table with sp_update_HIVVLTable (a MERGE that also deletes rows missing from its source)
 // and then sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
 //
@@ -710,8 +714,9 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //     reported text, so v1's coded-value test (LIMSCodedValue = 'BASE', line 22) is covered by the text
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
-export function hivvlCte(name, { from, to, extraDays = 0 } = {}) {
-  const { prefilter, finalRange } = copyWindow('hivvlCte', from, to, 'r.tested_date', extraDays);
+export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false } = {}) {
+  const { prefilter, finalRange: windowed } = copyWindow('hivvlCte', from, to, 'r.tested_date', extraDays);
+  const finalRange = labsInWindow ? '' : windowed;
   const result = rpt('l');
   return `${name} as (
   with ${name}_src as (
@@ -763,6 +768,96 @@ export function hivvlCte(name, { from, to, extraDays = 0 } = {}) {
     ${rowFactsSql('r')}) c
   where r.seq = 1
     ${finalRange}
+)`;
+}
+
+// ---- The TND copy table (spec ruling 5) ----
+
+// v1 sp_GetPreviousVLResultforCohort2x (the procedure that fills TND): its panels (line 74), observations (line 74), the 26 texts a
+// result must not be (lines 77-104), the 16 suppressed texts (line 52) and the 6 undetectable texts (line 61). v1 compares with SQL
+// Server's default collation, so inListSql ignores case and trailing spaces.
+export const TND_PANELS = ['HIVVL', 'RTRI'];
+export const TND_OBSERVATIONS = ['HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC'];
+export const TND_INVALID_RESULTS = [
+  'antibodies. @mat3', 'FAIL', 'Haemolysed', 'Haemolysed ++', 'Insufficient for further tests',
+  'Insufficient serum received', 'INV', 'INVAL', 'Negative', 'No', 'Please repeat', 'Positive',
+  'to confirm patient identity.', 'Weak Positive', 'Invalid', 'Absent', 'antibodies.', 'AT', 'Failed',
+  'Icteric ++++', 'Indeterminate', 'per request', 'Positive (Repeat sample)',
+  'This result has been checked', 'VAL', '@con1 @con2',
+];
+export const TND_SUPPRESSED_RESULTS = [
+  '<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml',
+  '<30 copies/mL', 'NDET', 'ND', '<20CP', '< 40', '<40 copies/mL', '<400 copies/mL', '<400',
+  '<883 copies/mL',
+];
+export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not detected', 'NDET', 'ND'];
+
+// Zambia's `TND` copy table, rebuilt as CTEs. Put the returned text in a `with` list: it holds three items,
+// `<name>_ids`, `<reqName>` and `<name>`. (The first is the ART number's two request attributes, see zmIdsCte.)
+//   tndCte('tn')                           from `{{param.from}}` to `{{param.to}}`
+//   tndCte('tn', { from: 'a', to: 'b' })   the window parameters, compared as in inRange
+// v1 fills TND with sp_GetPreviousVLResultforCohort2x. This is slice 1's part 1 ("VL clients by province") and Task 11's source.
+//
+// `<reqName>` (default `<name>_req`) is the request rows: one row per request that has a panel in the TND panels (or in `extraPanels`)
+// and a report, with the mapped requesting facility. Slice 1's parts 2 and 3 read it for the cancelled and unclear requests, which TND
+// does not hold. Columns: id, request_id, panel_code, age_years, authored_at, province, district, facility, client_name (first name, a
+// space, surname), firstname, surname, sex, gender (slice 1's word: F, M, U, I, else Missing), reference_numbers, unique_id,
+// report_status, collected_date, result_date.
+// `<name>` is the TND rows, one row per result row (v1 TND has one row per LabResults row). Columns: province, district, facility,
+// lab_id, client_name, firstname, surname, age_years, sex, gender, art_number, collected_date, registered_date, result_date, result,
+// suppressed_flag, uu_flag. The two flags are v1's TND.Suppressed and TND.UU (1 or 0).
+//
+// What it takes from v1 (line numbers of StoredProcedure__dbo_sp_GetPreviousVLResultforCohort2x.sql):
+//   - Province, District, Facility are the mapped ZMFAC row of the requesting facility (lines 67-72); an unmapped facility drops out.
+//   - ART number: artNumberSql (lines 40-48), HOSPID not sent. FIRSTNAME and SURNAME and the sex code are the patient's (left join: a
+//     request without a patient row keeps empty names and a NULL sex, where v1 inner-joins Patients).
+//   - ResultDate is the report's issued stamp (AuthorisedDateTime), Result is rpt() (LIMSRptResult). The report is final (line 76).
+//   - Suppressed (lines 49-60): a suppressed text, or a number under 1000. UU (line 61): an undetectable text, or a number under 200.
+//     The comparison is of the number alone: a comparator ('<') is not read.
+//   - A result of NULL is out (NOT IN drops NULL, line 77).
+//
+// Not taken: the Rank column (TND.Rank, the visit number: no caller reads it), BaselineVL (callers use the hivvl copy's), and the floor
+// and ceiling of line 105 (AuthorisedDateTime from 2017-01-01 to now): the window is the caller's.
+// The window of this builder is a LOCAL-DATE window, from the first to the last day inclusive (inRange). A report that compares the
+// datetime of ResultDate with dates (a window that ends at 00:00:00 of the last day) filters again on the result's own time.
+// Options: `where` is a condition on the mapped row `fmr` and the request `lr`, applied while reading requests (slice 1's province
+// parameter); `extraPanels` and `orRegistered` widen the request rows for slice 1's parts 2 and 3 (a request registered in the window
+// without a report in it, and the panel HIVVL).
+export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`, where = 'true', extraPanels = [], orRegistered = false } = {}) {
+  const idsName = `${name}_ids`;
+  const result = rpt('r');
+  return `${zmIdsCte(idsName)},
+${reqName} as (
+  select lr.id, lr.request_id, lr.panel_code, lr.age_years, lr.authored_at,
+    fmr.region as province, fmr.district, fmr.name as facility,
+    concat(p.firstname, ' ', p.surname) as client_name, p.firstname, p.surname, p.sex,
+    case p.sex when 'F' then 'Female' when 'M' then 'Male' when 'U' then 'Unknown' when 'I' then 'Indeterminate' else 'Missing' end as gender,
+    zi.reference_numbers, zi.unique_id,
+    dr.status as report_status, dr.effective as collected_date, dr.issued as result_date
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  left join ${idsName} zi on zi.lab_request_id = lr.id
+  where ${where}
+    and lr.panel_code in (${sqlList([...new Set([...TND_PANELS, ...extraPanels])])})
+    and (${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''})
+),
+${name} as (
+  select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.firstname, q.surname, q.age_years, q.sex, q.gender,
+    ${artNumberSql("coalesce(q.reference_numbers, '')", "coalesce(q.unique_id, '')")} as art_number,
+    q.collected_date, q.authored_at as registered_date, q.result_date,
+    ${result} as result,
+    case when ${inListSql(result, TND_SUPPRESSED_RESULTS)} or r.numeric_value < 1000 then 1 else 0 end as suppressed_flag,
+    case when ${inListSql(result, TND_UU_RESULTS)} or r.numeric_value < 200 then 1 else 0 end as uu_flag
+  from ${reqName} q
+  join lab_results r on r.request_id = q.id
+  where q.panel_code in (${sqlList(TND_PANELS)})
+    and r.observation_code in (${sqlList(TND_OBSERVATIONS)})
+    and q.report_status = 'final'
+    and ${inRange('q.result_date', from, to)}
+    and ${result} is not null
+    and not ${inListSql(result, TND_INVALID_RESULTS)}
 )`;
 }
 

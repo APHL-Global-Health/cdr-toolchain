@@ -6,7 +6,7 @@
 // "v1 line N" below means a line of StoredProcedure__dbo_sp_update_HIVVLTable.sql.
 
 import { lit, inOrder } from '../../shared/pg-check.mjs';
-import { ATTR_SYSTEM, hivvlCte } from '../zm-sql.mjs';
+import { ATTR_SYSTEM, hivvlCte, tndCte } from '../zm-sql.mjs';
 import { queries } from '../queries/vl.mjs';
 import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite } from './epi-fixture.mjs';
 
@@ -1767,4 +1767,390 @@ const suites10 = [
   shapeSuite('facility-shape', facQ, ['district', 'from', 'to'], ['select', 'text', 'text']),
 ];
 
-export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 }];
+// ============================================================================================
+// Group t11: "Unique VL clients" (v1 sp_getUniqueVLClientsInfo, "I" below, with sp_getUniqueVLClientsInfoList, "L", merged in;
+// sp_getUniqueVLClientsInfo_bkup is an exact copy of I) and "Unique VL clients by facility (12 months)" (v1
+// sp_getUniqueVLClientsLast12Months_SPHO_WPHO, "S"). Fixture ids start with "t11-"; lab ids with "T11-". "I line N" is a line of
+// StoredProcedure__dbo_sp_getUniqueVLClientsInfo.sql, "L line N" of ...InfoList.sql, "S line N" of ...Last12Months_SPHO_WPHO.sql.
+// Expected rows are worked out by hand from the v1 text. Window used by most cases: from 2026-05-01, to 2026-05-31.
+//
+// Facilities (fixture codes ZT11x): A Choma General Hospital, Southern/Choma; B Choma Clinic, Southern/Choma;
+// C Monze Clinic, Southern/Monze; D Chilenje Clinic, Lusaka/Lusaka; W Mongu Clinic, Western/Mongu; N Nowhere Clinic, a register
+// row with no province and no district; U not in the register.
+//
+// The clients, with what each does (a client is a first name, surname and ART number at a facility). Results are numbers unless a
+// text is shown. "ok" is v1's test on the result text (a number, or one of 15 texts): Clients counts only ok results, the age and
+// sex columns count every client. The sex-by-age cell is the sex of the request (m f i u, x = blank) and the age band.
+//   A01 Mary Banda     two labs, the newer (1500, age 30) wins over the older (50, age 29): ok, not suppressed. f 30to34
+//   A02 John Phiri     'Target Not Detected': ok, suppressed, undetectable. m 40to44
+//   A03 Peter Lungu    one lab, two requests: 50 at 05-05, then '<883 copies/mL' (number 150) at 05-12. The newer wins: ok, suppressed,
+//                      undetectable (150 < 200), but the district branch's undetectable list lacks '<883 copies/mL' (I line 202). m 25to29
+//   A04 Grace Tembo    'PTLTT' (a valid HIVVL text, not a number, not one of the 15): not ok. f 30to34
+//   A05 Esther Daka    500 at 05-04, then 700 at 05-25 on a baseline lab (VIRAL answer 'Baseline VL'). I leaves baseline labs out
+//                      before it ranks, so 500 wins; S ranks first and drops the client. f 20to24
+//   A06 Lisa Mumba     panel RTRI: in TND, but the lab has no hivvl row, so the join drops it
+//   A07 Adam Moyo      ART A700, 400, m 18; Zed Moyo, ART A700, 1200, m 50. Two people on one ART number: all branches count both except the
+//                      facility branch (I line 282), which ranks by ART number only and keeps the first name (Adam)
+//   A08 Tom Zulu       two labs at the same minute, 100 and 2000: both rank 1 (rank, not row_number), counted twice. m 50plus
+//   A09 Sarah Chanda   'sarah chanda' / ART 'a900' at 05-06 and 'Sarah Chanda ' / ART 'A900' at 05-18: one client ignoring case and
+//                      trailing spaces; the newer (4000, age 37) wins. f 35to39
+//   A10 Blank Sex      sex '' (empty), age 5, 250. x 5to9
+//   A11 (no patient)   no patient row, no age, ART from the unique id 'U-11': 3500. x AgeMissing
+//   A12 Nina Other     sex N, age 40, 150: counts in Clients but in no sex column
+//   A13 Hope Mulenga   one lab, two requests: 100 on 04-20 and 3000 on 05-15. The hivvl row is the 04-20 one (earliest), outside the
+//                      window; the join by lab number still finds it. f 35to39
+//   B01..B07           Choma Clinic, all women of 25 to 30: window edges (local times, +02:00 stamps) and Mary Banda again (ART A100)
+//   C01                Monze Clinic: a baseline lab only
+//   D01..D05           Lusaka: m, f, u, i, and D05 with no ART number at all
+//   W01, W02           Mongu Clinic
+//   N01                a facility whose register row has no province
+//   X01                July, panel RTRI (no hivvl row): a window with TND rows but no client
+//   P01..P03           September, Mongu Clinic: date-only and partial stamps ('2026-09-10', '2026-09'); a date alone is midnight
+// ============================================================================================
+
+const P11 = [];
+const R11 = [];
+const D11 = [];
+const L11 = [];
+const T11 = [];
+const F11 = [];
+let n11 = 0;
+const num11 = (v) => (v === null || v === undefined ? 'null' : String(v));
+const L11_DEFAULTS = { req: 'ZT11A', sex: 'F', age: 30, first: null, last: null, panel: 'HIVVL', obs: 'HIVVL', num: null, text: null,
+  cmp: null, art: null, uq: null, form: null, patient: true };
+
+// One request row of lab number `labId`, with one final report authorised at `issued` and one result. o: art (REFNO), uq (UNIQUEID),
+// first, last, sex, age, req, panel, obs, num, text, cmp, form [[linkId, answer]], patient (false: no patient row).
+function cl11(labId, issued, o = {}) {
+  const r = { ...L11_DEFAULTS, ...o };
+  const k = String(++n11).padStart(3, '0');
+  const qid = `t11-q${k}`;
+  let pid = null;
+  if (r.patient) {
+    pid = `t11-p${k}`;
+    P11.push(`(${lit(pid)}, ${lit(r.first)}, ${lit(r.last)}, ${lit(r.sex)})`);
+  }
+  R11.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, '2026-05-01T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(r.req)}, ${lit(pid)}, ${num11(r.age)})`);
+  D11.push(`(${lit(`t11-d${k}`)}, ${lit(qid)}, 'final', '2026-05-01T07:00:00Z', ${lit(issued)}, 'LUS')`);
+  L11.push(`(${lit(`t11-r${k}`)}, ${lit(qid)}, ${lit(r.obs)}, ${lit(r.text)}, ${num11(r.num)}, ${lit(r.cmp)})`);
+  if (r.art !== null) T11.push(`(${lit(`t11-a${k}r`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(r.art)})`);
+  if (r.uq !== null) T11.push(`(${lit(`t11-a${k}u`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(UNQ)}, ${lit(r.uq)})`);
+  if (r.form) {
+    const items = r.form.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    F11.push(`(${lit(`t11-f${k}`)}, 'q', 'hiv_vl_documentation', ${lit(qid)}, '2026-05-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  }
+}
+
+// Facility A, Choma General Hospital.
+cl11('T11-A01a', '2026-05-03T08:00:00Z', { first: 'Mary', last: 'Banda', age: 29, art: 'A100', num: 50 });
+cl11('T11-A01b', '2026-05-20T08:00:00Z', { first: 'Mary', last: 'Banda', age: 30, art: 'A100', num: 1500 });
+cl11('T11-A02', '2026-05-11T10:00:00Z', { first: 'John', last: 'Phiri', sex: 'M', age: 41, art: 'A200', text: 'Target Not Detected' });
+cl11('T11-A03', '2026-05-05T08:00:00Z', { first: 'Peter', last: 'Lungu', sex: 'M', age: 28, art: 'A300', num: 50 });
+cl11('T11-A03', '2026-05-12T08:00:00Z', { first: 'Peter', last: 'Lungu', sex: 'M', age: 28, art: 'A300', text: '<883 copies/mL', num: 150 });
+cl11('T11-A04', '2026-05-08T08:00:00Z', { first: 'Grace', last: 'Tembo', age: 33, art: 'A400', text: 'PTLTT' });
+cl11('T11-A05a', '2026-05-04T08:00:00Z', { first: 'Esther', last: 'Daka', age: 22, art: 'A500', num: 500 });
+cl11('T11-A05b', '2026-05-25T08:00:00Z', { first: 'Esther', last: 'Daka', age: 22, art: 'A500', num: 700, form: [['ARTRS', 'Baseline VL']] });
+cl11('T11-A06', '2026-05-06T08:00:00Z', { first: 'Lisa', last: 'Mumba', age: 27, art: 'A600', panel: 'RTRI', num: 80 });
+cl11('T11-A07a', '2026-05-10T08:00:00Z', { first: 'Adam', last: 'Moyo', sex: 'M', age: 18, art: 'A700', num: 400 });
+cl11('T11-A07b', '2026-05-15T08:00:00Z', { first: 'Zed', last: 'Moyo', sex: 'M', age: 50, art: 'A700', num: 1200 });
+cl11('T11-A08a', '2026-05-12T09:00:00Z', { first: 'Tom', last: 'Zulu', sex: 'M', age: 60, art: 'A800', num: 100 });
+cl11('T11-A08b', '2026-05-12T09:00:00Z', { first: 'Tom', last: 'Zulu', sex: 'M', age: 60, art: 'A800', num: 2000 });
+cl11('T11-A09a', '2026-05-06T08:00:00Z', { first: 'sarah', last: 'chanda', age: 36, art: 'a900', num: 300 });
+cl11('T11-A09b', '2026-05-18T08:00:00Z', { first: 'Sarah', last: 'Chanda ', age: 37, art: 'A900', num: 4000 });
+cl11('T11-A10', '2026-05-07T08:00:00Z', { first: 'Blank', last: 'Sex', sex: '', age: 5, art: 'A1000', num: 250 });
+cl11('T11-A11', '2026-05-09T08:00:00Z', { patient: false, age: null, uq: 'U-11', num: 3500 });
+cl11('T11-A12', '2026-05-13T08:00:00Z', { first: 'Nina', last: 'Other', sex: 'N', age: 40, art: 'A1200', num: 150 });
+cl11('T11-A13', '2026-04-20T08:00:00Z', { first: 'Hope', last: 'Mulenga', age: 36, art: 'A1300', num: 100 });
+cl11('T11-A13', '2026-05-15T08:00:00Z', { first: 'Hope', last: 'Mulenga', age: 36, art: 'A1300', num: 3000 });
+// Facility B, Choma Clinic: the window edges and Mary Banda's ART number at another facility.
+const B11 = { req: 'ZT11B', age: 25 };
+cl11('T11-B01', '2026-05-31T00:00:00+02:00', { ...B11, first: 'Edge', last: 'One', art: 'B100', num: 100 });
+cl11('T11-B02', '2026-05-31T00:00:01+02:00', { ...B11, first: 'Edge', last: 'Two', art: 'B200', num: 100 });
+cl11('T11-B03', '2026-05-01T00:00:00+02:00', { ...B11, first: 'Edge', last: 'Three', age: 26, art: 'B300', num: 2000 });
+cl11('T11-B04', '2026-04-30T23:59:59+02:00', { ...B11, first: 'Edge', last: 'Four', art: 'B400', num: 100 });
+cl11('T11-B05', '2026-05-30T23:30:00Z', { ...B11, first: 'Edge', last: 'Five', age: 27, art: 'B500', num: 300 });
+cl11('T11-B06a', '2026-05-10T08:00:00Z', { ...B11, first: 'Late', last: 'Fee', age: 28, art: 'B600', num: 200 });
+cl11('T11-B06b', '2026-06-02T08:00:00Z', { ...B11, first: 'Late', last: 'Fee', age: 28, art: 'B600', num: 5000 });
+cl11('T11-B07', '2026-05-22T08:00:00Z', { req: 'ZT11B', first: 'Mary', last: 'Banda', art: 'A100', num: 90 });
+// Facility C, Monze Clinic: a baseline lab only.
+cl11('T11-C01', '2026-05-10T08:00:00Z', { req: 'ZT11C', first: 'Bea', last: 'Seline', art: 'C100', num: 800, form: [['ARTRS', 'Baseline']] });
+// Facility D, Chilenje Clinic.
+cl11('T11-D01', '2026-05-14T08:00:00Z', { req: 'ZT11D', first: 'Dan', last: 'Lungu', sex: 'M', age: 45, art: 'D100', num: 100 });
+cl11('T11-D02', '2026-05-15T08:00:00Z', { req: 'ZT11D', first: 'Dina', last: 'Zulu', age: 15, art: 'D200', text: 'RNA not detected' });
+cl11('T11-D03', '2026-05-16T08:00:00Z', { req: 'ZT11D', first: 'Ida', last: 'Unknown', sex: 'U', age: 3, art: 'D300', text: '<20 copies/mL' });
+cl11('T11-D04', '2026-05-17T08:00:00Z', { req: 'ZT11D', first: 'Ian', last: 'Indet', sex: 'I', age: 10, art: 'D400', num: 1000 });
+cl11('T11-D05', '2026-05-18T08:00:00Z', { req: 'ZT11D', first: 'Zero', last: 'Art', age: 55, num: 600 });
+// Facility W, Mongu Clinic.
+cl11('T11-W01', '2026-05-20T08:00:00Z', { req: 'ZT11W', first: 'Wanda', last: 'Mwila', age: 61, art: 'W100', num: 20 });
+cl11('T11-W02', '2026-05-21T08:00:00Z', { req: 'ZT11W', first: 'Willy', last: 'Mwila', sex: 'M', age: 0, art: 'W200', num: 5000 });
+// Facility N (no province), facility U (not in the register), and July.
+cl11('T11-N01', '2026-05-10T08:00:00Z', { req: 'ZT11N', first: 'Nora', last: 'Null', art: 'N100', num: 100 });
+cl11('T11-U01', '2026-05-10T08:00:00Z', { req: 'ZT11U', first: 'Una', last: 'Mapped', art: 'U100', num: 100 });
+cl11('T11-X01', '2026-07-10T08:00:00Z', { first: 'Xena', last: 'Rtri', art: 'X100', panel: 'RTRI', num: 100 });
+
+// September: a date-only stamp is midnight of that day (in the window if the day is in it, and at the end date it is the last instant); a
+// partial stamp ('2026-09') has no day, so it is out and must not raise.
+cl11('T11-P01', '2026-09-10', { req: 'ZT11W', first: 'Pia', last: 'One', age: 12, art: 'P100', num: 100 });
+cl11('T11-P02', '2026-09', { req: 'ZT11W', first: 'Pia', last: 'Two', age: 30, art: 'P200', num: 100 });
+cl11('T11-P03', '2026-09-30', { req: 'ZT11W', first: 'Pia', last: 'Three', age: 70, art: 'P300', num: 3000 });
+
+const SETUP11 = `${facilityRows('t11', [
+  ['ZT11A', 'Choma General Hospital', 'Southern', 'Choma'],
+  ['ZT11B', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT11C', 'Monze Clinic', 'Southern', 'Monze'],
+  ['ZT11D', 'Chilenje Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT11W', 'Mongu Clinic', 'Western', 'Mongu'],
+  ['ZT11N', 'Nowhere Clinic', null, null],
+  ['ZT11U', 'Unmapped Clinic', 'Southern', 'Choma', false],
+])}
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years) values ${R11.join(',\n  ')};
+insert into patients (id, firstname, surname, sex) values ${P11.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values ${D11.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${L11.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${T11.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${F11.join(',\n  ')};`;
+
+// ---- Expected rows ----
+
+const BANDS11 = ['lt01', '1to4', '5to9', '10to14', '15to19', '20to24', '25to29', '30to34', '35to39', '40to44', '45to49', '50plus', 'AgeMissing'];
+const AGE_COLUMNS11 = ['m', 'f', 'i', 'u', 'x'].flatMap((s) => BANDS11.map((b) => `${b}${s}`));
+const UC_COLUMNS = ['Province', 'District', 'Facility', 'Clients', 'SuppressedC', 'UnsuppressedC', 'UndetectableC', ...AGE_COLUMNS11];
+// labels: the three names; counts: Clients, SuppressedC, UnsuppressedC, UndetectableC; ages: the sex-by-age cells that are not 0.
+const uc = (labels, counts, ages = {}) => Object.fromEntries(UC_COLUMNS.map((c, i) => [c, i < 3 ? labels[i] : i < 7 ? counts[i - 3] : (ages[c] ?? 0)]));
+// A sum over no rows is NULL in v1 (I lines 29-97 with no rows).
+const ucNull = (labels) => Object.fromEntries(UC_COLUMNS.map((c, i) => [c, i < 3 ? labels[i] : null]));
+const NONE11 = uc(['', '', ''], [0, 0, 0, 0]); // I lines 365-430: the all-zero row with blank names
+
+// Sex-by-age cells. Facility A: all 14 clients (Mary f30, John m41, Peter m28, Grace f33, Esther f22, Adam m18, Zed m50, Tom twice m60,
+// Sarah f37, Blank Sex x5, no-patient x missing, Nina none, Hope f36). Facility A without Zed. Facility B: four women of 25 to 28 and Mary.
+const AG_A_NOZED = { '15to19m': 1, '25to29m': 1, '40to44m': 1, '50plusm': 2, '20to24f': 1, '30to34f': 2, '35to39f': 2, '5to9x': 1, AgeMissingx: 1 };
+const AG_B = { '25to29f': 4, '30to34f': 1 };
+const AG_SOUTH = { '15to19m': 1, '25to29m': 1, '40to44m': 1, '50plusm': 3, '20to24f': 1, '25to29f': 4, '30to34f': 3, '35to39f': 2, '5to9x': 1, AgeMissingx: 1 };
+const AG_SOUTH_NOZED = { ...AG_SOUTH, '50plusm': 2 };
+const AG_LUSAKA = { '45to49m': 1, '15to19f': 1, '50plusf': 1, '10to14i': 1, '1to4u': 1 };
+const AG_WESTERN = { '50plusf': 1, lt01m: 1 };
+const AG_ALL = { lt01m: 1, '15to19m': 1, '25to29m': 1, '40to44m': 1, '45to49m': 1, '50plusm': 3, '15to19f': 1, '20to24f': 1, '25to29f': 4,
+  '30to34f': 3, '35to39f': 2, '50plusf': 2, '10to14i': 1, '1to4u': 1, '5to9x': 1, AgeMissingx: 1 };
+
+const ALL3 = ['All', 'All', 'All'];
+const SOUTH1 = ['Southern', 'All', 'All'];
+const CHOMA2 = ['Southern', 'Choma', 'All'];
+const CGH3 = ['Southern', 'Choma', 'Choma General Hospital'];
+const CCL3 = ['Southern', 'Choma', 'Choma Clinic'];
+const LUSAKA1 = ['Lusaka', 'All', 'All'];
+const WESTERN1 = ['Western', 'All', 'All'];
+
+const uniqueQ = queries().find((q) => q.name === 'Unique VL clients');
+const facility12Q = queries().find((q) => q.name === 'Unique VL clients by facility (12 months)');
+const MAY11 = { from: '2026-05-01', to: '2026-05-31' };
+const SEP11 = { from: '2026-09-01', to: '2026-09-30' };
+const SUB = 'One row per sub-area';
+const p11 = (province = '', district = '', facility = '', rows = '', w = MAY11) => ({ province, district, facility, ...w, rows });
+const uSuite = (name, params, rows, setup = '') => orderedSuite10(name, uniqueQ?.sql ?? 'select 1', params, UC_COLUMNS, rows, setup);
+
+// Counts are [Clients, SuppressedC, UnsuppressedC, UndetectableC].
+// I counts ok results only. All of A: 13 ok (Grace's 'PTLTT' is not), 7 suppressed (John, Peter, Esther, Adam, Tom 100, Blank Sex, Nina),
+// 4 undetectable (John, Peter, Tom 100, Nina). B: 5 ok, 4 suppressed (Edge One 100, Edge Five 300, Late Fee 200, Mary 90), 2 undetectable
+// (100 and 90). Lusaka: 5 ok, 4 suppressed (all but 1000), 2 undetectable (100, 'RNA not detected'). Western: 2, 1, 1 undetectable.
+const SOUTH_COUNTS = [18, 11, 7, 6];
+const B_COUNTS = [5, 4, 1, 2];
+const LUSAKA_COUNTS = [5, 4, 1, 2];
+const WESTERN_COUNTS = [2, 1, 1, 1];
+const LIST_ALL = [
+  uc(LUSAKA1, LUSAKA_COUNTS, AG_LUSAKA),
+  uc(SOUTH1, [19, 11, 8, 6], AG_SOUTH),
+  uc(WESTERN1, WESTERN_COUNTS, AG_WESTERN),
+];
+const LIST_CHOMA = [uc(CCL3, B_COUNTS, AG_B), uc(CGH3, [13, 7, 6, 4], AG_A_NOZED)];
+
+const suites11 = [
+  // I line 21 (no province, district or facility): one row, 'All' names. Clients 25, suppressed 16, unsuppressed 9, undetectable 9.
+  // Nowhere Clinic's client has no province and is left out (I line 102); the unmapped facility is not in TND.
+  uSuite('all-totals', p11(), [uc(ALL3, [25, 16, 9, 9], AG_ALL)], SETUP11),
+  uSuite('all-totals-named', p11('', '', '', 'Totals'), [uc(ALL3, [25, 16, 9, 9], AG_ALL)]),
+  // I line 107: the province row; names compare ignoring case and trailing spaces, the row shows the stored name.
+  uSuite('province', p11('Southern'), [uc(SOUTH1, SOUTH_COUNTS, AG_SOUTH)]),
+  uSuite('province-fold', p11('southern  '), [uc(SOUTH1, SOUTH_COUNTS, AG_SOUTH)]),
+  uSuite('province-lusaka', p11('Lusaka'), [uc(LUSAKA1, LUSAKA_COUNTS, AG_LUSAKA)]),
+  // I lines 191 and 202: the district branch's undetectable list lacks '<883 copies/mL', so Peter is not undetectable here (5, not 6).
+  uSuite('district', p11('Southern', 'Choma'), [uc(CHOMA2, [18, 11, 7, 5], AG_SOUTH)]),
+  uSuite('district-fold', p11('SOUTHERN', 'choma '), [uc(CHOMA2, [18, 11, 7, 5], AG_SOUTH)]),
+  // I lines 277-282: the facility branch ranks by ART number only, so Adam and Zed (one ART number) are one client: Adam, the first name.
+  uSuite('facility', p11('Southern', 'Choma', 'Choma General Hospital'), [uc(CGH3, [12, 7, 5, 4], AG_A_NOZED)]),
+  uSuite('facility-fold', p11('Southern', 'Choma', 'choma general hospital '), [uc(CGH3, [12, 7, 5, 4], AG_A_NOZED)]),
+  uSuite('facility-clinic', p11('Southern', 'Choma', 'Choma Clinic'), [uc(CCL3, B_COUNTS, AG_B)]),
+  // The branch tests only that TND has a row for the area (I lines 107, 191, 278). Monze has one (a baseline lab) but x is empty, so
+  // the grouped select returns no row, and not the all-zero row.
+  uSuite('district-monze', p11('Southern', 'Monze'), []),
+  uSuite('facility-monze', p11('Southern', 'Monze', 'Monze Clinic'), []),
+  // I lines 365-430: no TND row for the area, or an unsupported combination of parameters: the all-zero row with blank names.
+  uSuite('unknown-province', p11('Nowhere'), [NONE11]),
+  uSuite('unknown-district', p11('Southern', 'Nowhere'), [NONE11]),
+  uSuite('unknown-facility', p11('Southern', 'Choma', 'Nowhere'), [NONE11]),
+  uSuite('district-without-province', p11('', 'Choma'), [NONE11]),
+  uSuite('facility-without-district', p11('Southern', '', 'Choma General Hospital'), [NONE11]),
+  uSuite('facility-alone', p11('', '', 'Mongu Clinic'), [NONE11]),
+  uSuite('empty-window', p11('', '', '', '', { from: '2025-01-01', to: '2025-01-31' }), [NONE11]),
+  uSuite('empty-window-province', p11('Southern', '', '', '', { from: '2025-01-01', to: '2025-01-31' }), [NONE11]),
+  // July has TND rows (panel RTRI, no hivvl row) but no client. All Zambia always answers with a row, and a sum over no rows is NULL
+  // (I line 29 with no rows); a province answers with no row.
+  uSuite('july-all', p11('', '', '', '', { from: '2026-07-01', to: '2026-07-31' }), [ucNull(ALL3)]),
+  uSuite('july-province', p11('Southern', '', '', '', { from: '2026-07-01', to: '2026-07-31' }), []),
+  // I lines 27, 113, 197, 285: cast(ResultDate as datetime) between two dates, so the window ends at 00:00:00 of the end date. A
+  // one-day window holds only results at exactly midnight: Edge One at 05-31 00:00:00 (+02:00), Edge Three at 05-01 00:00:00 (+02:00).
+  // Edge Two (05-31 00:00:01) and Edge Four (04-30 23:59:59) are out; so is Late Fee's June result.
+  // Date-only stamps: Pia One (09-10) and Pia Three (09-30, the end date at midnight) are in; the partial '2026-09' is out and does not raise.
+  uSuite('september', p11('', '', '', '', SEP11), [uc(ALL3, [2, 1, 1, 1], { '10to14f': 1, '50plusf': 1 })]),
+  uSuite('last-day', p11('', '', '', '', { from: '2026-05-31', to: '2026-05-31' }), [uc(ALL3, [1, 1, 0, 1], { '25to29f': 1 })]),
+  uSuite('first-day', p11('', '', '', '', { from: '2026-05-01', to: '2026-05-01' }), [uc(ALL3, [1, 0, 1, 0], { '25to29f': 1 })]),
+  // L: one row per sub-area. L lines 20-29 (no province or district): one row per province, count(*) of the ranked rows, sum(suppressed),
+  // sum(UU). Grace's 'PTLTT' counts here (Clients 19, not 18), and Zed counts (the all-Zambia branch ranks by name too, L line 23).
+  uSuite('list-all', p11('', '', '', SUB), LIST_ALL),
+  uSuite('list-all-fold', p11('', '', '', 'ONE ROW PER SUB-AREA '), LIST_ALL),
+  // L has no facility parameter: a facility is ignored.
+  uSuite('list-all-facility-ignored', p11('', '', 'Mongu Clinic', SUB), LIST_ALL),
+  // L lines 104-114 and 180-184 (a province): one row per district. The province and district branches rank by ART number only (L lines
+  // 107, 189), so Zed is dropped: 18 clients, 11 suppressed, 7 unsuppressed, 6 undetectable.
+  uSuite('list-province', p11('Southern', '', '', SUB), [uc(CHOMA2, [18, 11, 7, 6], AG_SOUTH_NOZED)]),
+  // L lines 186-195 and 262-267 (a district): one row per facility.
+  uSuite('list-district', p11('Southern', 'Choma', '', SUB), LIST_CHOMA),
+  uSuite('list-district-facility-ignored', p11('Southern', 'Choma', 'Nowhere', SUB), LIST_CHOMA),
+  uSuite('list-district-monze', p11('Southern', 'Monze', '', SUB), []),
+  uSuite('list-unknown-province', p11('Nowhere', '', '', SUB), [NONE11]),
+  uSuite('list-district-without-province', p11('', 'Choma', '', SUB), [NONE11]),
+  uSuite('list-empty-window', p11('', '', '', SUB, { from: '2025-01-01', to: '2025-01-31' }), [NONE11]),
+  uSuite('list-july', p11('', '', '', SUB, { from: '2026-07-01', to: '2026-07-31' }), []),
+  uSuite('list-last-day', p11('', '', '', SUB, { from: '2026-05-31', to: '2026-05-31' }), [uc(SOUTH1, [1, 1, 0, 1], { '25to29f': 1 })]),
+  {
+    name: 'unique-shape',
+    count: 9,
+    check() {
+      const bad = [];
+      if (!uniqueQ) return ['query "Unique VL clients" is missing'];
+      const ids = uniqueQ.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['province', 'district', 'facility', 'from', 'to', 'rows'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(uniqueQ.params.map((p) => [p.id, p]));
+      for (const id of ['from', 'to']) if (!byId[id]?.required || byId[id].type !== 'text') bad.push(`${id} is a required text parameter (ruling 3)`);
+      for (const id of ['province', 'district', 'rows']) if (byId[id]?.required || byId[id]?.type !== 'select') bad.push(`${id} is an optional select`);
+      if (byId.facility?.required || byId.facility?.type !== 'text') bad.push('facility is an optional text parameter');
+      if (BANNED9.test(uniqueQ.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (BANNED9.test((byId.rows?.optionsSql ?? '').replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word in rows optionsSql');
+      if (!/^\s*with\b/i.test(uniqueQ.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  },
+];
+
+// ---- S: one row per facility, three counts ----
+
+const F12_COLUMNS = ['Province', 'District', 'Facility', 'Clients', 'Suppressed', 'UnSuppressed'];
+const f12 = (...v) => Object.fromEntries(F12_COLUMNS.map((c, i) => [c, v[i]]));
+const p12 = (province = '', w = MAY11) => ({ province, ...w });
+const fSuite = (name, params, rows) => orderedSuite10(name, facility12Q?.sql ?? 'select 1', params, F12_COLUMNS, rows);
+const SCCL = f12('Southern', 'Choma', 'Choma Clinic', 5, 4, 1);
+// S lines 11-13: x ranks every TND row of a hivvl lab, baseline or not. S line 93 drops baseline labs after the ranking, so Esther
+// (newest result on a baseline lab) is gone entirely, and Monze's baseline-only client leaves no row. A: 13 clients (A01-A04, Adam, Zed,
+// Tom twice, Sarah, Blank Sex, no-patient, Nina, Hope), 6 suppressed (John, Peter, Adam, Tom 100, Blank Sex, Nina).
+const SCGH = f12('Southern', 'Choma', 'Choma General Hospital', 13, 6, 7);
+const SMONGU = f12('Western', 'Mongu', 'Mongu Clinic', 2, 1, 1);
+
+const suites12 = [
+  // S line 120: provinces Southern and Western (the constants); order by province, district, facility (line 121).
+  fSuite('facility12-default', p12(), [SCCL, SCGH, SMONGU]),
+  // S line 16: ARTNumber must have a length. Zero Art (Lusaka, no ART number) is out: 4 clients, 3 suppressed (not 1000).
+  fSuite('facility12-lusaka', p12('Lusaka'), [f12('Lusaka', 'Lusaka', 'Chilenje Clinic', 4, 3, 1)]),
+  fSuite('facility12-fold', p12('southern  '), [SCCL, SCGH]),
+  fSuite('facility12-unknown', p12('Nowhere'), []),
+  // S line 15: cast(ResultDate as datetime) between two dates: the end date at 00:00:00. Edge One is the only result at 05-31 00:00:00.
+  fSuite('facility12-last-day', p12('', { from: '2026-05-31', to: '2026-05-31' }), [f12('Southern', 'Choma', 'Choma Clinic', 1, 1, 0)]),
+  fSuite('facility12-september', p12('', SEP11), [SMONGU]),
+  fSuite('facility12-empty-window', p12('', { from: '2025-01-01', to: '2025-01-31' }), []),
+  {
+    name: 'facility12-shape',
+    count: 7,
+    check() {
+      const bad = [];
+      if (!facility12Q) return ['query "Unique VL clients by facility (12 months)" is missing'];
+      const ids = facility12Q.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to', 'province'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(facility12Q.params.map((p) => [p.id, p]));
+      for (const id of ['from', 'to']) if (!byId[id]?.required || byId[id].type !== 'text') bad.push(`${id} is a required text parameter (ruling 3)`);
+      if (byId.province?.required || byId.province?.type !== 'select') bad.push('province is an optional select');
+      if (BANNED9.test(facility12Q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(facility12Q.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  },
+];
+
+// ---- The builders ----
+
+// tndCte (v1 TND, sp_GetPreviousVLResultforCohort2x): every final result of panels HIVVL and RTRI in the observations
+// HIVVL, HIVVC, HIVTM, HIVVD, POCVR, POCVC that is not on the 26 invalid texts, with a report issued in the window
+// (a LOCAL-DATE window, wider than the reports' own midnight window). One row per result.
+const TND_COLUMNS = ['province', 'district', 'facility', 'lab_id', 'client_name', 'firstname', 'surname', 'age_years', 'sex', 'gender',
+  'art_number', 'collected_date', 'registered_date', 'result_date', 'result', 'suppressed_flag', 'uu_flag'];
+const tnd = (lab, result_date, o) => ({
+  province: 'Southern', district: 'Choma', facility: 'Choma General Hospital', lab_id: lab, client_name: null, firstname: null, surname: null,
+  age_years: 30, sex: 'F', gender: 'Female', art_number: '', collected_date: '2026-05-01T07:00:00Z', registered_date: '2026-05-01T08:00:00Z',
+  result_date, result: null, suppressed_flag: 0, uu_flag: 0, ...o,
+});
+const TND_ROWS = [
+  // John: 'Target Not Detected' is on the suppressed and the undetectable lists.
+  tnd('T11-A02', '2026-05-11T10:00:00Z', { client_name: 'John Phiri', firstname: 'John', surname: 'Phiri', age_years: 41, sex: 'M', gender: 'Male', art_number: 'A200', result: 'Target Not Detected', suppressed_flag: 1, uu_flag: 1 }),
+  // Peter: the number 50 is under 200; the text '<883 copies/mL' is a suppressed text and its number 150 is under 200.
+  tnd('T11-A03', '2026-05-05T08:00:00Z', { client_name: 'Peter Lungu', firstname: 'Peter', surname: 'Lungu', age_years: 28, sex: 'M', gender: 'Male', art_number: 'A300', result: '50', suppressed_flag: 1, uu_flag: 1 }),
+  tnd('T11-A03', '2026-05-12T08:00:00Z', { client_name: 'Peter Lungu', firstname: 'Peter', surname: 'Lungu', age_years: 28, sex: 'M', gender: 'Male', art_number: 'A300', result: '<883 copies/mL', suppressed_flag: 1, uu_flag: 1 }),
+  // Grace: PTLTT is on no list and has no number.
+  tnd('T11-A04', '2026-05-08T08:00:00Z', { client_name: 'Grace Tembo', firstname: 'Grace', surname: 'Tembo', age_years: 33, art_number: 'A400', result: 'PTLTT' }),
+  // Lisa: panel RTRI is valid in TND.
+  tnd('T11-A06', '2026-05-06T08:00:00Z', { client_name: 'Lisa Mumba', firstname: 'Lisa', surname: 'Mumba', age_years: 27, art_number: 'A600', result: '80', suppressed_flag: 1, uu_flag: 1 }),
+  // No patient row: no names, no sex (gender Missing), no age; the ART number comes from the unique id.
+  tnd('T11-A11', '2026-05-09T08:00:00Z', { client_name: ' ', age_years: null, sex: null, gender: 'Missing', art_number: 'U11', result: '3500' }),
+  // Nina's sex code N has no gender word of its own in slice 1's mapping.
+  tnd('T11-A12', '2026-05-13T08:00:00Z', { client_name: 'Nina Other', firstname: 'Nina', surname: 'Other', age_years: 40, sex: 'N', gender: 'Missing', art_number: 'A1200', result: '150', suppressed_flag: 1, uu_flag: 1 }),
+  // Hope's April result is outside the window; the May one is in.
+  tnd('T11-A13', '2026-05-15T08:00:00Z', { client_name: 'Hope Mulenga', firstname: 'Hope', surname: 'Mulenga', age_years: 36, art_number: 'A1300', result: '3000' }),
+  // Edge Two is in the local-date window (05-31), though a midnight window would drop it.
+  tnd('T11-B02', '2026-05-31T00:00:01+02:00', { facility: 'Choma Clinic', client_name: 'Edge Two', firstname: 'Edge', surname: 'Two', age_years: 25, art_number: 'B200', result: '100', suppressed_flag: 1, uu_flag: 1 }),
+  // Nowhere Clinic's register row has no province or district.
+  tnd('T11-N01', '2026-05-10T08:00:00Z', { province: null, district: null, facility: 'Nowhere Clinic', client_name: 'Nora Null', firstname: 'Nora', surname: 'Null', art_number: 'N100', result: '100', suppressed_flag: 1, uu_flag: 1 }),
+];
+const TND_ABSENT = [['T11-A13', '2026-04-20T08:00:00Z'], ['T11-B04', '2026-04-30T23:59:59+02:00'], ['T11-B06b', '2026-06-02T08:00:00Z'],
+  ['T11-U01', '2026-05-10T08:00:00Z'], ['T11-X01', '2026-07-10T08:00:00Z']];
+
+const tndSuite = {
+  name: 'tnd-builder',
+  setup: '',
+  sql: `select 'tnd-builder' || chr(9) || row_to_json(q)::text from (${bind(`with ${tndCte('tn')}
+select ${TND_COLUMNS.join(', ')} from tn order by lab_id, result_date`, MAY11)}) q;`,
+  count: 2 + TND_ROWS.length + TND_ABSENT.length,
+  check(got) {
+    const failures = [];
+    // 34 results: A 19, B 6, C 1, D 5, W 2, N 1.
+    if (got.length !== 34) failures.push(`expected 34 rows, got ${got.length}`);
+    if (got[0]) failures.push(...inOrder(Object.keys(got[0]), TND_COLUMNS));
+    for (const want of TND_ROWS) {
+      const row = got.find((g) => g.lab_id === want.lab_id && g.result_date === want.result_date);
+      if (!row) failures.push(`missing ${want.lab_id} ${want.result_date}`);
+      else if (JSON.stringify(TND_COLUMNS.map((c) => row[c] ?? null)) !== JSON.stringify(TND_COLUMNS.map((c) => want[c] ?? null))) {
+        failures.push(`${want.lab_id} ${want.result_date}: expected ${JSON.stringify(TND_COLUMNS.map((c) => want[c] ?? null))}, got ${JSON.stringify(TND_COLUMNS.map((c) => row[c] ?? null))}`);
+      }
+    }
+    for (const [lab, date] of TND_ABSENT) if (got.some((g) => g.lab_id === lab && g.result_date === date)) failures.push(`${lab} ${date} must not be in TND`);
+    return failures;
+  },
+};
+
+// hivvlCte with labsInWindow keeps the row of a lab whose earliest report is before the window (Hope, 04-20); without it, the lab is gone.
+const hvSuite = (name, options, rows) => orderedSuite10(name,
+  `with ${hivvlCte('hv', options)} select lab_id, tested_date from hv where lab_id = 'T11-A13'`, MAY11, ['lab_id', 'tested_date'], rows);
+
+const suitesBuilders11 = [
+  tndSuite,
+  hvSuite('hivvl-labs-in-window', { from: 'from', to: 'to', labsInWindow: true }, [{ lab_id: 'T11-A13', tested_date: '2026-04-20T08:00:00Z' }]),
+  hvSuite('hivvl-windowed', { from: 'from', to: 'to' }, []),
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
+  { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] }];

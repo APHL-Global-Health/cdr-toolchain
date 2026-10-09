@@ -5,7 +5,7 @@
 import { rpt, inListSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
 import {
   sqlLit, sqlList, inRange, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
-  requesterJoin, areaFilter, zmIdsCte,
+  areaFilter, tndCte, TND_PANELS, TND_OBSERVATIONS, TND_INVALID_RESULTS, TND_SUPPRESSED_RESULTS,
 } from './zm-sql.mjs';
 
 // These moved to zm-sql.mjs; slice 1's importers still get them from here.
@@ -14,27 +14,16 @@ export { artNumberSql, ZM_REGISTER_URL, provinceOptionsSql };
 // Zambia's v1 panel and observation codes (content, so they live in the pack).
 export const ZM_CODES = {
   // TND: the valid results of part 1.
-  validPanels: ['HIVVL', 'RTRI'],
-  validObservations: ['HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC'],
+  validPanels: TND_PANELS,
+  validObservations: TND_OBSERVATIONS,
   // Parts 2 and 3.
   vlPanel: 'HIVVL',
   unclearObservations: ['HIVVL', 'HIVVC', 'HIVVD'],
 };
 
-// v1 TND (sp_GetPreviousVLResultforCohort2x): results left out as not a viral load.
-export const INVALID_RESULTS = [
-  'antibodies. @mat3', 'FAIL', 'Haemolysed', 'Haemolysed ++', 'Insufficient for further tests',
-  'Insufficient serum received', 'INV', 'INVAL', 'Negative', 'No', 'Please repeat', 'Positive',
-  'to confirm patient identity.', 'Weak Positive', 'Invalid', 'Absent', 'antibodies.', 'AT', 'Failed',
-  'Icteric ++++', 'Indeterminate', 'per request', 'Positive (Repeat sample)',
-  'This result has been checked', 'VAL', '@con1 @con2',
-];
-// v1 TND: results counted as suppressed, beside any number under 1000.
-export const SUPPRESSED_RESULTS = [
-  '<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml',
-  '<30 copies/mL', 'NDET', 'ND', '<20CP', '< 40', '<40 copies/mL', '<400 copies/mL', '<400',
-  '<883 copies/mL',
-];
+// The TND lists moved to zm-sql.mjs (tndCte); these names stay for the importers of this file.
+export const INVALID_RESULTS = TND_INVALID_RESULTS;
+export const SUPPRESSED_RESULTS = TND_SUPPRESSED_RESULTS;
 // v1 sp_*_hivvl_clients_month, part "incs": texts that are not unclear although not a number.
 export const BELOW_LIMIT_RESULTS = [
   '< 20', '<30 copies/mL', '> 10000000', 'NDET', 'Target Not Detected', 'RNA Not Detected',
@@ -52,40 +41,11 @@ export const BELOW_LIMIT_RESULTS = [
 // query reads only the requests in the range. Gender and the two dates always
 // come from the request (v1 part 1 leaves them blank when its hivvl table lacks the request).
 // Part 1 builds the ART number with artNumberSql; parts 2 and 3 show the unique id raw, as v1 does.
+// zm_req and zm_valid are built by tndCte (zm-sql.mjs), which Task 11's "Unique VL clients" also reads. The panels and observations of
+// part 1 are the TND ones (codes.validPanels and validObservations hold the same lists).
 export function provinceClientsSql(codes) {
   const result = rpt('r');
-  return `with ${zmIdsCte('zm_ids')},
-zm_req as (
-  select lr.id, lr.request_id, lr.panel_code, lr.age_years, lr.authored_at,
-    fmr.region as province, fmr.district, fmr.name as facility,
-    concat(p.firstname, ' ', p.surname) as client_name,
-    case p.sex when 'F' then 'Female' when 'M' then 'Male' when 'U' then 'Unknown' when 'I' then 'Indeterminate' else 'Missing' end as gender,
-    zi.reference_numbers, zi.unique_id,
-    dr.status as report_status, dr.effective as collected_date, dr.issued as result_date
-  from lab_requests lr
-  ${requesterJoin('lr', 'fmr')}
-  left join diagnostic_reports dr on dr.based_on_id = lr.id
-  left join patients p on p.id = lr.patient_id
-  left join zm_ids zi on zi.lab_request_id = lr.id
-  where ${areaFilter({ province: 'province' }, 'fmr')}
-    and lr.panel_code in (${sqlList([...new Set([...codes.validPanels, codes.vlPanel])])})
-    and (${inRange('dr.issued')} or ${inRange('lr.authored_at')})
-),
-zm_valid as (
-  select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.age_years, q.gender,
-    ${artNumberSql("coalesce(q.reference_numbers, '')", "coalesce(q.unique_id, '')")} as art_number,
-    q.collected_date, q.authored_at as registered_date, q.result_date,
-    ${result} as result,
-    case when ${inListSql(result, SUPPRESSED_RESULTS)} or r.numeric_value < 1000 then 'Yes' else 'No' end as suppressed
-  from zm_req q
-  join lab_results r on r.request_id = q.id
-  where q.panel_code in (${sqlList(codes.validPanels)})
-    and r.observation_code in (${sqlList(codes.validObservations)})
-    and q.report_status = 'final'
-    and ${inRange('q.result_date')}
-    and ${result} is not null
-    and not ${inListSql(result, INVALID_RESULTS)}
-),
+  return `with ${tndCte('zm_valid', { reqName: 'zm_req', where: areaFilter({ province: 'province' }, 'fmr'), extraPanels: [codes.vlPanel], orRegistered: true })},
 zm_rejected as (
   select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.age_years, q.gender,
     q.unique_id as art_number, q.collected_date, q.authored_at as registered_date, q.result_date,
@@ -116,7 +76,9 @@ select province as "Province", district as "District", facility as "Facility", l
   collected_date as "CollectedDate", registered_date as "RegisteredDate", result_date as "ResultDate",
   result as "Result", suppressed as "Suppressed"
 from (
-  select * from zm_valid
+  select province, district, facility, lab_id, client_name, age_years, gender, art_number, collected_date, registered_date, result_date,
+    result, case when suppressed_flag = 1 then 'Yes' else 'No' end as suppressed
+  from zm_valid
   union
   select * from zm_rejected
   union
