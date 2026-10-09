@@ -100,8 +100,11 @@ Error words: `POS`, `Positive`, `Invalid`, `INVAL`, `Valid`, `Indeterminado`, `N
 `Negative`. v1's comparison is SQL Server's default case-insensitive collation; the port compares
 case-insensitively too.
 
-**Two quirks reproduced on purpose:**
+**Three quirks reproduced on purpose:**
 
+- Rule 2 has no numeric branch. A plain number in HIVVD with nothing in HIVVR, HIVVC or HIVVF
+  (`result = '540'`, `capctm` NULL) returns `INDETECTAVEL`, not `540`. Worth asking the Mozambique
+  team whether that is intended; the port matches v1 either way.
 - Rule 3 with both NULL: `CONCAT(NULL, NULL)` is `''`, and `ISNUMERIC('')` is 0, so the result is NULL.
 - Rule 3's numeric test runs on the two values joined together (`'20' || '1000'` is `'201000'`), as v1
   does. It reads like a bug, but the port matches v1, not intent.
