@@ -641,4 +641,303 @@ const suites6 = [
   },
 ];
 
-export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }];
+// ============================================================================================
+// Group t7: "VL dashboard by sex and age" (v1 sp_dash_getHIVVL_v2_List, merging vSuppressionByFacility
+// and vVLQuarterlyFacilitySuppressionRate) and "VL monthly trend" (v1 sp_dash_getMonthlyVLTrend).
+// Fixture ids start with "t7-"; lab ids start with "T7-". "List line N" is a line of
+// StoredProcedure__dbo_sp_dash_getHIVVL_v2_List.sql; "Trend line N" is a line of
+// StoredProcedure__dbo_sp_dash_getMonthlyVLTrend.sql.
+//
+// List window (lines 17-21, 29, 40): TestedDate is a datetime and the end date is moved one day forward, so a
+// test counts when its LOCAL wall time is from [from 00:00:00, to + 1 day 00:00:00]. Only a test at exactly
+// midnight of the day after `to` is in; v2 (cast to date) takes the whole day. Trend window: the local date.
+// ============================================================================================
+
+const P7 = [];
+const R7 = [];
+const D7 = [];
+const L7 = [];
+const F7 = [];
+let n7 = 0;
+// One lab id: a request with one result and one report. `o`: req (facility code), sex (null: no patient),
+// age, num or text (the result), coll, iss, form (VIRAL answers), status.
+function lab7(labId, o) {
+  const k = String(++n7).padStart(2, '0');
+  const qid = `t7-q${k}`;
+  let pid = null;
+  if (o.sex !== null && o.sex !== undefined) {
+    pid = `t7-p${k}`;
+    P7.push(`(${lit(pid)}, ${lit('P' + k)}, ${lit(o.sex)})`);
+  }
+  R7.push(`(${lit(qid)}, ${lit(labId)}, 'HIVVL', '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(o.req)}, ${lit(pid)}, ${sql6(o.age)})`);
+  D7.push(`(${lit(`t7-d${k}`)}, ${lit(qid)}, ${lit(o.status ?? 'final')}, ${lit(o.coll)}, ${lit(o.iss)}, 'LUS')`);
+  L7.push(`(${lit(`t7-r${k}`)}, ${lit(qid)}, 'HIVVL', ${lit(o.text ?? null)}, ${sql6(o.num)}, null)`);
+  if (o.form) {
+    const items = o.form.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    F7.push(`(${lit(`t7-f${k}`)}, 'q', 'hiv_vl_documentation', ${lit(qid)}, '2026-05-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  }
+}
+
+// Choma General Hospital (Southern / Choma). Comments: gender, age group, suppressed, undetectable, tat.
+lab7('T7-A1', { req: CHO, sex: 'F', age: 30, num: 540, coll: MAY1, iss: '2026-05-10T10:00:00Z' });                            // Female 30-34, supp 1, uu 0, tat 9
+lab7('T7-A2', { req: CHO, sex: 'F', age: 33, num: 1500, coll: MAY1, iss: '2026-05-12T10:00:00Z', form: [['ARTPR', 'Yes']] }); // Female 30-34, supp 0, tat 11, pregnant
+lab7('T7-A3', { req: CHO, sex: 'F', age: 28, text: 'Target Not Detected', coll: MAY1, iss: '2026-05-20T10:00:00Z',
+  form: [['VBREA', 'Y']] });                                                                                                 // Female 25-29, supp 1, uu 1, tat 19 (not within 14), breastfeeding
+lab7('T7-A4', { req: CHO, sex: 'M', age: 41, num: 100, coll: '2026-05-08T08:00:00Z', iss: '2026-05-10T10:00:00Z',
+  form: [['ARTRS', 'Baseline VL']] });                                                                                       // Male 40-44, supp 1, uu 1, tat 2, baseline
+lab7('T7-A5', { req: CHO, sex: 'M', age: 42, num: 3000, coll: '2026-05-07T08:00:00Z', iss: '2026-05-10T10:00:00Z',
+  form: [['VISIT', '3 months post unsuppressed VL result']] });                                                              // Male 40-44, supp 0, tat 3, 3 months
+lab7('T7-A6', { req: CHO, sex: 'F', age: 30, num: 700, coll: '2026-05-06T08:00:00Z', iss: '2026-05-10T10:00:00Z' });          // Female 30-34, supp 1, tat 4
+// Choma Clinic (Southern / Choma).
+lab7('T7-B1', { req: CL2, sex: 'X', age: 12, num: 250, coll: '2026-05-20T10:00:00Z', iss: '2026-05-22T10:00:00Z' });          // gender NULL (Missing), 10-14, supp 1, uu 0, tat 2
+lab7('T7-B2', { req: CL2, sex: 'F', age: null, num: 950, coll: MAY1, iss: '2026-05-04T10:00:00Z' });                         // Female, age group NULL (Missing), supp 1, tat 3
+lab7('T7-B3', { req: CL2, sex: null, age: null, num: 1000, coll: MAY1, iss: '2026-05-08T10:00:00Z' });                       // Missing, Missing, supp 0 (1000 is not under 1000), tat 7
+lab7('T7-B4', { req: CL2, sex: 'O', age: 11, num: 150, coll: '2026-05-10T10:00:00Z', iss: '2026-05-11T10:00:00Z' });          // gender NULL (O), 10-14, supp 1, uu 1, tat 1
+// Mazabuka Hospital (Southern / Mazabuka).
+lab7('T7-C1', { req: MAZ, sex: 'M', age: 22, num: 5000, coll: MAY1, iss: '2026-05-07T10:00:00Z' });                          // Male 20-24, supp 0, tat 6
+lab7('T7-C2', { req: MAZ, sex: 'F', age: 22, num: 10, coll: MAY1, iss: '2026-05-05T10:00:00Z' });                            // Female 20-24, supp 1, uu 1, tat 4
+// Chilenje Clinic (Lusaka / Lusaka), with stamps at +02:00 near midnight and at the edges of the List window.
+lab7('T7-D1', { req: LUS, sex: 'F', age: 25, num: 100, coll: '2026-05-31T23:30:00+02:00', iss: '2026-05-31T23:50:00+02:00' });   // Female 25-29, supp 1, uu 1, tat 0; local 05-31
+lab7('T7-D2', { req: LUS, sex: 'M', age: 60, num: 800, coll: '2026-05-30T10:00:00Z', iss: '2026-06-01T00:00:00+02:00' });        // Male 50+, supp 1, tat 2; local 06-01 00:00:00 exactly
+lab7('T7-D3', { req: LUS, sex: 'F', age: 35, num: 500, coll: '2026-05-30T10:00:00Z', iss: '2026-06-01T00:00:01+02:00' });        // Female 35-39, supp 1, tat 2; local 06-01 00:00:01
+lab7('T7-D4', { req: LUS, sex: 'M', age: 18, num: 600, coll: '2026-04-29T10:00:00+02:00', iss: '2026-05-01T00:30:00+02:00' });   // Male 15-19, supp 1, tat 2; local 05-01 00:30 (UTC 04-30)
+lab7('T7-D5', { req: LUS, sex: 'F', age: 40, num: 700, coll: '2026-04-28T10:00:00Z', iss: '2026-04-30T23:30:00Z' });              // Female 40-44, supp 1, tat 2; local 04-30 23:30
+lab7('T7-D6', { req: LUS, sex: 'F', age: 29, num: 300, coll: '2026-05-30T10:00:00Z', iss: '2026-06-01T23:30:00+02:00' });        // Female 25-29, supp 1, tat 2; local 06-01 23:30
+// Other months, for the trend.
+lab7('T7-E1', { req: CHO, sex: 'M', age: 50, num: 100, coll: '2026-03-30T10:00:00Z', iss: '2026-04-01T00:30:00+02:00' });        // Male 50+, supp 1, uu 1, tat 2; local 04-01 (UTC 03-31)
+lab7('T7-E2', { req: CHO, sex: 'M', age: 50, num: 3000, coll: '2026-03-29T10:00:00Z', iss: '2026-03-31T23:30:00+02:00' });       // supp 0, tat 2; local 03-31
+lab7('T7-Y1', { req: LUS, sex: 'F', age: 20, num: 400, coll: '2025-12-30T10:00:00Z', iss: '2026-01-01T00:30:00+02:00' });        // supp 1, uu 0, tat 2; local 2026-01-01 (UTC 2025-12-31)
+lab7('T7-Y2', { req: LUS, sex: 'M', age: 20, num: 2000, coll: '2025-12-10T10:00:00Z', iss: '2025-12-15T10:00:00Z' });             // supp 0, tat 5
+// Left out whatever the window: a facility that is not in the register, and a cancelled report.
+lab7('T7-UNMAPPED', { req: 'ZUNMP', sex: 'F', age: 30, num: 100, coll: MAY1, iss: '2026-05-10T10:00:00Z' });
+lab7('T7-CANC', { req: CHO, sex: 'F', age: 30, num: 100, coll: MAY1, iss: null, status: 'cancelled' });
+
+const SETUP7 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t7-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t7-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t7-fm3', '', '', 'ZMAZA', 'reg-m', 'Mazabuka Hospital', 'Southern', 'Mazabuka'),
+  ('t7-fm4', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t7-fm5', '', '', 'ZUNMP', null, null, null, null);
+insert into patients (id, surname, sex) values ${P7.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years) values ${R7.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values ${D7.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${L7.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${F7.join(',\n  ')};`;
+
+// ---- Expected rows, worked out by hand from the List text (lines 34-47 for the output and the order) ----
+
+const SEX_AGE_COLUMNS = ['Province', 'District', 'Facility', 'Gender', 'AgeGroup', 'Tests', 'Suppressed', 'UnSuppressed',
+  'Undetectable', 'TATWithin14', 'Pregnant', 'BreastFeeding', 'BaselineVL', 'ThreeMPostUnSuppressed', 'SuppressionRate'];
+// counts: [tests, suppressed, unsuppressed, undetectable, within 14 days, pregnant, breastfeeding, baseline, 3 months]
+const sx = (province, district, facility, gender, age, counts, rate) =>
+  Object.fromEntries(SEX_AGE_COLUMNS.map((c, i) => [c, [province, district, facility, gender, age, ...counts, rate][i]]));
+// The fallback row (lines 49, 80, 112): blank names, zeros. v1's row has no UnSuppressed column and no rate.
+const NOTHING = sx('', '', '', '', '', [0, 0, 0, 0, 0, 0, 0, 0, 0], null);
+
+// Southern, by gender and age group. Rate = suppressed / tests as a percent, one decimal
+// (vVLQuarterlyFacilitySuppressionRate line 40).
+//   C2 Female 20-24: 1 test, suppressed, undetectable, within 14.
+//   A3 Female 25-29: tat 19, so not within 14; breastfeeding.
+//   A1 A2 A6 Female 30-34: suppressed 2 (A1 A6), pregnant 1 (A2), within 14 all three: 2/3 = 66.7.
+//   B2 Female, no age group. C1 Male 20-24 (unsuppressed). A4 A5 Male 40-44: suppressed 1, undetectable 1, baseline 1, 3 months 1.
+//   B1 B4 gender NULL 10-14: both suppressed, undetectable 1 (B4). B3 gender NULL and age NULL: unsuppressed.
+const S_FEM2024 = [1, 1, 0, 1, 1, 0, 0, 0, 0];
+const S_FEM2529 = [1, 1, 0, 1, 0, 0, 1, 0, 0];
+const S_FEM3034 = [3, 2, 1, 0, 3, 1, 0, 0, 0];
+const S_FEMMISS = [1, 1, 0, 0, 1, 0, 0, 0, 0];
+const S_MAL2024 = [1, 0, 1, 0, 1, 0, 0, 0, 0];
+const S_MAL4044 = [2, 1, 1, 1, 2, 0, 0, 1, 1];
+const S_MIS1014 = [2, 2, 0, 1, 2, 0, 0, 0, 0];
+const S_MISMISS = [1, 0, 1, 0, 1, 0, 0, 0, 0];
+const ONE_SUPP = [1, 1, 0, 0, 1, 0, 0, 0, 0];
+const ONE_SUPP_UU = [1, 1, 0, 1, 1, 0, 0, 0, 0];
+
+// National branch (List line 34): one row per province, gender, age group; District and Facility are 'All'.
+const NATIONAL7 = [
+  sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU, 100),                    // D1
+  sx('Lusaka', 'All', 'All', 'Male', '15-19', ONE_SUPP, 100),                         // D4
+  sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),                           // D2, local 06-01 00:00:00
+  sx('Southern', 'All', 'All', 'Female', '20-24', S_FEM2024, 100),
+  sx('Southern', 'All', 'All', 'Female', '25-29', S_FEM2529, 100),
+  sx('Southern', 'All', 'All', 'Female', '30-34', S_FEM3034, 66.7),
+  sx('Southern', 'All', 'All', 'Female', 'Missing', S_FEMMISS, 100),
+  sx('Southern', 'All', 'All', 'Male', '20-24', S_MAL2024, 0),
+  sx('Southern', 'All', 'All', 'Male', '40-44', S_MAL4044, 50),
+  sx('Southern', 'All', 'All', 'Missing', '10-14', S_MIS1014, 100),
+  sx('Southern', 'All', 'All', 'Missing', 'Missing', S_MISMISS, 0),
+];
+// Province branch (line 65): one row per facility, gender, age group. Order: district, facility, gender, age group.
+const CHOMA_CLINIC = [
+  sx('Southern', 'Choma', 'Choma Clinic', 'Female', 'Missing', S_FEMMISS, 100),
+  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', '10-14', S_MIS1014, 100),
+  sx('Southern', 'Choma', 'Choma Clinic', 'Missing', 'Missing', S_MISMISS, 0),
+];
+const CHOMA_GENERAL = [
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '25-29', S_FEM2529, 100),
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Female', '30-34', S_FEM3034, 66.7),
+  sx('Southern', 'Choma', 'Choma General Hospital', 'Male', '40-44', S_MAL4044, 50),
+];
+const MAZABUKA7 = [
+  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Female', '20-24', S_FEM2024, 100),
+  sx('Southern', 'Mazabuka', 'Mazabuka Hospital', 'Male', '20-24', S_MAL2024, 0),
+];
+const CHILENJE = [
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Female', '25-29', ONE_SUPP_UU, 100),
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP, 100),
+  sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '50+', ONE_SUPP, 100),
+];
+
+// ---- The List suites ----
+
+const sexAgeQuery = queries().find((q) => q.name === 'VL dashboard by sex and age');
+const trendQuery = queries().find((q) => q.name === 'VL monthly trend');
+
+// A suite over a query's rows: column order, then the rows IN ORDER (v1 orders its rows).
+function orderedSuite(name, sqlText, params, columns, expectedRows, setup = '') {
+  const key = (r) => JSON.stringify(columns.map((c) => r[c] ?? null));
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${bind(sqlText, params)}) q;`,
+    count: expectedRows.length + 1,
+    check(got) {
+      const failures = [];
+      if (got.length !== expectedRows.length) failures.push(`expected ${expectedRows.length} rows, got ${got.length}`);
+      if (got[0]) {
+        failures.push(...inOrder(Object.keys(got[0]), columns));
+        if (Object.keys(got[0]).length !== columns.length) failures.push(`expected ${columns.length} columns, got ${Object.keys(got[0]).length}`);
+      }
+      const have = got.map(key);
+      const want = expectedRows.map(key);
+      if (have.length === want.length) {
+        have.forEach((h, i) => { if (h !== want[i]) failures.push(`row ${i + 1}: expected ${want[i]}, got ${h}`); });
+      } else {
+        for (const x of want) if (!have.includes(x)) failures.push(`missing row ${x}`);
+        for (const g of have) if (!want.includes(g)) failures.push(`unexpected row ${g}`);
+      }
+      return failures;
+    },
+  };
+}
+const listSuite = (name, params, rows, setup = '') => orderedSuite(name, sexAgeQuery?.sql ?? 'select 1', params, SEX_AGE_COLUMNS, rows, setup);
+const area2 = (province, district) => ({ province, district });
+
+const suites7list = [
+  listSuite('sexage-national', { ...area2('', ''), ...win }, NATIONAL7, SETUP7),
+  listSuite('sexage-province', { ...area2('Southern', ''), ...win }, [...CHOMA_CLINIC, ...CHOMA_GENERAL, ...MAZABUKA7]),
+  listSuite('sexage-district', { ...area2('Southern', 'Choma'), ...win }, [...CHOMA_CLINIC, ...CHOMA_GENERAL]),
+  listSuite('sexage-lusaka', { ...area2('Lusaka', ''), ...win }, CHILENJE),
+  listSuite('sexage-lusaka-district', { ...area2('Lusaka', 'Lusaka'), ...win }, CHILENJE),
+  // Names compare as SQL Server does (case and trailing spaces ignored); the rows show the stored names.
+  listSuite('sexage-names-fold', { ...area2('SOUTHERN ', 'choma  '), ...win }, [...CHOMA_CLINIC, ...CHOMA_GENERAL]),
+  // Nothing found: v1 returns only the all-zero row with blank names (lines 49, 80, 112), in every branch.
+  listSuite('sexage-empty-national', { ...area2('', ''), from: '2026-07-01', to: '2026-07-31' }, [NOTHING]),
+  listSuite('sexage-empty-province', { ...area2('Western', ''), ...win }, [NOTHING]),
+  listSuite('sexage-empty-district', { ...area2('Southern', 'Kafue'), ...win }, [NOTHING]),
+  listSuite('sexage-wrong-district', { ...area2('Lusaka', 'Choma'), ...win }, [NOTHING]),
+  // A district without a province matches no branch (lines 22, 51, 83): no result set at all, not even the zero row.
+  listSuite('sexage-district-only', { ...area2('', 'Choma'), ...win }, []),
+  listSuite('sexage-district-only-empty', { ...area2('', 'Kafue'), ...win }, []),
+  // The window is [from 00:00:00, to + 1 day 00:00:00] on the LOCAL wall time (lines 17-21, 29, 40).
+  // 05-31: D1 (05-31 23:50) and D2 (exactly 06-01 00:00:00) are in; D3 (00:00:01) is out.
+  listSuite('sexage-window-0531', { ...area2('', ''), from: '2026-05-31', to: '2026-05-31' }, [
+    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP_UU, 100),
+    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),
+  ]),
+  // 06-01: D2 again (a test at midnight counts in two consecutive windows), D3, and D6 (06-01 23:30).
+  listSuite('sexage-window-0601', { ...area2('', ''), from: '2026-06-01', to: '2026-06-01' }, [
+    sx('Lusaka', 'All', 'All', 'Female', '25-29', ONE_SUPP, 100),
+    sx('Lusaka', 'All', 'All', 'Female', '35-39', ONE_SUPP, 100),
+    sx('Lusaka', 'All', 'All', 'Male', '50+', ONE_SUPP, 100),
+  ]),
+  // 04-30: D5 (04-30 23:30) is in; D4 (local 05-01 00:30, after the midnight that ends the window) is out. v2 would take it.
+  listSuite('sexage-window-0430', { ...area2('', ''), from: '2026-04-30', to: '2026-04-30' }, [
+    sx('Lusaka', 'All', 'All', 'Female', '40-44', ONE_SUPP, 100),
+  ]),
+  // 05-01: D4 is in (local 05-01 00:30; its UTC date is 04-30).
+  listSuite('sexage-window-0501', { ...area2('Lusaka', ''), from: '2026-05-01', to: '2026-05-01' }, [
+    sx('Lusaka', 'Lusaka', 'Chilenje Clinic', 'Male', '15-19', ONE_SUPP, 100),
+  ]),
+  {
+    name: 'sexage-shape',
+    count: 5,
+    check() {
+      const bad = [];
+      if (!sexAgeQuery) return ['query "VL dashboard by sex and age" is missing'];
+      const ids = sexAgeQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['province', 'district', 'from', 'to'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(sexAgeQuery.params.map((p) => [p.id, p]));
+      if (byId.province.type !== 'select' || byId.district.type !== 'select') bad.push('area parameter types');
+      if (byId.province.required || byId.district.required) bad.push('area parameters are optional');
+      if (!byId.from.required || !byId.to.required) bad.push('from and to are required (ruling 3)');
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(sexAgeQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+];
+
+// ---- The trend suites. Expected rows from Trend lines 13, 28, 43 (province, district, facility) and 60 (all). ----
+
+const TREND_COLUMNS = ['MonthID', 'Tests', 'Suppressed', 'Undetectable', 'Within14', 'Pregnant', 'BreastFeeding', 'Baseline'];
+const tr = (month, tests, suppressed, undetectable, within14, pregnant = null, breastfeeding = null, baseline = null) =>
+  Object.fromEntries(TREND_COLUMNS.map((c, i) => [c, [month, tests, suppressed, undetectable, within14, pregnant, breastfeeding, baseline][i]]));
+const trendSuite = (name, params, rows, setup = '') => orderedSuite(name, trendQuery?.sql ?? 'select 1', params, TREND_COLUMNS, rows, setup);
+const area3 = (province, district, facility) => ({ province, district, facility });
+const span = (from, to) => ({ from, to });
+
+// April: D5 (supp 1, uu 0) and E1 (supp 1, uu 1), both within 14 days; E2 is local 03-31. No flag is set, so the sums are NULL (line 17).
+const APRIL = tr('2026 - 04', 2, 2, 1, 2);
+// May, all: A1..A6 B1..B4 C1 C2 D1 D4 = 14 tests; suppressed 10; undetectable A3 A4 B4 C2 D1 = 5; within 14: all but A3 = 13;
+// pregnant A2, breastfeeding A3, baseline A4. D2 (06-01 00:00:00 local) is June here: the trend takes the local date.
+const MAY = tr('2026 - 05', 14, 10, 5, 13, 1, 1, 1);
+// June: D2 D3 D6 (800, 500, 300): all suppressed, none under 200.
+const JUNE = tr('2026 - 06', 3, 3, 0, 3);
+
+const suites7trend = [
+  trendSuite('trend-national', { ...area3('', '', ''), ...span('2026-04-01', '2026-05-31') }, [APRIL, MAY]),
+  trendSuite('trend-may-june', { ...area3('', '', ''), ...span('2026-05-01', '2026-06-30') }, [MAY, JUNE]),
+  // Southern: April E1; May 12 labs (A, B, C): suppressed 8, undetectable A3 A4 B4 C2 = 4, within 14: 11.
+  trendSuite('trend-province', { ...area3('Southern', '', ''), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 04', 1, 1, 1, 1), tr('2026 - 05', 12, 8, 4, 11, 1, 1, 1)]),
+  // Southern / Choma: April E1; May A1..A6 B1..B4 = 10: suppressed 7, undetectable 3, within 14: 9.
+  trendSuite('trend-district', { ...area3('Southern', 'Choma', ''), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 04', 1, 1, 1, 1), tr('2026 - 05', 10, 7, 3, 9, 1, 1, 1)]),
+  // Choma Clinic: B1..B4 in May; suppressed 3, undetectable 1, within 14: 4. No flags.
+  trendSuite('trend-facility', { ...area3('Southern', 'Choma', 'Choma Clinic'), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 05', 4, 3, 1, 4)]),
+  trendSuite('trend-names-fold', { ...area3('southern', 'CHOMA ', 'choma clinic  '), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 05', 4, 3, 1, 4)]),
+  // Lusaka: April D5; May D1 D4.
+  trendSuite('trend-lusaka', { ...area3('Lusaka', '', ''), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 04', 1, 1, 0, 1), tr('2026 - 05', 2, 2, 1, 2)]),
+  trendSuite('trend-lusaka-district', { ...area3('Lusaka', 'Lusaka', ''), ...span('2026-04-01', '2026-05-31') }, [tr('2026 - 04', 1, 1, 0, 1), tr('2026 - 05', 2, 2, 1, 2)]),
+  // Any other combination falls to v1's last branch (line 60): nothing is filtered, so it is all of Zambia.
+  trendSuite('trend-district-only', { ...area3('', 'Choma', ''), ...span('2026-04-01', '2026-05-31') }, [APRIL, MAY]),
+  trendSuite('trend-facility-only', { ...area3('', '', 'Choma Clinic'), ...span('2026-04-01', '2026-05-31') }, [APRIL, MAY]),
+  trendSuite('trend-province-facility', { ...area3('Southern', '', 'Choma Clinic'), ...span('2026-04-01', '2026-05-31') }, [APRIL, MAY]),
+  trendSuite('trend-district-facility', { ...area3('', 'Choma', 'Choma Clinic'), ...span('2026-04-01', '2026-05-31') }, [APRIL, MAY]),
+  // The month is the local month of the stamp. D4 (local 05-01 00:30, UTC 04-30) is May; E1 (local 04-01, UTC 03-31) is April.
+  trendSuite('trend-edge-0501', { ...area3('', '', ''), ...span('2026-05-01', '2026-05-01') }, [tr('2026 - 05', 1, 1, 0, 1)]),
+  trendSuite('trend-edge-0531', { ...area3('', '', ''), ...span('2026-05-31', '2026-05-31') }, [tr('2026 - 05', 1, 1, 1, 1)]),
+  trendSuite('trend-edge-0601', { ...area3('', '', ''), ...span('2026-06-01', '2026-06-01') }, [JUNE]),
+  trendSuite('trend-edge-0430', { ...area3('', '', ''), ...span('2026-04-30', '2026-04-30') }, [tr('2026 - 04', 1, 1, 0, 1)]),
+  trendSuite('trend-edge-0401', { ...area3('', '', ''), ...span('2026-04-01', '2026-04-01') }, [tr('2026 - 04', 1, 1, 1, 1)]),
+  // The year turns: MonthID sorts 2025 - 12 before 2026 - 01. Y1 is local 2026-01-01 (UTC 2025-12-31).
+  trendSuite('trend-year-turn', { ...area3('', '', ''), ...span('2025-12-01', '2026-01-31') }, [tr('2025 - 12', 1, 0, 0, 1), tr('2026 - 01', 1, 1, 0, 1)]),
+  // No test in the window: no row (a group by over no rows).
+  trendSuite('trend-empty', { ...area3('', '', ''), ...span('2026-07-01', '2026-07-31') }, []),
+  trendSuite('trend-empty-province', { ...area3('Western', '', ''), ...span('2026-04-01', '2026-05-31') }, []),
+  {
+    name: 'trend-shape',
+    count: 5,
+    check() {
+      const bad = [];
+      if (!trendQuery) return ['query "VL monthly trend" is missing'];
+      const ids = trendQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['province', 'district', 'facility', 'from', 'to'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(trendQuery.params.map((p) => [p.id, p]));
+      if (byId.province.type !== 'select' || byId.district.type !== 'select' || byId.facility.type !== 'text') bad.push('area parameter types');
+      if (byId.province.required || byId.district.required || byId.facility.required) bad.push('area parameters are optional');
+      if (!byId.from.required || !byId.to.required) bad.push('from and to are required (ruling 3)');
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(trendQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }];
