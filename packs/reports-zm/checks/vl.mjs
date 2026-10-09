@@ -1074,6 +1074,14 @@ fac('T8-42', { ana: null });                                                    
 fac('T8-43', { ref: '4343', results: [{ num: 300 }], auth: '2026-05-30T20:00:00Z', ana: '2026-05-30T23:59:59Z',
   iss: '2026-05-31T00:59:59Z' });                                                        // 32: 05-30 23:59:59: in the 05-31 window, out of a 05-30 window
 fac('T8-44', { req: 'ZCHO3', ref: 'C44', results: [{ num: 100 }] });                    // 33: a second register entry named "Choma Clinic"
+// Lab numbers that SQL Server and byte order sort differently. SQL Server: '-' < ':' < '@' < '_' < digits < letters; byte order:
+// '-' < digits < ':' < '@' < letters < '_'. They all sort after the T8- numbers in both. Serials 34 to 39 in SQL Server's order.
+fac('U8-1', { ref: '8001' });   // 34
+fac('U8:1', { ref: '8002' });   // 35
+fac('U8@1', { ref: '8003' });   // 36
+fac('U8_1', { ref: '8004' });   // 37
+fac('U891', { ref: '8005' });   // 38
+fac('U8A1', { ref: '8006' });   // 39
 
 const SETUP8 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
   ('t8-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
@@ -1130,6 +1138,12 @@ const FAC_GENERAL = [
   fv(30, '3737', '100', 1, 0, 0, 0, 1),
   fv(31, '3939', '200', 1, 0, 1, 0, 2),
   fv(32, '4343', '300', 1, 0, 29, 0, 1),
+  fv(34, '8001', '540', 1, 0, 1, 0, 4),
+  fv(35, '8002', '540', 1, 0, 1, 0, 4),
+  fv(36, '8003', '540', 1, 0, 1, 0, 4),
+  fv(37, '8004', '540', 1, 0, 1, 0, 4),
+  fv(38, '8005', '540', 1, 0, 1, 0, 4),
+  fv(39, '8006', '540', 1, 0, 1, 0, 4),
 ];
 const FAC_CLINIC = [
   fv(4, 'AB-1 2', '>10000000 copies/mL', 0, 1, 1, 0, 4, 'Choma Clinic'),
@@ -1346,6 +1360,10 @@ res9('T9-58', 'M101', '2026-05-05T08:00:00Z', { num: 1111 });
 // No patient row: sex is empty, one partition.
 res9('T9-73', 'N101', '2026-03-01T08:00:00Z', { num: 175, sex: null });
 res9('T9-74', 'N101', '2026-05-19T08:00:00Z', { num: 3300, sex: null });
+// A two-sex client: visit 1 of the pivot holds '<20 copies/mL' (F) and '150' (M). SQL Server's MAX picks '150' ('<' sorts before digits).
+res9('T9-83', 'Q101', '2026-03-01T08:00:00Z', { text: '<20 copies/mL', sex: 'F' });
+res9('T9-84', 'Q101', '2026-03-02T08:00:00Z', { num: 150, sex: 'M' });
+res9('T9-85', 'Q101', '2026-05-11T08:00:00Z', { num: 1400, sex: 'F' });
 // Two results in the window: T2 joins every x row to every cohort row of the client, so each row shows twice.
 res9('T9-75', 'D101', '2026-05-20T08:00:00Z', { num: 1100 });
 res9('T9-76', 'D101', '2026-05-21T08:00:00Z', { num: 1200 });
@@ -1427,6 +1445,7 @@ const T1_ROWS = {
   K101: pv(CGH9, 'K101', ['165', '2800']),
   M101: pv(CGH9, 'M101', ['201', '202', '203', '204', '205', '206', '207', '208', '209', '210']),
   N101: pv(CGH9, 'N101', ['175', '3300']),
+  Q101: pv(CGH9, 'Q101', ['150', '1400']),
   S101: pv(CGH9, 'S101', ['2200']),
   S102: pv(CGH9, 'S102', ['5,000', null, null, null, null, null, null, null, null, null]),
   S103: pv(CGH9, 'S103', ['700']),
@@ -1435,7 +1454,7 @@ const T1_ROWS = {
 // The clients of the full window, in v1's order. 2002 (no result in the window), 3003 (300 has three characters), E105 and E106 (their
 // high results are one second outside the window) have no row; 6006 is in through its HIVTM result.
 const T1_FULL = ['F103', 'F102', 'F101', 'BLANK', '1001', '4004', '6006', '7007', '8008', 'AB55', 'D101', 'E101', 'E102', 'E103', 'E104',
-  'G101', 'H101', 'K101', 'M101', 'N101', 'S101', 'S102', 'S103', 'V101'];
+  'G101', 'H101', 'K101', 'M101', 'N101', 'Q101', 'S101', 'S102', 'S103', 'V101'];
 // The pivot columns come from the full list in v1's sort order. Sorted by hand: Lusaka (Kafue, Lusaka), then Southern (Choma Clinic,
 // Choma General Hospital with ARTs '', 1001, 4004, 6006, 7007, 8008, AB55, D101, E101..E104, G101, H101, K101, M101, N101, S101..S103, V101).
 const t1Rows = (keys) => keys.map((k) => T1_ROWS[k]);
@@ -1475,6 +1494,8 @@ const T2_M101 = cl(CGH9, 'M101', [[1, UNS, 'May  5 2026  8:00AM', '1111'], [2, S
   [7, SUP, 'Nov  5 2025  8:00AM', '206'], [8, SUP, 'Oct  5 2025  8:00AM', '205'], [9, SUP, 'Sep  5 2025  8:00AM', '204'],
   [10, SUP, 'Aug  5 2025  8:00AM', '203'], [11, SUP, 'Jul  5 2025  8:00AM', '202'], [12, SUP, 'Jun  5 2025  8:00AM', '201']]);
 const T2_N101 = cl(CGH9, 'N101', [[1, UNS, 'May 19 2026  8:00AM', '3300'], [2, SUP, 'Mar  1 2026  8:00AM', '175']]);
+// Q101: the F series is ranks 1 (May 11) and 2 (Mar 1); the M series has one result, rank 1.
+const T2_Q101 = cl(CGH9, 'Q101', [[1, SUP, 'Mar  2 2026  8:00AM', '150'], [1, UNS, 'May 11 2026  8:00AM', '1400'], [2, SUP, 'Mar  1 2026  8:00AM', '<20 copies/mL']]);
 const T2_P101 = cl(CGH9, 'P101', [[1, SUP, 'May 12 2026  8:00AM', '600'], [2, SUP, 'Feb  1 2026  8:00AM', '500']]);
 const T2_P102 = cl(CGH9, 'P102', [[1, SUP, 'May 13 2026  8:00AM', '700'], [2, SUP, 'Jan  1 2026  8:00AM', '650']]);
 const T2_P103 = cl(CGH9, 'P103', [[1, SUP, 'May 14 2026  8:00AM', '800']]);
@@ -1497,7 +1518,7 @@ const T2_LUSAKA = [...T2_F103, ...T2_F102, ...T2_P106L];
 const T2_CHOMA_CLINIC = T2_F101;
 const T2_CGH = [...T2_BLANK, ...T2_1001, ...T2_3003, ...T2_4004, ...T2_7007, ...T2_8008, ...T2_AB55, ...T2_D101, ...T2_E101, ...T2_E102,
   ...T2_E103, ...T2_E104, ...T2_G101, ...T2_H101, ...T2_K101, ...T2_M101, ...T2_N101, ...T2_P101, ...T2_P102, ...T2_P103, ...T2_P104,
-  ...T2_P105, ...T2_P106, ...T2_P107, ...T2_P108, ...T2_P109, ...T2_S101, ...T2_S102, ...T2_S103, ...T2_V101];
+  ...T2_P105, ...T2_P106, ...T2_P107, ...T2_P108, ...T2_P109, ...T2_Q101, ...T2_S101, ...T2_S102, ...T2_S103, ...T2_V101];
 const T2_ALL = [...T2_LUSAKA, ...T2_CHOMA_CLINIC, ...T2_CGH];
 const T2_SOUTHERN = [...T2_CHOMA_CLINIC, ...T2_CGH];
 // Pregnant clients (the _Prega copy): CGH P101, P102, P103, P107, P108 and Chilenje Clinic P106. P104 answered No, P105's form is in a
@@ -1510,7 +1531,7 @@ const T2_PREGNANT = [...T2_P106L, ...T2_PREGNANT_CGH];
 const t1Suite = (name, params, keys, setup = '') => {
   const s = orderedSuite(name, cohortQuery?.sql ?? 'select 1', params, T1_COLUMNS, t1Rows(keys), setup);
   const check = s.check;
-  s.check = (got) => check(got).filter((m) => !m.startsWith('columns not in v1 order') && !m.startsWith('expected 14 columns'));
+  s.check = (got) => check(got).filter((m) => !m.startsWith('columns not in v1 order'));
   s.name = name;
   return s;
 };
@@ -1559,7 +1580,7 @@ const suites9 = [
   },
   // T2 with no filter: every client with a valid HIVVL, HIVVC or HIVVD result in the window, whole 730-day history, descending ranks.
   t2Suite('t2-all-provinces', t2Params('', ''), T2_ALL),
-  t2Suite('t2-pregnant-blank-means-all', t2Params('', 'no'), T2_ALL),
+  t2Suite('t2-pregnant-no', t2Params('', 'no'), T2_ALL),
   // The Lusaka constant (T2 line 124) as a parameter: compared ignoring case and trailing spaces.
   t2Suite('t2-province-lusaka', t2Params('Lusaka', ''), T2_LUSAKA),
   t2Suite('t2-province-fold', t2Params('southern ', ''), T2_SOUTHERN),

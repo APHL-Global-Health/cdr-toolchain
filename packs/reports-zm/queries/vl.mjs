@@ -3,7 +3,7 @@
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
-  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS,
+  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey,
 } from '../zm-sql.mjs';
 
 // Area parameters in SQL. An optional parameter arrives as '' when blank. `same` matches a column on a
@@ -495,7 +495,7 @@ src as (
     and not ${inListSql(result, INVALID_VL_TEXTS)}
 ),
 tests as (
-  select row_number() over (order by lower(rtrim(s.lab_id)) collate "C", s.lab_id collate "C", s.request_row_id, s.result_row_id, s.report_row_id) as serial,
+  select row_number() over (order by ${ssTextKey('s.lab_id')} collate "C", s.lab_id collate "C", s.request_row_id, s.result_row_id, s.report_row_id) as serial,
     s.facility_name, s.art_no, s.result_text,
     case when (${inListSql('s.result_text', SUPPRESSED_VL_TEXTS)} or ${number} < 1000 or length(rtrim(s.coded_value)) > 0) then 1 else 0 end as suppressed,
     case when (${number} >= 1000 or s.result_text ilike '>10000000%') then 1 else 0 end as unsuppressed,
@@ -613,8 +613,9 @@ const sameClient = (a, b) => `${foldSql(`${a}.facility`)} = ${foldSql(`${b}.faci
 //     HIVVL and HIVVC only.
 //   - Visits are numbered inside (province, district, facility, panel, SEX, ART number): a client whose sex differs between requests has
 //     two series. The PIVOT groups by province, district, facility and ART number only, so the series are merged and MAX keeps the
-//     greater TEXT of each visit slot ('120' beats '110'; '99' beats '100'). The port takes the greater text in SQL Server's order
-//     (case and trailing spaces ignored), then byte order.
+//     greater TEXT of each visit slot ('120' beats '110'; '99' beats '100'; '2500' beats '<20 copies/mL', as the comparison is one of
+//     SQL Server's text order: punctuation before digits before letters, case and trailing spaces ignored). The port takes the greater text in
+//     that order (ssTextKey), then byte order for equal texts.
 //   - The client is the facility NAME and the ART number: ART numbers that differ only in case are one client (the case shown is the
 //     one that sorts first in byte order; v1 shows either). A blank ART number (no REFNO and no UNIQUEID) groups with every other
 //     such client of the facility.
@@ -629,7 +630,7 @@ const sameClient = (a, b) => `${foldSql(`${a}.facility`)} = ${foldSql(`${b}.faci
 // other queries). The register can spell a name differently from v1's dictionary (README).
 export function cohortSql() {
   const visits = Array.from({ length: 10 }, (_, i) => i + 1);
-  const pick = (n) => `(array_agg(x.result_text order by ${foldSql('x.result_text')} collate "C" desc, x.result_text collate "C" desc) filter (where x.visit = ${n}))[1] as v${n}`;
+  const pick = (n) => `(array_agg(x.result_text order by ${ssTextKey('x.result_text')} collate "C" desc, x.result_text collate "C" desc) filter (where x.visit = ${n}))[1] as v${n}`;
   return `with ${zmIdsCte('zm_ids')},
 ${cohortHistoryCtes({ observations: ['HIVVL', 'HIVVC'], days: 366, direction: 'asc' })},
 ${cohortRowsCte((result) => `${isNumericSql(result)} and length(btrim(${result})) > 3`)}
@@ -643,8 +644,8 @@ from (
   where exists (select 1 from z where ${sameClient('z', 'x')})
   group by ${foldSql('x.province')}, ${foldSql('x.district')}, ${foldSql('x.facility')}, ${foldSql('x.art_no')}
 ) g
-order by ${foldSql('g.province')} collate "C" nulls first, ${foldSql('g.district')} collate "C" nulls first,
-  ${foldSql('g.facility')} collate "C" nulls first, ${foldSql('g.art_no')} collate "C" nulls first,
+order by ${ssTextKey('g.province')} collate "C" nulls first, ${ssTextKey('g.district')} collate "C" nulls first,
+  ${ssTextKey('g.facility')} collate "C" nulls first, ${ssTextKey('g.art_no')} collate "C" nulls first,
   g.province collate "C", g.district collate "C", g.facility collate "C", g.art_no collate "C"`;
 }
 
@@ -716,10 +717,10 @@ select x.province as "Province", x.district as "District", x.facility as "Facili
   ${resultDate} as "ResultDate", ${result} as "Result"
 from x
 join z on ${sameClient('z', 'x')}
-where ({{param.province}} = '' or ${foldSql('x.province')} = ${foldSql('{{param.province}}')})
+where ${same('x.province', 'province')}
   and (${foldSql('{{param.pregnant_only}}')} <> 'yes' or exists (select 1 from y where ${sameClient('y', 'x')}))
-order by ${foldSql('x.province')} collate "C" nulls first, ${foldSql('x.district')} collate "C" nulls first,
-  ${foldSql('x.facility')} collate "C" nulls first, ${foldSql('x.art_no')} collate "C" nulls first,
+order by ${ssTextKey('x.province')} collate "C" nulls first, ${ssTextKey('x.district')} collate "C" nulls first,
+  ${ssTextKey('x.facility')} collate "C" nulls first, ${ssTextKey('x.art_no')} collate "C" nulls first,
   x.province collate "C", x.district collate "C", x.facility collate "C", x.art_no collate "C",
   x.visit, x.issued_ts, x.result_text collate "C"`;
 }

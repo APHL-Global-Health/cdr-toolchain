@@ -4,7 +4,7 @@ import { lit, caseSuite } from '../../shared/pg-check.mjs';
 import {
   sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
   dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, labNameSql,
-  districtOptionsSql,
+  districtOptionsSql, ssTextKey,
 } from '../zm-sql.mjs';
 
 const bind = (sqlText, params) => Object.entries(params)
@@ -289,5 +289,62 @@ suites.push(jsSuite('params-shape', [
   ['dates default required', same(dateParams().map((p) => [p.id, p.type, p.required]), [['from', 'text', true], ['to', 'text', true]])],
   ['dates optional', same(dateParams(false).map((p) => p.required), [false, false])],
 ]));
+
+// ---- ssTextKey: SQL Server's text order. The expected orders were read from SQL Server itself (varchar and nvarchar columns
+// ordered with ORDER BY), so a change of the character tables shows here. ----
+const SS_WORDS = ['Zed', 'oneil', "o'neil", 'é', 'e', 'coop', 'co-op', 'abc', 'ab', 'a_b', 'a-b', 'a b', 'a', '2500', '150', '1,000', '_x', '>10000000', '<20 copies/mL'];
+// varchar: '<' (0x3C) sorts before the digits and before '_'; the comma sorts before a digit; punctuation before letters.
+const SS_VARCHAR_ORDER = ['<20 copies/mL', '>10000000', '_x', '1,000', '150', '2500', 'a', 'a b', 'a-b', 'a_b', 'ab', 'abc', 'co-op', 'coop', 'e', 'é', "o'neil", 'oneil', 'Zed'];
+// nvarchar: the hyphen and the apostrophe do not count, so 'a-b', 'co-op' and "o'neil" tie with 'ab', 'coop' and 'oneil' (left out of the
+// list, tested as ties below); '_' sorts before '<'.
+const SS_NVARCHAR_WORDS = SS_WORDS.filter((w) => !['a-b', 'co-op', "o'neil"].includes(w));
+const SS_NVARCHAR_ORDER = ['_x', '<20 copies/mL', '>10000000', '1,000', '150', '2500', 'a', 'a b', 'a_b', 'ab', 'abc', 'coop', 'e', 'é', 'oneil', 'Zed'];
+
+function ssOrderSuite(name, words, opts, expectedOrder) {
+  return {
+    name,
+    sql: `select ${lit(name)} || chr(9) || json_build_object('got', (select json_agg(w order by ${ssTextKey('w', opts)} collate "C", w collate "C") from (values ${words.map((w) => `(${lit(w)})`).join(', ')}) as t(w)))::text;`,
+    count: 1,
+    check(rows) {
+      const got = rows[0]?.got;
+      return JSON.stringify(got) === JSON.stringify(expectedOrder) ? [] : [`expected ${JSON.stringify(expectedOrder)}, got ${JSON.stringify(got)}`];
+    },
+  };
+}
+suites.push(ssOrderSuite('ss-order-varchar', SS_WORDS, {}, SS_VARCHAR_ORDER));
+suites.push(ssOrderSuite('ss-order-nvarchar', SS_NVARCHAR_WORDS, { unicode: true }, SS_NVARCHAR_ORDER));
+
+// Ties: trailing spaces and case for both; the hyphen and the apostrophe only for nvarchar.
+const TIE_CASES = [
+  { a: 'abc', b: 'ABC  ', unicode: false, expected: true },
+  { a: 'abc', b: 'abd', unicode: false, expected: false },
+  { a: 'a-b', b: 'ab', unicode: false, expected: false },
+  { a: 'a-b', b: 'ab', unicode: true, expected: true },
+  { a: "o'neil", b: 'oneil', unicode: true, expected: true },
+  { a: 'co-op', b: 'coop', unicode: true, expected: true },
+  { a: 'a b', b: 'ab', unicode: true, expected: false },
+  { a: 'a_b', b: 'ab', unicode: true, expected: false },
+];
+suites.push({
+  name: 'ss-ties',
+  sql: `select 'ss-ties' || chr(9) || json_build_object('got', json_build_array(${TIE_CASES.map((c) => `${ssTextKey(lit(c.a), { unicode: c.unicode })} = ${ssTextKey(lit(c.b), { unicode: c.unicode })}`).join(', ')}))::text;`,
+  count: 1,
+  check(rows) {
+    const got = rows[0]?.got ?? [];
+    return TIE_CASES.flatMap((c, i) => (got[i] === c.expected ? [] : [`${JSON.stringify([c.a, c.b, c.unicode])}: expected ${c.expected}, got ${got[i]}`]));
+  },
+});
+
+// The larger of two texts, as SQL Server's MAX picks (measured), with the key then the plain text as the tie-break.
+const MAX_PAIRS = [
+  ['<20 copies/mL', '2500', '2500'], ['< 20', '150', '150'], ['>10000000', '2500', '2500'],
+  ['120', '110', '120'], ['99', '100', '99'], ['abc', 'ABD', 'ABD'], ['abc', '2500', 'abc'],
+];
+suites.push(caseSuite('ss-max-pair', ['x', 'y'], MAX_PAIRS.map(([x, y, expected]) => ({ x, y, expected })),
+  `(select (array_agg(w order by ${ssTextKey('w')} collate "C" desc, w collate "C" desc))[1] from (values (x), (y)) as t(w))`));
+suites.push(caseSuite('ss-max-pair-nvarchar', ['x', 'y'], [
+  { x: 'a-c', y: 'ab', expected: 'a-c' }, { x: 'a_', y: 'ab', expected: 'ab' },
+],
+`(select (array_agg(w order by ${ssTextKey('w', { unicode: true })} collate "C" desc, w collate "C" desc))[1] from (values (x), (y)) as t(w))`));
 
 export const groups = [{ name: 't1', suites }];
