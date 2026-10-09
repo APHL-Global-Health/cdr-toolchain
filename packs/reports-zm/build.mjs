@@ -21,13 +21,14 @@ const MFL_CSV = process.env.ZM_MFL_CSV
 
 // MFL "Operational status" as CE location-status codes (active, suspended, inactive).
 const STATUS = { 'Functional': 'active', 'Closed': 'inactive', 'Permanent closure': 'inactive', 'Temporarily closure': 'suspended' };
+// CE's own ownership and ward columns take the MFL Ownership and Ward values; six others go to extras.
 // MFL columns kept raw in extras, as [MFL header, extras key]. CE stores extras keys in lowercase.
 const EXTRAS = [
-  ['Hims code', 'hims_code'], ['DHIS2 UID', 'dhis2_uid'], ['Type', 'type'], ['Ownership', 'ownership'],
-  ['Ownership type', 'ownership_type'], ['Constituency', 'constituency'], ['Ward', 'ward'], ['Location', 'location'],
+  ['Hims code', 'hims_code'], ['DHIS2 UID', 'dhis2_uid'], ['Type', 'type'],
+  ['Ownership type', 'ownership_type'], ['Constituency', 'constituency'], ['Location', 'location'],
 ];
 const EXTRA_COLUMNS = EXTRAS.map(([, key]) => key);
-const COLUMNS = ['national_code', 'name', 'region', 'district', 'status', 'latitude', 'longitude', ...EXTRA_COLUMNS];
+const COLUMNS = ['national_code', 'name', 'region', 'district', 'status', 'latitude', 'longitude', 'ownership', 'ward', ...EXTRA_COLUMNS];
 
 const clean = (v) => (v == null ? '' : String(v).trim());
 
@@ -93,7 +94,7 @@ function main() {
     if (coords.problem) summary.register.coordinates_left_out.push({ key: code, reason: coords.problem });
     const rec = {
       national_code: code, name, region: at(row, 'Province'), district: at(row, 'District'), status,
-      latitude: coords.latitude, longitude: coords.longitude,
+      latitude: coords.latitude, longitude: coords.longitude, ownership: at(row, 'Ownership'), ward: at(row, 'Ward'),
     };
     for (const [source, key] of EXTRAS) rec[key] = at(row, source);
     byCode.set(code, rec);
