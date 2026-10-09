@@ -138,9 +138,10 @@ The columns keep v1's names and order. Most come straight from `lab_requests`,
 
 - `HL7PriorityCode` is the FHIR priority (`routine`), not `R`.
 - `HL7ResultStatusCode` is the FHIR report status (`final`, `registered`), not `F`.
-- A reported value is CE's text value, else its numeric value, else its coded value. CE keeps the
-  full numeric value, so `61.736...` where v1 shows `62`. A value outside the reporting range
-  shows its comparator, as in `< 20`.
+- A reported value is CE's text value, else its numeric value, else its coded value. The four
+  `HIVVL_*` columns are the exception: they show the code's description (see "The three v1
+  functions"). CE keeps the full numeric value, so `61.736...` where v1 shows `62`. A value
+  outside the reporting range shows its comparator, as in `< 20`.
 - A request fact stored as true or false prints `true` or `false`, not `1` or `0`.
 
 ## Columns that are always NULL
@@ -187,9 +188,15 @@ The port matches v1, including where v1 looks wrong:
 - Rule 2 of `ViralLoadFinalResult` has no numeric branch. A plain number in HIVVD with nothing in
   HIVVR, HIVVC or HIVVF gives `INDETECTAVEL`.
 - Rule 3 tests whether the two inputs joined together are a number (`'20' || '1000'`).
+  v1 joins DISA's display strings, which are whole numbers, so `'62' || '1501'` is a number and
+  v1 returns `1501`. CE keeps full numeric values, so the port joins `'61.736' || '1500.5'`. Two
+  decimal points are not a number, so `FinalViralLoadResult` is NULL there. This happens only when
+  HIVVD and the CAPCTM slot both hold non-integer numbers.
 - Comparisons ignore case and trailing spaces, as SQL Server's default collation does.
 - `ISNUMERIC` is a Postgres regular expression: sign, digits with commas, a decimal point, an
-  exponent, `$ £ € ¥`, surrounding spaces. SQL Server also accepts a lone `+`, `$` or `.`, and tabs.
+  exponent, `$ £ € ¥`, surrounding spaces. SQL Server also accepts a lone `+`, `$` or `.`;
+  the port rejects those. Tabs around digits are accepted (`\s` matches them). Only a lone
+  tab is rejected.
 
 One place the port cannot match: v1's error list has `Indeterminado` twice. Rules 2 and 3 test
 `(SELECT 1 FROM @errors WHERE Error = x) = 1`, which raises SQL Server error 512 when two rows
@@ -201,6 +208,9 @@ tie the first in `(LIMSPanelCode, Description)` order. `build-summary.json` list
 under `vlCodedResults.choices`.
 
 `HIVVL_VRLogValue` needs no function and is returned as v1 did.
+
+v1's `GetReasonForTest` returns `nvarchar(64)`, so v1 cuts a longer free-text reason at 64
+characters. The port does not.
 
 ## HONEST NON-PROOF
 
@@ -220,6 +230,8 @@ What this pack has not shown:
   cases in real Postgres. It does not show that v1 and the port agree on Mozambique data. That
   needs the sample data (QUESTIONS-FOR-MZ.md, question 4): run "VL results" and v1's
   `viewVL_Result` side by side and compare the six columns request by request.
+- **How often both inputs of `FinalViralLoadResult` are decimals.** Then the port gives an empty
+  value where v1 shows one. How common that is stays unknown until the sample data arrives.
 - **Which description v1 shows for a duplicated code.** The build's pick is a rule, not an
   observation.
 - **Duplicate observations.** A request with one observation code twice returns two rows, as v1

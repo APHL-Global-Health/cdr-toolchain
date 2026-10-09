@@ -43,8 +43,9 @@ const rpt = (a) =>
 // case-insensitive, and trailing spaces do not count. So the port compares lower(rtrim(x)).
 
 // SQL Server's ISNUMERIC: a sign, digits with thousands commas, a decimal point, an exponent, a
-// currency sign, surrounding spaces. It also accepts a lone "+", "$" or "." and tabs. This does
-// not; none is a plausible viral load result.
+// currency sign, surrounding spaces. It also accepts a lone "+", "$" or ".". This does not; none is
+// a plausible viral load result. Tabs around digits are accepted (\s matches them); only a lone tab
+// is rejected.
 const ISNUMERIC_RE = String.raw`^\s*[-+]?[$£€¥]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d+)?\s*$`;
 
 export const isNumericSql = (x) => `coalesce(${x} ~ ${lit(ISNUMERIC_RE)}, false)`;
@@ -238,8 +239,9 @@ function facilityBlock(testingProvinceAlias) {
 export function vlResultSql(codes) {
   const r = codes.result;
   const merged = (alias) => resultMergeSql(reportedSql(alias), `${alias}.coded_value`);
-  // Two lateral subqueries work out the merge once per slot, then FinalViralLoadResult's second
-  // input: the first of HIVVR, HIVVC, HIVVF with a reported value, else HIVVR. v1 tests
+  // Two lateral subqueries name each slot's merged value once, so the SQL stays readable. Postgres
+  // flattens them and evaluates each reference on its own. They also name FinalViralLoadResult's
+  // second input: the first of HIVVR, HIVVC, HIVVF with a reported value, else HIVVR. v1 tests
   // LEN(LIMSRptResult) > 0, and LEN ignores trailing spaces, as blankSql does.
   return `with ${attrCte},
 ${vlCodedCte}

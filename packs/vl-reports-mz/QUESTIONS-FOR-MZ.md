@@ -17,7 +17,7 @@ the xlsx had put on the dev CE were retired on 2026-10-07 (`register_state` drop
 **Still open:** why are the provinces rows in the facility view at all? Are they used as a fallback
 facility when a request names only a province?
 
-## 2. The three missing functions (answered)
+## 2. The three v1 functions (answered)
 
 The v1 views call `dbo.ViralLoadResultMerge`, `dbo.ViralLoadFinalResult` and `dbo.GetReasonForTest`.
 
@@ -48,8 +48,10 @@ Until the team answers, the pack keeps the most frequent description, and on a t
 - The function's error list has `Indeterminado` twice. For a request whose only result is the code
   `I` (`Indeterminado`), SQL Server raises error 512 and the whole `viewVL_Result` query fails. Has
   the team seen that error? The pack returns an empty `FinalViralLoadResult` there.
-- A coded result whose code is not in `LIMSCodedValues` comes out empty in all four merge columns.
-  Is that what the team sees in v1?
+- A coded result whose code is not in `LIMSCodedValues` comes out empty in the four
+  `HIVVL_*` columns. Is that what the team sees in v1?
+- What rule does v1 use to round a viral load result for display (for example `61.736` shown as
+  `62`)? The port needs it to match `FinalViralLoadResult` when both inputs are decimals.
 
 ## 3. Facility type letters and HFStatus (partly answered)
 

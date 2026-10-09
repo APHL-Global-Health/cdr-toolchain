@@ -26,7 +26,7 @@ both registers, and each pair names the same place. The facility register links 
 45 codes link to the facility rows, which carry province and district. Their testing labs show
 the facility register's name.
 
-Installing again is safe. It replaces the terminology and the two queries, and updates the
+Installing again is safe. It replaces the terminology and the three queries, and updates the
 register rows. A register you already loaded under the same URL is reused, not duplicated. A
 query you edited under one of these names is overwritten.
 
@@ -57,9 +57,10 @@ A report run stops at 1000 rows. Narrow the dates for a big lab.
 - The columns keep v1's names and order.
 - `HL7PriorityCode` is the FHIR priority (`routine`), not `R`.
 - `HL7ResultStatusCode` is the FHIR report status (`final`, `registered`), not `F`.
-- A reported value is the text value, else the numeric value, else the coded value. The full
-  numeric value is kept, so `61.736...` where v1 shows `62`. A value outside the reporting range
-  shows its comparator, as in `< 20`.
+- A reported value is the text value, else the numeric value, else the coded value. The four
+  `HIVVL_*` columns are the exception: they show the code's description (see "Columns v1 computed
+  with functions"). The full numeric value is kept, so `61.736...` where v1 shows `62`. A value
+  outside the reporting range shows its comparator, as in `< 20`.
 - `FinalViralLoadResult` keeps CE's full numeric value too.
 - v1 stops with an error when a request's only result is the code `I` (`Indeterminado`). The pack
   gives an empty `FinalViralLoadResult` for that request.
@@ -107,5 +108,9 @@ one: `LDL` reads `Target not detected`, `NEG` reads `Negative`, `NDET` reads `NO
 - A request with one observation code twice returns two rows, as v1 did.
 - The date filter compares text. A request registered near midnight at a UTC offset can fall on
   the other side of `from` or `to`.
+- When both inputs of `FinalViralLoadResult` are decimals, the column is empty. v1 joins two
+  whole numbers (`62` and `1501`) and finds a number. CE keeps the full values, so the join is
+  `61.736` and `1500.5`, which is not a number. The pack shows nothing where v1 shows a value.
+  Whole numbers are not affected.
 - v1 counts some odd text as a number, such as a lone `+`, `$` or `.`. The pack does not. No real
   viral load result looks like that.
