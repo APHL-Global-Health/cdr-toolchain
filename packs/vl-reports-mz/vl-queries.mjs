@@ -26,6 +26,9 @@ const POC_VALUE_SET = 'urn:openldr:mz:poc-sites';
 const LINK_VALUE_SET = 'urn:openldr:mz:link-sites';
 const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 
+export const VL_CODED_SYSTEM = 'urn:openldr:mz:cs:vl-coded-results';
+export const VL_CODED_VALUE_SET = 'urn:openldr:mz:vl-coded-results';
+
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 // v1 LIMSRptResult: CE text value, else numeric value as text, else coded value.
@@ -47,7 +50,7 @@ const ISNUMERIC_RE = String.raw`^\s*[-+]?[$£€¥]?(\d[\d,]*(\.\d*)?|\.\d+)([eE
 export const isNumericSql = (x) => `coalesce(${x} ~ ${lit(ISNUMERIC_RE)}, false)`;
 
 // SQL Server's "x = ''" is also true for spaces only. NULL counts as blank here too.
-const blankSql = (x) => `coalesce(rtrim(${x}), '') = ''`;
+export const blankSql = (x) => `coalesce(rtrim(${x}), '') = ''`;
 const foldSql = (x) => `lower(rtrim(${x}))`;
 const inListSql = (x, words) => `${foldSql(x)} in (${words.map((w) => lit(w.toLowerCase())).join(', ')})`;
 
@@ -63,6 +66,53 @@ const REASON_FOR_TEST = [
 export function reasonForTestSql(x) {
   const whens = REASON_FOR_TEST.map(([from, to]) => `when ${foldSql(x)} = ${lit(from.toLowerCase())} then ${lit(to)}`).join(' ');
   return `case when ${blankSql(x)} then 'Reason Not Specified' ${whens} else ${x} end`;
+}
+
+// The reported value without rpt()'s coded fallback: text value, else comparator and numeric
+// value. ViralLoadResultMerge needs it blank when only a code was reported. With rpt() it would
+// never be blank, and the merge would return the code where v1 returns its description.
+export const reportedSql = (a) =>
+  `coalesce(${a}.text_value, coalesce(${a}.numeric_comparator || ' ', '') || ${a}.numeric_value::text)`;
+
+// The coded-result descriptions, read once per run. terminology_codes holds every value set and
+// is indexed on value_set_id only, so a lookup per row would scan it each time.
+export const vlCodedCte = `vl_coded as materialized (
+  select upper(code) as code, display from terminology_codes where value_set_url = ${lit(VL_CODED_VALUE_SET)}
+)`;
+
+// ViralLoadResultMerge(reported, coded): the reported value. When it is blank, the description of
+// the coded value. v1 reads the descriptions from OpenLDRDict.dbo.LIMSCodedValues; the pack ships
+// them as the coded-results value set. A code not in the set gives NULL, as in v1: its
+// "SELECT @OutString = ... WHERE Code = @code" matches no row and leaves @OutString NULL.
+export const resultMergeSql = (reported, coded) =>
+  `case when ${blankSql(reported)} then (select vc.display from vl_coded vc where vc.code = upper(rtrim(${coded})) limit 1) else ${reported} end`;
+
+// ViralLoadFinalResult's error list. v1 lists Indeterminado twice. Its rule 1 counts matches and
+// works; rules 2 and 3 use "(SELECT 1 ...) = 1", which raises SQL Server error 512 on two rows.
+// The port cannot raise an error per row, so it treats Indeterminado as the list means: NULL.
+const VL_ERROR_WORDS = ['POS', 'Positive', 'Invalid', 'INVAL', 'Valid', 'Indeterminado', 'NEGAT', 'Reactive', 'Negative'];
+const NOT_DETECTED = ['Target not detected', 'NOT DETECTED'];
+const hasRangeSql = (x) => `(${x} like '%<%' or ${x} like '%>%')`;
+// v1 rule 2: an error word gives NULL, a range keeps the value, anything else is INDETECTAVEL.
+// There is no numeric branch, so a plain number alone in HIVVD becomes INDETECTAVEL. v1 does this.
+const resultOnlySql = (x) =>
+  `case when ${inListSql(x, VL_ERROR_WORDS)} then null when ${hasRangeSql(x)} then ${x} else 'INDETECTAVEL' end`;
+
+// ViralLoadFinalResult(result, capctm). The rules, in v1's order:
+//   1. capctm set, result NULL: error word NULL; range or number keeps capctm; else INDETECTAVEL.
+//   2. capctm NULL, result set: resultOnlySql(result).
+//   3. otherwise: the two joined are numeric, capctm (v1 tests the joined text, '20'||'1000');
+//      either is "not detected", INDETECTAVEL; equal ignoring case, rule 2 on result; else NULL.
+// A numeric value comes back as CE stores it (61.736, where v1 shows 62).
+export function finalResultSql(result, capctm) {
+  return `case
+    when ${capctm} is not null and ${result} is null then
+      case when ${inListSql(capctm, VL_ERROR_WORDS)} then null when ${hasRangeSql(capctm)} then ${capctm} when ${isNumericSql(capctm)} then ${capctm} else 'INDETECTAVEL' end
+    when ${capctm} is null and ${result} is not null then ${resultOnlySql(result)}
+    when ${isNumericSql(`coalesce(${result}, '') || coalesce(${capctm}, '')`)} then ${capctm}
+    when ${inListSql(capctm, NOT_DETECTED)} or ${inListSql(result, NOT_DETECTED)} then 'INDETECTAVEL'
+    when ${foldSql(result)} = ${foldSql(capctm)} then ${resultOnlySql(result)}
+  end`;
 }
 
 // Request attributes (urn:openldr:cs:request-attribute), one row per request and code.

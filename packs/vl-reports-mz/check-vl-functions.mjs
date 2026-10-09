@@ -10,7 +10,9 @@
 // Exits 1 on any mismatch. Run it by hand before a pack release, like build.mjs.
 
 import { spawnSync } from 'node:child_process';
-import { isNumericSql, reasonForTestSql } from './vl-queries.mjs';
+import {
+  isNumericSql, reasonForTestSql, resultMergeSql, finalResultSql, vlCodedCte, VL_CODED_VALUE_SET,
+} from './vl-queries.mjs';
 
 const CONTAINER = process.env.PG_CONTAINER ?? 'openldr_ce-postgres-1';
 const DATABASE = process.env.PG_DATABASE ?? 'openldr_target';
@@ -86,6 +88,69 @@ suites.push(caseSuite('reason', ['input'], [
   { input: 'Rotina ', expected: 'Routine' },
   { input: 'Other reason', expected: 'Other reason' },
 ], reasonForTestSql('input')));
+
+// The coded-results value set, as the pack installs it, plus a row from another value set that
+// must be ignored. Task 4's wiring suite uses the LDL row too.
+const TERMINOLOGY_FIXTURE = `insert into terminology_codes (id, value_set_url, code, display) values
+  ('tc-1', ${lit(VL_CODED_VALUE_SET)}, 'LDL', 'Target not detected'),
+  ('tc-2', ${lit(VL_CODED_VALUE_SET)}, 'TND', 'Target not Detected'),
+  ('tc-3', ${lit(VL_CODED_VALUE_SET)}, 'I', 'Indeterminado'),
+  ('tc-4', ${lit(VL_CODED_VALUE_SET)}, '<20', '< 20 copies / ml'),
+  ('tc-5', 'urn:example:other', 'XYZ', 'Other value set');`;
+
+// ViralLoadResultMerge(reported, coded).
+suites.push(caseSuite('merge', ['rep', 'coded'], [
+  { rep: '540', coded: null, expected: '540' },
+  { rep: '540', coded: 'LDL', expected: '540' },
+  { rep: '< 20', coded: null, expected: '< 20' },
+  { rep: null, coded: 'LDL', expected: 'Target not detected' },
+  { rep: '', coded: 'LDL', expected: 'Target not detected' },
+  { rep: '  ', coded: 'LDL', expected: 'Target not detected' },
+  { rep: null, coded: 'ldl', expected: 'Target not detected' },
+  { rep: null, coded: 'LDL ', expected: 'Target not detected' },
+  { rep: null, coded: '<20', expected: '< 20 copies / ml' },
+  // In another value set only: not found.
+  { rep: null, coded: 'XYZ', expected: null },
+  // Not in the value set: v1 returns NULL (the SELECT assignment matches no row).
+  { rep: null, coded: 'ZZZ', expected: null },
+  { rep: null, coded: null, expected: null },
+], resultMergeSql('rep', 'coded'), { with: vlCodedCte, setup: TERMINOLOGY_FIXTURE }));
+
+// ViralLoadFinalResult(result, capctm). Rule numbers follow the spec.
+suites.push(caseSuite('final', ['res', 'cap'], [
+  // Rule 1: capctm set, result NULL.
+  { res: null, cap: 'POS', expected: null },
+  { res: null, cap: 'pos', expected: null },
+  { res: null, cap: 'Indeterminado', expected: null },
+  { res: null, cap: 'Negative', expected: null },
+  { res: null, cap: '< 20 copies / ml', expected: '< 20 copies / ml' },
+  { res: null, cap: '> 10000000', expected: '> 10000000' },
+  { res: null, cap: '540', expected: '540' },
+  { res: null, cap: '1,000', expected: '1,000' },
+  { res: null, cap: 'Target not detected', expected: 'INDETECTAVEL' },
+  // Rule 2: capctm NULL, result set.
+  { res: 'Negative', cap: null, expected: null },
+  // v1 raises error 512 here (Indeterminado is in its list twice). The port returns NULL.
+  { res: 'Indeterminado', cap: null, expected: null },
+  { res: '< 20', cap: null, expected: '< 20' },
+  // v1 quirk: rule 2 has no numeric branch.
+  { res: '540', cap: null, expected: 'INDETECTAVEL' },
+  { res: 'Target not detected', cap: null, expected: 'INDETECTAVEL' },
+  // Rule 3: both set, or both NULL.
+  { res: null, cap: null, expected: null },
+  // v1 quirk: the numeric test runs on the two values joined ('201000').
+  { res: '20', cap: '1000', expected: '1000' },
+  { res: '1e5', cap: '5', expected: '5' },
+  { res: 'Target not detected', cap: '540', expected: 'INDETECTAVEL' },
+  { res: '540', cap: 'not detected', expected: 'INDETECTAVEL' },
+  { res: '< 20', cap: '< 20', expected: '< 20' },
+  { res: 'POS', cap: 'pos', expected: null },
+  { res: 'Valid', cap: 'VALID', expected: null },
+  { res: 'abc', cap: 'ABC', expected: 'INDETECTAVEL' },
+  { res: '< 20', cap: '< 40', expected: null },
+  { res: '540', cap: '< 20', expected: null },
+  { res: 'abc', cap: '1000', expected: null },
+], finalResultSql('res', 'cap')));
 
 // ---- Runner ----
 
