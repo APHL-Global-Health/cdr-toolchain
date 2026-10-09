@@ -5,4 +5,6 @@
 request_attributes:
   therapy: therapy              # TXT1DATA frame 21, else REGDAT4 Therapy
   folder_number: ordering-notes # REGDAT4 FolderNumber; v1 OrderingNotes matched 136 of 136
+  reference_numbers: reference-numbers # REGDAT4 RefNos; taken as v1 Patients.REFNO (unconfirmed)
+  unique_id: unique-id          # REGDAT4 UniqueID; taken as v1 Patients.UNIQUEID (unconfirmed)
   newborn: newborn              # REGDAT4 newborn bit, sent only when set

@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { vlQueryFile, MOZ_CODES, VL_CODED_SYSTEM, VL_CODED_VALUE_SET } from './vl-queries.mjs';
 import { pickCodedResultDisplays } from './vl-coded-results.mjs';
 import { facilitiesQuery } from './facility-queries.mjs';
+import { toCsv, summarizeStep } from '../shared/pack-build.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DIST = join(here, 'dist');
@@ -43,11 +44,6 @@ const HF_STATUS = { 1: 'active', 0: 'inactive' };
 const clean = (v) => (v == null ? '' : String(v).trim());
 // The facility dictionary writes some empty values as the text NULL.
 const cleanNull = (v) => (clean(v).toUpperCase() === 'NULL' ? '' : clean(v));
-
-function csvCell(v) {
-  const s = clean(v);
-  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
 
 function codeSystem(url, name, title, description, rows) {
   return {
@@ -84,25 +80,6 @@ function valueSet(url, name, title, description, systemUrl, rows) {
 function writeJson(name, value) {
   mkdirSync(DIST, { recursive: true });
   writeFileSync(join(DIST, name), JSON.stringify(value, null, 2) + '\n', 'utf8');
-}
-
-// Step summaries for manifest.payload.steps. These rules are copied from summarizeContentPack in
-// CE's packages/marketplace/src/content-pack.ts. If one changes, change the other.
-function summarizeStep(step) {
-  switch (step.kind) {
-    case 'code-system':
-    case 'value-set':
-      return { kind: step.kind, label: step.resource.name ?? step.resource.url, count: 1 };
-    case 'facility-register':
-      // The same expression as CE's summarizeContentPack, so the signed step list matches pack.json.
-      return { kind: step.kind, label: step.name, count: step.csv.split(/\r?\n/).slice(1).filter((l) => l.trim() !== '').length };
-    case 'link-matching':
-      return { kind: step.kind, label: step.registerUrl, count: 1 };
-    case 'custom-queries':
-      return { kind: step.kind, label: step.file.queries.map((q) => q.name).join(', '), count: step.file.queries.length };
-    default:
-      throw new Error(`unknown step kind ${step.kind}`);
-  }
 }
 
 async function main() {
@@ -197,8 +174,7 @@ async function main() {
   }
   const regRows = [...register.values()].sort((a, b) => a.national_code.localeCompare(b.national_code));
   const header = ['national_code', 'name', 'region', 'district'];
-  const toCsv = (rows, cols = header) => [cols.join(','), ...rows.map((r) => cols.map((h) => csvCell(r[h])).join(','))].join('\r\n') + '\r\n';
-  const csv = toCsv(regRows);
+  const csv = toCsv(regRows, header);
   summary.register.rows = regRows.length;
   summary.register.fromLaboratories = regRows.filter((r) => r.from === 'Laboratories').length;
   summary.register.fromDisaPoc = regRows.filter((r) => r.from === 'DisaPoc').length;
