@@ -1,6 +1,6 @@
 # Porting v1's VL functions into the vl-reports-mz queries
 
-Date: 2026-10-09. Status: draft for review.
+Date: 2026-10-09. Status: approved 2026-10-09. Plan: `docs/superpowers/plans/2026-10-09-vl-functions-port.md`.
 
 ## Problem
 
