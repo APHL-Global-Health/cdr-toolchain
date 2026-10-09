@@ -1,8 +1,9 @@
 # vl-reports-mz pack
 
 A content pack for OpenLDR CE. It installs two custom queries that port Mozambique's v1 views
-`viewVL_Info` and `viewVL_Result`, plus the lab register, the health facility register and two
-value sets they need. A third query lists the facilities in the layout of v1's `viewFacilities`.
+`viewVL_Info` and `viewVL_Result`, plus the lab register, the health facility register and three
+value sets they need (POC sites, link sites and coded viral load results). A third query
+lists the facilities in the layout of v1's `viewFacilities`.
 This is the source of the pack. The signed bundle is built from it.
 
 ## Files
