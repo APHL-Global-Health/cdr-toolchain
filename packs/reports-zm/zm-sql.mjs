@@ -5,7 +5,7 @@
 // Query parameters appear in SQL as {{param.<id>}}. CE puts the value in as a quoted literal, and a
 // blank optional parameter arrives as ''.
 
-import { lit as sqlLit } from '../vl-reports-mz/vl-queries.mjs';
+import { lit as sqlLit, rpt, inListSql, foldSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
 
 export { sqlLit };
 
@@ -160,3 +160,170 @@ export const labNameSql = (drAlias) => `coalesce(
         and zfm.source_code = ${drAlias}.performer and zfm.registry_id is not null
       order by zfm.id limit 1),
     ${drAlias}.performer)`;
+
+// ---- The hivvl copy table (spec ruling 5) ----
+
+// v1 sp_update_HIVVLTable: the three result lists (lines 124, 87, 95). v1 compares with SQL Server's
+// default collation, so inListSql ignores case and trailing spaces.
+const HIVVL_VALID = ['<20 copies/mL', 'TAR', 'Target not detected', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected',
+  '<30 copies/ml', '<30 copies/mL', '<40 copies/mL', 'NDET', 'ND', '<20CP', '<400 copies/mL', '< 40', 'PTLTT', 'PTLTV'];
+const HIVVL_SUPPRESSED = ['<20 copies/mL', 'TAR', 'Target not detected', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected',
+  '<30 copies/ml', '<30 copies/mL', '<40 copies/mL', 'NDET', 'DET', 'ND', '<20CP', '< 40', '<400 copies/mL', '<883 copies/mL', 'PLTT', 'PTLTV'];
+const HIVVL_UU = ['TAR', 'Target Not Detected', 'Target not detected', 'TARG', 'RNA not detected', 'NDET', 'ND', 'DET'];
+const YES_WORDS = ['Yes', 'Y', 'Yest'];
+
+// A stored text stamp as a UTC timestamp. v1 datetimes have no zone; CE keeps ISO text.
+const utcTs = (x) => `(nullif(${x}, '')::timestamptz at time zone 'UTC')`;
+
+// Zambia's `hivvl` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   hivvlCte('hv')                              all rows
+//   hivvlCte('hv', { from: 'from', to: 'to' })  only rows whose tested_date is in the window; the two
+//                                               values are parameter names, compared as in inRange
+// v1 fills the table with sp_update_HIVVLTable (a MERGE that also deletes rows missing from its source)
+// and then sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
+//
+// Columns, in the order of Table__dbo_HIVVL.sql:
+//   province, district, facility, lab_id, gender, age_group, tested_date, suppressed, uu, tat,
+//   tat_within14, pregnant, breastfeeding, baseline_vl, run_date, received_date, registered_date,
+//   collected_date, tested_at, referral, disalink, three_m_post_unsuppressed, poc, poc_w48h
+// The five dates are CE's ISO text (tested_date = diagnostic_reports.issued, run_date =
+// lab_requests.analysis_at, received_date = specimens.received_time, registered_date =
+// lab_requests.authored_at, collected_date = diagnostic_reports.effective).
+//
+// One row per final result: a request row (lab_requests) with a result row (lab_results) in panel
+// HIVVL, POCVR or POHVL and observation HIVVL, HIVVC, HIVTM, HIVVD, POCVR or POCVC, whose report is
+// final and whose result is on the valid list or is a number (v1 lines 120-133). The requesting
+// facility must be mapped to a ZMFAC register row, as v1 inner-joins its dictionary (line 109).
+//
+// The dedupe keeps one row per lab id, the earliest tested_date (sp_remove_dupsHIVVLEID). v1 sorts
+// NULL first, so a row with no tested date wins. Ties are broken on the request row id, the report row id, then the
+// result row id; v1 keeps either one. The dedupe runs over all rows of the lab id before the window,
+// so a lab id whose earliest row is outside the window shows nothing in it.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - age_group has its own labels: '<01', '01-04', '05-09', ... '45-49', '50+' (lines 56-70). A
+//     negative or missing age gives NULL. It is not the dbo.Agegroup of the other reports.
+//   - gender knows only F, M, I and U; everything else, including N and O, is NULL (lines 49-55).
+//   - pregnant, breastfeeding, baseline_vl and three_m_post_unsuppressed are 1 or NULL, never 0
+//     (lines 30-44: a left join to the rows where the flag is 1).
+//   - suppressed counts any number under 1000, and a text only when it is on the list (line 87).
+//     A text that is a number ('5,000') passes the valid-result filter but has no numeric value, so
+//     it is neither suppressed nor UU. UU is a number under 200 or a not-detected text (line 95).
+//   - tat counts date boundaries (datediff dd); tat_within14 is 0, not NULL, when tat is NULL.
+//     poc_w48h counts hour boundaries (datediff hh) and tests 24, although its name says 48.
+//   - The valid list holds 'PTLTT' where the suppressed list holds 'PLTT'. DET, PLTT and
+//     '<883 copies/mL' are suppressed texts that never pass the valid-result filter.
+//   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
+//   - tested_at: a 3-character ZU code other than ZUE and ZUA becomes ZUL (lines 76-79). LIKE keeps
+//     trailing spaces, so 'ZUB ' stays as it is.
+//
+// CE gaps:
+//   - ReceivingFacilityCode is not carried (ruling 7). receiving_code is a NULL column in the first
+//     CTE, so the v1 expressions keep their form. tested_at uses only the testing code (the
+//     performer). referral is NULL; when a receiving code arrives it follows line 80 (1 or 0).
+//   - Disalink reads the request attributes prereg-registration-facility (LIMSPreReg_RegistrationFacilityCode)
+//     and referring-request-id (ReferringRequestID). cdr-toolchain does not fill them yet, so disalink
+//     is 0 until it does. v1's facility list is the mapped facility_map codes.
+//   - The VIRAL answers come from questionnaire_responses (ruling 6), not LabResults. The form keeps the
+//     reported text, so v1's coded-value test (LIMSCodedValue = 'BASE', line 22) is covered by the text
+//     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
+//     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
+export function hivvlCte(name, { from, to } = {}) {
+  const windowed = from !== undefined && to !== undefined;
+  const result = rpt('l');
+  // Rows of the lab ids that have a report issued in the window: the dedupe needs their other rows too.
+  const prefilter = windowed
+    ? `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`
+    : '';
+  const finalRange = windowed ? `and ${inRange('r.tested_date', from, to)}` : '';
+  return `${name} as (
+  with ${name}_src as (
+    select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
+      fmr.region as province, fmr.district as district, fmr.name as facility,
+      p.sex, lr.age_years,
+      dr.issued as tested_date, lr.analysis_at as run_date, s.received_time as received_date,
+      lr.authored_at as registered_date, dr.effective as collected_date,
+      dr.performer as testing_code, null::text as receiving_code,
+      ${result} as result_text, l.numeric_value
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr')}
+    join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join specimens s on s.id = dr.specimen_id
+    left join patients p on p.id = lr.patient_id
+    where lr.panel_code in ('HIVVL', 'POCVR', 'POHVL')
+      and l.observation_code in ('HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC')
+      and dr.status = 'final'
+      and (${inListSql(result, HIVVL_VALID)} or ${isNumericSql(result)})
+      ${prefilter}
+  ),
+  ${name}_ranked as (
+    select s.*, row_number() over (partition by s.lab_id order by ${utcTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
+    from ${name}_src s
+  ),
+  ${name}_flags as (
+    select q.request_id as lab_id,
+      max(case when ${inListSql('a.vpreg', YES_WORDS)} or ${inListSql('a.artpr', YES_WORDS)} or ${inListSql('a.artrs', ['Pregnant Mother'])} then 1 end) as pregnant,
+      max(case when ${inListSql('a.vbrea', YES_WORDS)} or ${inListSql('a.artbr', YES_WORDS)} or ${inListSql('a.artrs', ['Lactating Mother'])} then 1 end) as breastfeeding,
+      max(case when a.artrs ilike '%Base%' or (q.panel_code = 'RTRI' and exists (select 1 from lab_results x where x.request_id = q.id)) then 1 end) as baseline_vl,
+      max(case when ${inListSql('a.visit', ['3 months post unsuppressed VL result'])} or ${inListSql('a.artrs', ['Confirmation of Treatment Failure (repeat VL at 3M)', 'Post EAC'])} then 1 end) as three_m_post_unsuppressed
+    from lab_requests q
+    cross join lateral (select
+      ${formAnswerSql('q.id', 'ARTPR')} as artpr, ${formAnswerSql('q.id', 'VPREG')} as vpreg,
+      ${formAnswerSql('q.id', 'ARTBR')} as artbr, ${formAnswerSql('q.id', 'VBREA')} as vbrea,
+      ${formAnswerSql('q.id', 'ARTRS')} as artrs, ${formAnswerSql('q.id', 'VISIT')} as visit) a
+    where q.request_id in (select s.lab_id from ${name}_src s)
+    group by q.request_id
+  )
+  select r.province, r.district, r.facility, r.lab_id,
+    case upper(rtrim(r.sex)) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end as gender,
+    case
+      when r.age_years = 0 then '<01'
+      when r.age_years between 1 and 4 then '01-04'
+      when r.age_years between 5 and 9 then '05-09'
+      when r.age_years between 10 and 14 then '10-14'
+      when r.age_years between 15 and 19 then '15-19'
+      when r.age_years between 20 and 24 then '20-24'
+      when r.age_years between 25 and 29 then '25-29'
+      when r.age_years between 30 and 34 then '30-34'
+      when r.age_years between 35 and 39 then '35-39'
+      when r.age_years between 40 and 44 then '40-44'
+      when r.age_years between 45 and 49 then '45-49'
+      when r.age_years >= 50 then '50+'
+    end as age_group,
+    r.tested_date,
+    case when (${inListSql('r.result_text', HIVVL_SUPPRESSED)} or (r.numeric_value < 1000 and r.result_text not like '>%')) then 1 else 0 end as suppressed,
+    case when (${inListSql('r.result_text', HIVVL_UU)} or r.numeric_value < 200) then 1 else 0 end as uu,
+    c.tat,
+    case when c.tat <= 14 then 1 else 0 end as tat_within14,
+    f.pregnant, f.breastfeeding, f.baseline_vl,
+    r.run_date, r.received_date, r.registered_date, r.collected_date,
+    case when c.base_code ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
+    case
+      when r.receiving_code is null then null::int
+      when length(rtrim(r.receiving_code)) > 0 and ${foldSql('r.receiving_code')} <> ${foldSql('r.testing_code')} then 1
+      else 0
+    end as referral,
+    case
+      when length(rtrim(c.prereg_facility)) > 0 then 1
+      when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql('left(c.referring_id, 5)')})
+        and not ${isNumericSql('left(c.referring_id, 5)')} then 1
+      when ${isNumericSql('left(c.referring_id, 3)')} then 1
+      else 0
+    end as disalink,
+    f.three_m_post_unsuppressed,
+    case when c.is_poc then 1 else 0 end as poc,
+    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
+  from ${name}_ranked r
+  left join ${name}_flags f on f.lab_id = r.lab_id
+  cross join lateral (select
+    ${utcTs('r.tested_date')}::date - ${utcTs('r.collected_date')}::date as tat,
+    extract(epoch from date_trunc('hour', ${utcTs('r.tested_date')}) - date_trunc('hour', ${utcTs('r.collected_date')})) / 3600 as hours_taken,
+    ${isNumericSql('r.testing_code')} or ${isNumericSql('left(r.lab_id, 3)')} as is_poc,
+    case when length(rtrim(r.testing_code)) = 0 then r.receiving_code else r.testing_code end as base_code,
+    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'prereg-registration-facility') as prereg_facility,
+    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'referring-request-id') as referring_id) c
+  where r.seq = 1
+    ${finalRange}
+)`;
+}
