@@ -290,13 +290,15 @@ suites.push(jsSuite('params-shape', [
   ['dates optional', same(dateParams(false).map((p) => p.required), [false, false])],
 ]));
 
-// ---- ssTextKey: SQL Server's text order. The expected orders were read from SQL Server itself (varchar and nvarchar columns
-// ordered with ORDER BY), so a change of the character tables shows here. ----
+// ---- ssTextKey: SQL Server's text order. The default is the Windows word sort of Latin1_General_CI_AS, the collation of v1's OpenLDRData
+// text columns (and of nvarchar); { sqlCollation: true } is the SQL_Latin1_General_CP1_CI_AS order of a server-default column. The expected
+// orders were read from SQL Server itself (ORDER BY on the probe list for each collation, and the same with the SQL collation), so a change
+// of the character tables shows here. ----
 const SS_WORDS = ['Zed', 'oneil', "o'neil", 'é', 'e', 'coop', 'co-op', 'abc', 'ab', 'a_b', 'a-b', 'a b', 'a', '2500', '150', '1,000', '_x', '>10000000', '<20 copies/mL'];
-// varchar: '<' (0x3C) sorts before the digits and before '_'; the comma sorts before a digit; punctuation before letters.
+// SQL collation (sqlCollation: true): '<' (0x3C) sorts before the digits and before '_'; the comma sorts before a digit; punctuation before letters.
 const SS_VARCHAR_ORDER = ['<20 copies/mL', '>10000000', '_x', '1,000', '150', '2500', 'a', 'a b', 'a-b', 'a_b', 'ab', 'abc', 'co-op', 'coop', 'e', 'é', "o'neil", 'oneil', 'Zed'];
-// nvarchar: the hyphen and the apostrophe do not count, so 'a-b', 'co-op' and "o'neil" tie with 'ab', 'coop' and 'oneil' (left out of the
-// list, tested as ties below); '_' sorts before '<'.
+// Word sort (the default): the hyphen and the apostrophe do not count, so 'a-b', 'co-op' and "o'neil" tie with 'ab', 'coop' and 'oneil' (left
+// out of the list, tested as ties below; SQL Server puts the plain text first, the key cannot); '_' sorts before '<'.
 const SS_NVARCHAR_WORDS = SS_WORDS.filter((w) => !['a-b', 'co-op', "o'neil"].includes(w));
 const SS_NVARCHAR_ORDER = ['_x', '<20 copies/mL', '>10000000', '1,000', '150', '2500', 'a', 'a b', 'a_b', 'ab', 'abc', 'coop', 'e', 'é', 'oneil', 'Zed'];
 
@@ -311,40 +313,45 @@ function ssOrderSuite(name, words, opts, expectedOrder) {
     },
   };
 }
-suites.push(ssOrderSuite('ss-order-varchar', SS_WORDS, {}, SS_VARCHAR_ORDER));
-suites.push(ssOrderSuite('ss-order-nvarchar', SS_NVARCHAR_WORDS, { unicode: true }, SS_NVARCHAR_ORDER));
+suites.push(ssOrderSuite('ss-order-sql-collation', SS_WORDS, { sqlCollation: true }, SS_VARCHAR_ORDER));
+suites.push(ssOrderSuite('ss-order-word-sort', SS_NVARCHAR_WORDS, {}, SS_NVARCHAR_ORDER));
 
-// Ties: trailing spaces and case for both; the hyphen and the apostrophe only for nvarchar.
+// Ties: trailing spaces and case for both; the hyphen and the apostrophe only in the word sort.
 const TIE_CASES = [
-  { a: 'abc', b: 'ABC  ', unicode: false, expected: true },
-  { a: 'abc', b: 'abd', unicode: false, expected: false },
-  { a: 'a-b', b: 'ab', unicode: false, expected: false },
-  { a: 'a-b', b: 'ab', unicode: true, expected: true },
-  { a: "o'neil", b: 'oneil', unicode: true, expected: true },
-  { a: 'co-op', b: 'coop', unicode: true, expected: true },
-  { a: 'a b', b: 'ab', unicode: true, expected: false },
-  { a: 'a_b', b: 'ab', unicode: true, expected: false },
+  { a: 'abc', b: 'ABC  ', sqlCollation: true, expected: true },
+  { a: 'abc', b: 'abd', sqlCollation: true, expected: false },
+  { a: 'a-b', b: 'ab', sqlCollation: true, expected: false },
+  { a: 'a-b', b: 'ab', sqlCollation: false, expected: true },
+  { a: "o'neil", b: 'oneil', sqlCollation: false, expected: true },
+  { a: 'co-op', b: 'coop', sqlCollation: false, expected: true },
+  { a: 'a b', b: 'ab', sqlCollation: false, expected: false },
+  { a: 'a_b', b: 'ab', sqlCollation: false, expected: false },
 ];
 suites.push({
   name: 'ss-ties',
-  sql: `select 'ss-ties' || chr(9) || json_build_object('got', json_build_array(${TIE_CASES.map((c) => `${ssTextKey(lit(c.a), { unicode: c.unicode })} = ${ssTextKey(lit(c.b), { unicode: c.unicode })}`).join(', ')}))::text;`,
+  sql: `select 'ss-ties' || chr(9) || json_build_object('got', json_build_array(${TIE_CASES.map((c) => `${ssTextKey(lit(c.a), { sqlCollation: c.sqlCollation })} = ${ssTextKey(lit(c.b), { sqlCollation: c.sqlCollation })}`).join(', ')}))::text;`,
   count: 1,
   check(rows) {
     const got = rows[0]?.got ?? [];
-    return TIE_CASES.flatMap((c, i) => (got[i] === c.expected ? [] : [`${JSON.stringify([c.a, c.b, c.unicode])}: expected ${c.expected}, got ${got[i]}`]));
+    return TIE_CASES.flatMap((c, i) => (got[i] === c.expected ? [] : [`${JSON.stringify([c.a, c.b, c.sqlCollation])}: expected ${c.expected}, got ${got[i]}`]));
   },
 });
 
-// The larger of two texts, as SQL Server's MAX picks (measured), with the key then the plain text as the tie-break.
+// The larger of two texts, as SQL Server's MAX picks (measured on Latin1_General_CI_AS, both word sort and, for the pairs below, the SQL collation; the
+// pairs have no hyphen), with the key then the plain text as the tie-break.
 const MAX_PAIRS = [
   ['<20 copies/mL', '2500', '2500'], ['< 20', '150', '150'], ['>10000000', '2500', '2500'],
   ['120', '110', '120'], ['99', '100', '99'], ['abc', 'ABD', 'ABD'], ['abc', '2500', 'abc'],
 ];
-suites.push(caseSuite('ss-max-pair', ['x', 'y'], MAX_PAIRS.map(([x, y, expected]) => ({ x, y, expected })),
-  `(select (array_agg(w order by ${ssTextKey('w')} collate "C" desc, w collate "C" desc))[1] from (values (x), (y)) as t(w))`));
-suites.push(caseSuite('ss-max-pair-nvarchar', ['x', 'y'], [
-  { x: 'a-c', y: 'ab', expected: 'a-c' }, { x: 'a_', y: 'ab', expected: 'ab' },
-],
-`(select (array_agg(w order by ${ssTextKey('w', { unicode: true })} collate "C" desc, w collate "C" desc))[1] from (values (x), (y)) as t(w))`));
+const maxOf = (opts) => `(select (array_agg(w order by ${ssTextKey('w', opts)} collate "C" desc, w collate "C" desc))[1] from (values (x), (y)) as t(w))`;
+suites.push(caseSuite('ss-max-pair', ['x', 'y'], MAX_PAIRS.map(([x, y, expected]) => ({ x, y, expected })), maxOf({})));
+suites.push(caseSuite('ss-max-pair-sql-collation', ['x', 'y'], MAX_PAIRS.map(([x, y, expected]) => ({ x, y, expected })), maxOf({ sqlCollation: true })));
+// Where the two collations part: the hyphen does not count in the word sort ('a-c' is 'ac', above 'ab'); in the SQL collation it sorts as a mark.
+suites.push(caseSuite('ss-max-pair-word-sort', ['x', 'y'], [
+  { x: 'a-c', y: 'ab', expected: 'a-c' }, { x: 'a_', y: 'ab', expected: 'ab' }, { x: '<20', y: '_1', expected: '<20' },
+], maxOf({})));
+suites.push(caseSuite('ss-max-pair-sql-collation-marks', ['x', 'y'], [
+  { x: 'a-c', y: 'ab', expected: 'ab' }, { x: 'a_', y: 'ab', expected: 'ab' }, { x: '<20', y: '_1', expected: '_1' },
+], maxOf({ sqlCollation: true })));
 
 export const groups = [{ name: 't1', suites }];

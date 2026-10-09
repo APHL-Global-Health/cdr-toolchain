@@ -442,7 +442,8 @@ export const artLookupParams = () => [
 //     other facilities, of a facility missing from the register, and of a code in no map are numbered too. The
 //     numbering is over the rows of the window, so a different window renumbers. Ties (several results of one lab
 //     number) are numbered in v1's unspecified order; the port breaks them on the row ids. The lab number sorts as
-//     SQL Server sorts it, ignoring case and trailing spaces.
+//     SQL Server sorts it (ssTextKey: the word sort of the Latin1_General_CI_AS columns of v1, ignoring case, trailing spaces, hyphens and
+//     apostrophes; the hyphen ties 'U8-1' with 'U81'), then byte order.
 //   - The window (line 66) is AnalysisDateTime BETWEEN @StartDate AND @EndDate with dates, i.e. midnight: analysis from from
 //     00:00:00 up to and including to 00:00:00 (local wall time). So the end day is out apart from its first instant,
 //     and from = to returns only analyses at exactly midnight. Same as fn_GeneXpertReport (spec ruling 1, kept).
@@ -614,8 +615,8 @@ const sameClient = (a, b) => `${foldSql(`${a}.facility`)} = ${foldSql(`${b}.faci
 //   - Visits are numbered inside (province, district, facility, panel, SEX, ART number): a client whose sex differs between requests has
 //     two series. The PIVOT groups by province, district, facility and ART number only, so the series are merged and MAX keeps the
 //     greater TEXT of each visit slot ('120' beats '110'; '99' beats '100'; '2500' beats '<20 copies/mL', as the comparison is one of
-//     SQL Server's text order: punctuation before digits before letters, case and trailing spaces ignored). The port takes the greater text in
-//     that order (ssTextKey), then byte order for equal texts.
+//     SQL Server's text order: punctuation before digits before letters, case and trailing spaces ignored, hyphens and apostrophes ignored
+//     as in v1's Latin1_General_CI_AS columns). The port takes the greater text in that order (ssTextKey), then byte order for equal texts.
 //   - The client is the facility NAME and the ART number: ART numbers that differ only in case are one client (the case shown is the
 //     one that sorts first in byte order; v1 shows either). A blank ART number (no REFNO and no UNIQUEID) groups with every other
 //     such client of the facility.

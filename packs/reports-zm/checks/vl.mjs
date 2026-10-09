@@ -1074,12 +1074,13 @@ fac('T8-42', { ana: null });                                                    
 fac('T8-43', { ref: '4343', results: [{ num: 300 }], auth: '2026-05-30T20:00:00Z', ana: '2026-05-30T23:59:59Z',
   iss: '2026-05-31T00:59:59Z' });                                                        // 32: 05-30 23:59:59: in the 05-31 window, out of a 05-30 window
 fac('T8-44', { req: 'ZCHO3', ref: 'C44', results: [{ num: 100 }] });                    // 33: a second register entry named "Choma Clinic"
-// Lab numbers that SQL Server and byte order sort differently. SQL Server: '-' < ':' < '@' < '_' < digits < letters; byte order:
-// '-' < digits < ':' < '@' < letters < '_'. They all sort after the T8- numbers in both. Serials 34 to 39 in SQL Server's order.
-fac('U8-1', { ref: '8001' });   // 34
-fac('U8:1', { ref: '8002' });   // 35
-fac('U8@1', { ref: '8003' });   // 36
-fac('U8_1', { ref: '8004' });   // 37
+// Lab numbers that SQL Server (Latin1_General_CI_AS, the collation of v1's text columns) and byte order sort differently. The word sort ignores
+// the hyphen, so 'U8-1' sorts as 'U81'. SQL Server: ':' < '@' < '_' < 'U8-1' (as 'U81') < 'U891' < 'U8A1'; byte order: '-' < digits < ':' < '@' <
+// letters < '_'. They all sort after the T8- numbers in both. Serials 34 to 39 in SQL Server's order.
+fac('U8:1', { ref: '8002' });   // 34
+fac('U8@1', { ref: '8003' });   // 35
+fac('U8_1', { ref: '8004' });   // 36
+fac('U8-1', { ref: '8001' });   // 37
 fac('U891', { ref: '8005' });   // 38
 fac('U8A1', { ref: '8006' });   // 39
 
@@ -1138,10 +1139,10 @@ const FAC_GENERAL = [
   fv(30, '3737', '100', 1, 0, 0, 0, 1),
   fv(31, '3939', '200', 1, 0, 1, 0, 2),
   fv(32, '4343', '300', 1, 0, 29, 0, 1),
-  fv(34, '8001', '540', 1, 0, 1, 0, 4),
-  fv(35, '8002', '540', 1, 0, 1, 0, 4),
-  fv(36, '8003', '540', 1, 0, 1, 0, 4),
-  fv(37, '8004', '540', 1, 0, 1, 0, 4),
+  fv(34, '8002', '540', 1, 0, 1, 0, 4),
+  fv(35, '8003', '540', 1, 0, 1, 0, 4),
+  fv(36, '8004', '540', 1, 0, 1, 0, 4),
+  fv(37, '8001', '540', 1, 0, 1, 0, 4),
   fv(38, '8005', '540', 1, 0, 1, 0, 4),
   fv(39, '8006', '540', 1, 0, 1, 0, 4),
 ];

@@ -199,8 +199,8 @@ export const labNameSql = (drAlias) => `coalesce(
 
 // ---- Text order like SQL Server ----
 
-// The order of the 191 Latin-1 characters of the default text types, measured on the local SQL Server (SQL_Latin1_General_CP1_CI_AS,
-// the 32 to 126 and 160 to 255 range; sqlserver-varchar-char-ranks.json in the task folder). Each string holds the characters that
+// SQL_Latin1_General_CP1_CI_AS (the server default, option sqlCollation): the order of the 191 Latin-1 characters (32 to 126 and 160 to
+// 255), measured on the local SQL Server (sqlserver-varchar-char-ranks.json in the task folder). Each string holds the characters that
 // compare equal (a capital and its small letter); the index is the rank. A hyphen, an apostrophe and a dot sort as any other mark.
 const SS_VARCHAR_CLASSES = [
   " ",
@@ -340,9 +340,10 @@ const SS_VARCHAR_CLASSES = [
   "\u00fe\u00de",
 ];
 
-// The same for nvarchar columns, measured the same way. SQL Server compares nvarchar with the Unicode word sort: the hyphen, the
-// apostrophe and the soft hyphen are ignored in a comparison ('co-op' ties with 'coop' and only then comes after it), and marks such as
-// '_' and '<' rank differently from varchar ('_' before '<').
+// Latin1_General_CI_AS (the default of ssTextKey), measured the same way (sqlserver-nvarchar-char-ranks.json). This is the Windows word sort,
+// which SQL Server uses for nvarchar and for varchar columns of a Windows collation: the hyphen, the apostrophe and the soft hyphen are
+// ignored in a comparison ('co-op' ties with 'coop' and only then comes after it), and marks such as '_' and '<' rank differently from
+// the SQL collation ('_' before '<'). The name SS_NVARCHAR_CLASSES is kept from the first measurement.
 const SS_NVARCHAR_CLASSES = [
   " ",
   "'",
@@ -496,19 +497,26 @@ function translation(classes, ignored) {
   });
   return { from: unicodeLiteral(from.concat(ignored).join('')), to: unicodeLiteral(to.join('')) };
 }
-const SS_KEYS = { false: translation(SS_VARCHAR_CLASSES, []), true: translation(SS_NVARCHAR_CLASSES, SS_NVARCHAR_IGNORED) };
+const SS_KEYS = { false: translation(SS_NVARCHAR_CLASSES, SS_NVARCHAR_IGNORED), true: translation(SS_VARCHAR_CLASSES, []) };
 
-// A text expression whose byte order (`collate "C"`) is SQL Server's text order for varchar (or nvarchar with `unicode: true`):
+// A text expression whose byte order (`collate "C"`) is SQL Server's text order:
 //   order by ssTextKey(x) collate "C"      and      max by ssTextKey(x) collate "C"
-// SQL Server ignores trailing spaces and, in the default collation, case: the key trims trailing spaces and maps every character to the
-// code point U+3000 plus the rank of its class (3 bytes in UTF-8, so the byte order follows the rank). Equal keys are equal texts for
-// SQL Server ('abc' and 'ABC ' tie); break the tie with the plain text.
+// The default is the Windows word sort of the collation Latin1_General_CI_AS. Tanzania's v1 OpenLDRData text columns (LIMSRptResult,
+// RequestID, the Requests columns) are varchar with exactly that collation (measured on the local SQL Server: the probe list sorted
+// as nvarchar and as varchar under Latin1_General_CI_AS gives one order, with the Latin1_General_CI_AS word sort), so v1's MAX, ORDER BY
+// and row_number over text follow it. Zambia is assumed to be the same (same v1 schema). `{ sqlCollation: true }` gives the order of
+// a column in the server default collation SQL_Latin1_General_CP1_CI_AS (the old default), which the key's tests also pin.
+// SQL Server ignores trailing spaces and case: the key trims trailing spaces and maps every character to the code point U+3000 plus
+// the rank of its class (3 bytes in UTF-8, so the byte order follows the rank). Equal keys are equal texts for SQL Server ('abc' and
+// 'ABC ' tie); break the tie with the plain text.
 // Limits. A character outside the table (control characters, anything above U+00FF) is left as it is: it sorts before every mapped
-// character when it is below U+3000, and after them above that (rare in lab data). For nvarchar, SQL Server compares letters before
-// accents and ignores hyphens and apostrophes first: the key drops those marks (so 'co-op' and 'coop' tie, where SQL Server then puts the
-// hyphen last), and an accent still sorts as its own letter after the plain one ('\u00e9a' sorts after 'eb' here, before it in SQL Server).
-export const ssTextKey = (expr, { unicode = false } = {}) =>
-  `translate(rtrim(${expr}), ${SS_KEYS[unicode].from}, ${SS_KEYS[unicode].to})`;
+// character when it is below U+3000, and after them above that (rare in lab data). In the word sort SQL Server ignores hyphens, apostrophes
+// and the soft hyphen when it compares and uses them only to break a tie: the key drops them, so 'co-op' and 'coop' tie where SQL Server
+// puts 'coop' first (break the tie on the plain text; that puts 'co-op' first, which SQL Server does not). SQL Server also compares
+// letters before accents: the key sorts an accented letter as its own letter after the plain one, so 'ea' sorts before '\u00e9a' and
+// 'eb' after it where SQL Server puts '\u00e9a' before 'eb'. A per-character key cannot reproduce either.
+export const ssTextKey = (expr, { sqlCollation = false } = {}) =>
+  `translate(rtrim(${expr}), ${SS_KEYS[sqlCollation].from}, ${SS_KEYS[sqlCollation].to})`;
 
 // ---- The hivvl copy table (spec ruling 5) ----
 
