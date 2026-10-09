@@ -5,9 +5,9 @@
 // them as input so a test copy can swap in another country's codes without editing the SQL.
 //
 // Column names and order follow v1. A v1 column with no CE source is NULL under its v1 name.
-// The columns v1 computed with ViralLoadResultMerge, ViralLoadFinalResult and GetReasonForTest
-// are left out, because those functions are not in the views script. The raw reported value and
-// coded value of each input observation are returned in their place.
+// The columns v1 computed with GetReasonForTest, ViralLoadResultMerge and ViralLoadFinalResult
+// are ported as SQL expressions below. The merge reads the coded-result descriptions from the
+// pack's value set urn:openldr:mz:vl-coded-results.
 
 export const MOZ_CODES = {
   infoPanel: 'VIRAL',
@@ -237,9 +237,12 @@ function facilityBlock(testingProvinceAlias) {
 
 export function vlResultSql(codes) {
   const r = codes.result;
-  const raw = (alias) => `  ${rpt(alias.toLowerCase())} as "${alias}_LIMSRptResult",
-  ${alias.toLowerCase()}.coded_value as "${alias}_LIMSCodedValue",`;
-  return `with ${attrCte}
+  const merged = (alias) => resultMergeSql(reportedSql(alias), `${alias}.coded_value`);
+  // Two lateral subqueries work out the merge once per slot, then FinalViralLoadResult's second
+  // input: the first of HIVVR, HIVVC, HIVVF with a reported value, else HIVVR. v1 tests
+  // LEN(LIMSRptResult) > 0, and LEN ignores trailing spaces, as blankSql does.
+  return `with ${attrCte},
+${vlCodedCte}
 select
   lr.request_id as "RequestID",
   lr.obr_set_id as "OBRSetID",
@@ -248,11 +251,12 @@ select
   dr.issued as "HIVVL_AuthorisedDateTime",
   lr.rejection_code as "HIVVL_LIMSRejectionCode",
   lr.rejection_reason as "HIVVL_LIMSRejectionDesc",
-${raw('HIVVD')}
-${raw('HIVVR')}
-${raw('HIVVC')}
-${raw('HIVVF')}
+  vlm.vd as "HIVVL_ViralLoadResult",
+  vlm.vr as "HIVVL_ViralLoadCAPCTM",
+  vlm.vc as "HIVVL_Low_value",
+  vlm.vf as "HIVVL_Viral",
   ${rpt('hivrl')} as "HIVVL_VRLogValue",
+  ${finalResultSql('vlm.vd', 'vlc.capctm')} as "FinalViralLoadResult",
   lr.age_years as "AgeInYears",
   lr.age_days as "AgeInDays",
   p.sex as "HL7SexCode",
@@ -272,6 +276,18 @@ ${obsJoin('hivvr', r.HIVVR)}
 ${obsJoin('hivvc', r.HIVVC)}
 ${obsJoin('hivvf', r.HIVVF)}
 ${obsJoin('hivrl', r.HIVRL)}
+cross join lateral (select
+  ${merged('hivvd')} as vd,
+  ${merged('hivvr')} as vr,
+  ${merged('hivvc')} as vc,
+  ${merged('hivvf')} as vf
+) vlm
+cross join lateral (select case
+  when not ${blankSql(reportedSql('hivvr'))} then vlm.vr
+  when not ${blankSql(reportedSql('hivvc'))} then vlm.vc
+  when not ${blankSql(reportedSql('hivvf'))} then vlm.vf
+  else vlm.vr end as capctm
+) vlc
 ${where(codes.resultPanel)}`;
 }
 
@@ -313,7 +329,7 @@ ${plain('virr1', 'LastViralLoadResult')}
 ${plain('labno', 'RequestingClinician')}
 ${plain('conse', 'ConsentimentoParaContacto')}
 ${plain('lablo', 'LocalDeColheita')}
-  ${rpt('motivo')} as "ESCOL_LIMSRptResult",
+  ${reasonForTestSql(rpt('motivo'))} as "ReasonForTest",
 ${facilityBlock('TestingProvinceName')}
 ${sharedTail()}
 from lab_requests lr

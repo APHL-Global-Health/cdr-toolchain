@@ -12,6 +12,7 @@
 import { spawnSync } from 'node:child_process';
 import {
   isNumericSql, reasonForTestSql, resultMergeSql, finalResultSql, vlCodedCte, VL_CODED_VALUE_SET,
+  MOZ_CODES, vlResultSql, vlInfoSql,
 } from './vl-queries.mjs';
 import { pickCodedResultDisplays } from './vl-coded-results.mjs';
 
@@ -192,6 +193,80 @@ suites.push((() => {
     },
   };
 })());
+
+// Both full queries on a few requests in the temp tables. The "{{param.x}}" placeholders are
+// bound as literals here; CE binds them as parameters.
+const bindParams = (sqlText) => sqlText
+  .replaceAll('{{param.from}}', "'2026-01-01'")
+  .replaceAll('{{param.to}}', "'2026-12-31'")
+  .replaceAll('{{param.facility}}', "''");
+
+const WIRING_ROWS = `insert into lab_requests (id, request_id, panel_code, authored_at) values
+  ('w-a', 'A', 'HIVVL', '2026-05-01T08:00:00Z'),
+  ('w-b', 'B', 'HIVVL', '2026-05-01T09:00:00Z'),
+  ('w-c', 'C', 'HIVVL', '2026-05-01T10:00:00Z'),
+  ('w-d', 'D', 'HIVVL', '2026-05-01T11:00:00Z'),
+  ('w-e', 'E', 'VIRAL', '2026-05-01T08:00:00Z'),
+  ('w-f', 'F', 'VIRAL', '2026-05-01T09:00:00Z');
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
+  ('r-a1', 'w-a', 'HIVVD', null, null, null, 'LDL'),
+  ('r-b1', 'w-b', 'HIVVR', null, 540, null, null),
+  ('r-c1', 'w-c', 'HIVVR', '', null, null, null),
+  ('r-c2', 'w-c', 'HIVVC', null, 20, '<', null),
+  ('r-d1', 'w-d', 'HIVVD', '540', null, null, null),
+  ('r-d2', 'w-d', 'HIVVF', '1000', null, null, null),
+  ('r-e1', 'w-e', 'ESCOL', 'Rotina', null, null, null);`;
+
+// Fails unless `names` appear in `keys` next to each other, in this order.
+function inOrder(keys, names) {
+  const start = keys.indexOf(names[0]);
+  const ok = start >= 0 && names.every((n, i) => keys[start + i] === n);
+  return ok ? [] : [`columns not in v1 order: want ${names.join(', ')}; got ${keys.join(', ')}`];
+}
+
+function wiringSuite(name, sqlText, expected, order) {
+  return {
+    name,
+    setup: '',
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${bindParams(sqlText)}) q;`,
+    count: Object.keys(expected).length + 1,
+    check(rows) {
+      const failures = [];
+      if (rows.length !== Object.keys(expected).length) failures.push(`expected ${Object.keys(expected).length} rows, got ${rows.length}`);
+      if (rows[0]) {
+        const keys = Object.keys(rows[0]);
+        failures.push(...inOrder(keys, order));
+        const stale = keys.filter((k) => /_LIMSRptResult$|_LIMSCodedValue$/.test(k));
+        if (stale.length > 0) failures.push(`raw stand-in columns still present: ${stale.join(', ')}`);
+      }
+      for (const [requestId, want] of Object.entries(expected)) {
+        const row = rows.find((r) => r.RequestID === requestId);
+        if (!row) { failures.push(`request ${requestId}: no row`); continue; }
+        for (const [col, value] of Object.entries(want)) {
+          if (row[col] !== value) failures.push(`request ${requestId} ${col}: expected ${JSON.stringify(value)}, got ${JSON.stringify(row[col])}`);
+        }
+      }
+      return failures;
+    },
+  };
+}
+
+suites.push({ ...wiringSuite('wiring-results', vlResultSql(MOZ_CODES), {
+  // HIVVD coded LDL only. Rule 2 on "Target not detected".
+  A: { HIVVL_ViralLoadResult: 'Target not detected', HIVVL_ViralLoadCAPCTM: null, HIVVL_Low_value: null, HIVVL_Viral: null, FinalViralLoadResult: 'INDETECTAVEL' },
+  // HIVVR numeric only. Rule 1, numeric.
+  B: { HIVVL_ViralLoadResult: null, HIVVL_ViralLoadCAPCTM: '540', FinalViralLoadResult: '540' },
+  // HIVVR blank, so the second input is HIVVC "< 20". Rule 1, range.
+  C: { HIVVL_ViralLoadCAPCTM: null, HIVVL_Low_value: '< 20', FinalViralLoadResult: '< 20' },
+  // HIVVD 540 and HIVVF 1000. Rule 3: '5401000' is numeric, so capctm.
+  D: { HIVVL_ViralLoadResult: '540', HIVVL_Viral: '1000', FinalViralLoadResult: '1000' },
+}, ['HIVVL_LIMSRejectionDesc', 'HIVVL_ViralLoadResult', 'HIVVL_ViralLoadCAPCTM', 'HIVVL_Low_value', 'HIVVL_Viral', 'HIVVL_VRLogValue', 'FinalViralLoadResult', 'AgeInYears']),
+  setup: WIRING_ROWS });
+
+suites.push(wiringSuite('wiring-info', vlInfoSql(MOZ_CODES), {
+  E: { ReasonForTest: 'Routine' },
+  F: { ReasonForTest: 'Reason Not Specified' },
+}, ['LocalDeColheita', 'ReasonForTest', 'DateTimeStamp']));
 
 // ---- Runner ----
 
