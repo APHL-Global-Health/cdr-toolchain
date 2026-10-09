@@ -1,7 +1,10 @@
 // Custom queries for the vl reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql } from '../../vl-reports-mz/vl-queries.mjs';
-import { hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, sqlList } from '../zm-sql.mjs';
+import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import {
+  hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
+  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql,
+} from '../zm-sql.mjs';
 
 // Area parameters in SQL. An optional parameter arrives as '' when blank. `same` matches a column on a
 // parameter the way SQL Server does (case and trailing spaces ignored), and passes everything when blank.
@@ -344,10 +347,181 @@ export const vlTrendParams = () => [
   ...dateParams(true),
 ];
 
+// ---- Client by ART number ----------------------------------------------------------------------
+//
+// Replaces sp_GetDetailsFromARTNumber. Given an ART number, lists the lab number and the name of every client
+// whose derived ART number equals it. One row per lab number; no date window, no panel filter, every request (v1
+// scans all of Patients).
+//
+// The ART number (lookup lines 22-28), from the two request attributes reference-numbers (v1 REFNO) and unique-id
+// (v1 UNIQUEID). artNumberShortSql follows this procedure: it has NO ",ELABS" text-extraction steps, which
+// sp_GetPreviousVLResultforCohort2x (artNumberSql, used by "VL clients by province") has. So ",ELABS 12AT.3456" is
+// 'ELABS123456' here and '3456' there. The rules, in v1's order:
+//   REFNO blank after removing commas, "AT.", spaces and dashes   UNIQUEID without spaces and dashes
+//   REFNO (less commas and "AT.") starts "ART." or "ELABS."       UNIQUEID without spaces and dashes
+//   otherwise                                                     REFNO without commas, "AT.", spaces and dashes
+// The comparison with the parameter ignores case and trailing spaces, as SQL Server does.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The derived value has no dashes or spaces; the parameter is compared as typed. 'AB-1234' finds nothing when the
+//     ART number is stored as 'AB-1234' in UNIQUEID (the dash is removed from the stored value, not from the parameter).
+//   - A client with several requests gives one row per lab number, each with the same name, as v1 gives one per
+//     Patients row.
+//   - v1's @ARTNumber is varchar(20), so a longer parameter is cut and can match a shorter value by accident. The
+//     port compares the full text (evident intent). No ART number is that long.
+//
+// Rows. v1 reads Patients, one row per RequestID. A warehouse request row (lab_requests) is the nearest unit; a lab
+// number with several request rows (OBR sets) has the same patient and ids on each, so the port shows each (lab
+// number, first name, surname) once (select distinct). HONEST NON-PROOF: the v1 Patients key is not in the pack's v1
+// folder; the one-row-per-RequestID reading comes from sp_getFacilityVLClientDetails, which joins Patients on
+// RequestID with no row multiplier. A request with no patient still lists, with empty names (v1's Patients row exists
+// without them).
+//
+// CE gaps (spec ruling 7):
+//   - HOSPID is not sent. v1 gives HOSPID as the ART number of a client whose REFNO is blank and whose HOSPID is set
+//     (lookup line 23). CE has no such value, so that client is found by UNIQUEID (if that is what is typed) and not by
+//     the hospital number.
+//   - A missing attribute reads as '' (cdr sends nothing for an empty ID; v1 holds ''). A request with no attributes has
+//     ART number '' and matches only a blank parameter.
+//   - PII: this query returns patient names, as v1 does.
+export function artLookupSql() {
+  const art = artNumberShortSql("coalesce(zi.reference_numbers, '')", "coalesce(zi.unique_id, '')");
+  return `with ${zmIdsCte('zm_ids')},
+found as (
+  select distinct lr.request_id as lab_number, p.firstname, p.surname
+  from lab_requests lr
+  left join zm_ids zi on zi.lab_request_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  where ${foldSql(art)} = ${foldSql('{{param.art_number}}')}
+)
+select f.lab_number as "Lab Number", f.firstname as "FIRSTNAME", f.surname as "SURNAME"
+from found f
+order by f.lab_number collate "C", f.firstname collate "C", f.surname collate "C"`;
+}
+
+export const artLookupParams = () => [
+  { id: 'art_number', label: 'ART number', type: 'text', required: true },
+];
+
+// ---- VL results for a facility's clients -------------------------------------------------------
+//
+// Replaces sp_getFacilityVLClientDetails. One row per final HIVVL/HIVVC result of one facility's clients with an
+// analysis time in the window: the ART number, the result text, suppressed and unsuppressed flags and three
+// turnaround times.
+//
+// Rows (facility lines 25-70): a request (lab_requests) with a result (lab_results) and a final report
+// (diagnostic_reports; v1 HL7ResultStatusCode F, line 68). Panel HIVVL only (not POCVR or POHVL); observation HIVVL or HIVVC;
+// the result text (rpt) is not NULL and not one of 13 texts (INVAL, Please repeat, Insufficient serum received,
+// Insufficient for further tests, Indeterminate, Haemolysed, FAIL, Absent, Haemolysed ++, Icteric ++++, INV, This
+// result has been checked, to confirm patient identity.). NOT IN drops a NULL result. Lists compare ignoring case and
+// trailing spaces, as SQL Server does.
+//
+// Columns: Facility Name (the register name of the requesting facility), SerialNumber, ARTNo, VL Result (the reported
+// text, rpt), Suppressed, Unsupressed (v1's spelling) and the three TATs:
+//   Suppressed   1 when the text is on the list (<20 copies/mL, TAR, Target Not Detected, TARG, < 20, RNA not
+//                detected, <30 copies/ml, <30 copies/mL, NDET), or the text is a number under 1000, or the result has
+//                a coded value (length over 0). Else 0. (Facility lines 36-40.)
+//   Unsupressed  1 when the text is a number of 1000 or more, or starts '>10000000'. Else 0. (Lines 41-44.)
+//                So one result can be 1 in both (a number of 3000 with a coded value), and a text on neither list
+//                (Negative, ND, a decimal that v1 cannot read) is 0 in both.
+//   TAT1         days from collected (diagnostic_reports.effective) to registered (lab_requests.authored_at); NULL
+//                when either is missing. TAT2 days from registered to analysis (lab_requests.analysis_at). Both are
+//                v1's datediff(dd), the boundaries between LOCAL calendar dates, each taken from the stamp's own text.
+//   TAT3         hours from analysis to authorised (diagnostic_reports.issued): v1's datediff(second) cast to
+//                decimal(10,2) and divided by 3600. SQL Server gives decimal(15,7): 7 decimals, cut not rounded
+//                (measured on the local SQL Server: 100 s is 0.0277777). The port truncates to 7 decimals. NULL
+//                when either stamp is missing or not a full stamp.
+//
+// ART number (facility lines 28-34): artNumberRawSql, from the attributes reference-numbers (REFNO) and unique-id (UNIQUEID):
+// REFNO less commas and "AT." blank, or starts "ART." or "ELABS.": UNIQUEID as it is; else that REFNO. Unlike the lookup
+// above, spaces and dashes stay in the value.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - SerialNumber is row_number() over the whole window ordered by the lab number, computed BEFORE the facility
+//     filter (CTE line 27, filter line 83). So the numbers of one facility have gaps and do not start at 1: rows of
+//     other facilities, of a facility missing from the register, and of a code in no map are numbered too. The
+//     numbering is over the rows of the window, so a different window renumbers. Ties (several results of one lab
+//     number) are numbered in v1's unspecified order; the port breaks them on the row ids. The lab number sorts as
+//     SQL Server sorts it, ignoring case and trailing spaces.
+//   - The window (line 66) is AnalysisDateTime BETWEEN @StartDate AND @EndDate with dates, i.e. midnight: analysis from from
+//     00:00:00 up to and including to 00:00:00 (local wall time). So the end day is out apart from its first instant,
+//     and from = to returns only analyses at exactly midnight. Same as fn_GeneXpertReport (spec ruling 1, kept).
+//   - Suppressed = 1 for ANY coded value, even beside a number of 1000 or more (both flags 1), and for a coded value
+//     alone (the VL Result is then the coded value).
+//   - The suppressed list here is shorter than the hivvl copy table's: 'ND', '<20CP', '< 40', 'DET' and the rest are
+//     not on it, so they count 0 here.
+//   - The facility is matched on its name (Facilities.Description), not its code, and ignoring case and trailing
+//     spaces. Two register entries with one name both show.
+//   - v1 joins the facility dictionary and HealthcareAreas inside the CTE and never reads them (lines 59-61); not ported.
+//   - v1's @Facility is varchar(50): a longer name is cut and matches nothing. The port compares the full name.
+//
+// Deviations (spec ruling 2):
+//   - v1 casts the result text to bigint to test it against 1000 (lines 37, 41). A decimal text ('999.5'), a text with a
+//     thousands comma or an exponent makes that cast fail, and v1 stops with a conversion error (measured on the local
+//     SQL Server: try_cast gives NULL for all three). The port reads the number (numberOfTextSql: commas dropped, no
+//     currency sign), so '999.5' is suppressed and '1200.5' is unsuppressed. Same handling as Task 5's surveillance
+//     procedure. These expectations are intent, not v1 output.
+//   - The facility parameter is required and has no "all" mode (v1 has none; the facilityParam used elsewhere means
+//     "all" when blank). A blank name matches no facility.
+//
+// CE gaps (spec ruling 7): HOSPID is not sent, so the ART number of a client with blank REFNO and a HOSPID is UNIQUEID
+// (see artNumberRawSql). A missing attribute reads as ''. Requesting facility and its name come from the mapped register
+// row, so a name can differ from v1's Facilities.Description (README). Window: `from` and `to` are required (spec ruling 3).
+const INVALID_VL_TEXTS = ['INVAL', 'Please repeat', 'Insufficient serum received', 'Insufficient for further tests', 'Indeterminate',
+  'Haemolysed', 'FAIL', 'Absent', 'Haemolysed ++', 'Icteric ++++', 'INV', 'This result has been checked', 'to confirm patient identity.'];
+const SUPPRESSED_VL_TEXTS = ['<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml', '<30 copies/mL', 'NDET'];
+
+export function facilityClientsSql() {
+  const art = artNumberRawSql("coalesce(zi.reference_numbers, '')", "coalesce(zi.unique_id, '')");
+  const result = rpt('l');
+  const number = numberOfTextSql('s.result_text');
+  const seconds = (to, from) => `extract(epoch from date_trunc('second', ${utcTs(to)}) - date_trunc('second', ${utcTs(from)}))::numeric`;
+  return `with ${zmIdsCte('zm_ids')},
+src as (
+  select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
+    fmr.name as facility_name, ${result} as result_text, l.coded_value,
+    lr.authored_at, lr.analysis_at, dr.effective, dr.issued,
+    ${art} as art_no
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  left join zm_ids zi on zi.lab_request_id = lr.id
+  where ${inListSql('lr.panel_code', ['HIVVL'])}
+    and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC'])}
+    and dr.status = 'final'
+    and ${localTs('lr.analysis_at')} >= ({{param.from}})::date::timestamp
+    and ${localTs('lr.analysis_at')} <= ({{param.to}})::date::timestamp
+    and not ${inListSql(result, INVALID_VL_TEXTS)}
+),
+tests as (
+  select row_number() over (order by lower(rtrim(s.lab_id)) collate "C", s.lab_id collate "C", s.request_row_id, s.result_row_id, s.report_row_id) as serial,
+    s.facility_name, s.art_no, s.result_text,
+    case when (${inListSql('s.result_text', SUPPRESSED_VL_TEXTS)} or ${number} < 1000 or length(rtrim(s.coded_value)) > 0) then 1 else 0 end as suppressed,
+    case when (${number} >= 1000 or s.result_text ilike '>10000000%') then 1 else 0 end as unsuppressed,
+    ${localDate('s.authored_at')} - ${localDate('s.effective')} as tat1,
+    ${localDate('s.analysis_at')} - ${localDate('s.authored_at')} as tat2,
+    trunc(${seconds('s.issued', 's.analysis_at')} / 3600, 7) as tat3
+  from src s
+)
+select t.facility_name as "Facility Name", t.serial as "SerialNumber", t.art_no as "ARTNo", t.result_text as "VL Result",
+  t.suppressed as "Suppressed", t.unsuppressed as "Unsupressed", t.tat1 as "TAT1", t.tat2 as "TAT2", t.tat3 as "TAT3"
+from tests t
+where t.facility_name is not null and ${foldSql('t.facility_name')} = ${foldSql('{{param.facility}}')}
+order by t.serial`;
+}
+
+export const facilityClientsParams = () => [
+  { ...facilityParam(), label: 'Facility (name as in the register)', required: true },
+  ...dateParams(true),
+];
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
     { name: 'VL dashboard by sex and age', sql: vlSexAgeSql(), params: vlSexAgeParams() },
     { name: 'VL monthly trend', sql: vlTrendSql(), params: vlTrendParams() },
+    { name: 'Client by ART number', sql: artLookupSql(), params: artLookupParams() },
+    { name: "VL results for a facility's clients", sql: facilityClientsSql(), params: facilityClientsParams() },
   ];
 }

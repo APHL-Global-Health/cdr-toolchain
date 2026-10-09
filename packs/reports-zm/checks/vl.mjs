@@ -939,4 +939,292 @@ const suites7trend = [
   },
 ];
 
-export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }];
+// ============================================================================================
+// Group t8: "Client by ART number" (v1 sp_GetDetailsFromARTNumber, "lookup" below) and "VL results for a
+// facility's clients" (v1 sp_getFacilityVLClientDetails, "facility" below). Fixture ids start with "t8-"; lab
+// ids with "T8-" ("T8-A.." for the lookup, "T8-.." for the facility report). "lookup line N" and "facility line N"
+// are lines of those two v1 files. Expected rows are worked out by hand from the v1 text.
+// ============================================================================================
+
+const P8 = [];
+const R8 = [];
+const D8 = [];
+const L8 = [];
+const A8 = [];
+let n8 = 0;
+const k8 = () => String(++n8).padStart(3, '0');
+const REF = 'reference-numbers';
+const UNQ = 'unique-id';
+
+// ---- Lookup fixtures: one request (a Patients row in v1) per case. ----
+// names: [firstname, surname] or null for a request with no patient.
+function look(labId, ref, uq, names) {
+  const k = k8();
+  const qid = `t8-q${k}`;
+  let pid = null;
+  if (names) {
+    pid = `t8-p${k}`;
+    P8.push(`(${lit(pid)}, ${lit(names[1])}, ${lit(names[0])}, 'F')`);
+  }
+  R8.push(`(${lit(qid)}, ${lit(labId)}, 'HIVVL', null, null, null, ${lit(pid)})`);
+  if (ref !== null) A8.push(`(${lit(`t8-a${k}r`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(ref)})`);
+  if (uq !== null) A8.push(`(${lit(`t8-a${k}u`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(UNQ)}, ${lit(uq)})`);
+  return qid;
+}
+
+look('T8-A01', '12345', 'U-1', ['Ann', 'Bwalya']);                  // else branch (line 27): REFNO as is
+look('T8-A02', 'AT.12 345', 'U-2', ['Ben', 'Chola']);               // "AT." removed, space removed: 12345
+look('T8-A03', '', 'AB-12 34', ['Carol', 'Daka']);                  // REFNO blank (line 24): UNIQUEID without spaces and dashes
+look('T8-A04', 'ART.555', 'AB-1234', ['Dan', 'Ejoh']);              // starts ART. (line 25): UNIQUEID, dash removed
+look('T8-A05', 'ELABS.77', 'X-9', ['Eve', 'Phiri']);                // starts ELABS. (line 26): UNIQUEID
+// This procedure has no ",ELABS" text-extraction steps (lookup lines 22-28), so the text is only cleaned:
+// the comma and "AT." go, then spaces. "ELABS 12AT.3456" -> "ELABS 123456" -> "ELABS123456".
+look('T8-A06', ',ELABS 12AT.3456', 'U-6', ['Fay', 'Zulu']);
+look('T8-A07', 'art12345,ELABS 99', 'U-7', ['Gus', 'Mwale']);       // comma and spaces go: art12345ELABS99
+look('T8-A08', ' , AT. ', 'Q-1', ['Hana', 'Sata']);                 // nothing left (line 24): UNIQUEID Q1
+look('T8-A09', '1234at.5', 'U-9', ['Ian', 'Tembo']);                // REPLACE ignores case: "at." goes: 12345
+look('T8-A10', ',ART.5', 'Z-1', ['Jo', 'Nkole']);                   // comma removed, starts ART.: UNIQUEID Z1
+look('T8-A11', null, null, ['Kim', 'Lungu']);                       // no attributes: nothing, ART number ''
+look('T8-A12', '12345', 'U-12', null);                              // no patient: v1 Patients row without names
+// One lab id, two request rows (OBR sets), one patient: v1 Patients has one row per RequestID, so one row.
+{
+  const pid = 't8-p-a13';
+  P8.push(`(${lit(pid)}, 'Mumba', 'Lee', 'F')`);
+  for (let i = 0; i < 2; i++) {
+    const k = k8();
+    R8.push(`(${lit(`t8-q${k}`)}, 'T8-A13', 'HIVVL', null, null, null, ${lit(pid)})`);
+    A8.push(`(${lit(`t8-a${k}r`)}, ${lit(`t8-q${k}`)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, '99001')`);
+  }
+}
+look('T8-A14', '777 ', 'U', ['Mia', 'Simba']);                      // trailing space kept in REFNO, spaces removed: 777
+look('T8-A15', '777', 'U', ['Ned', 'Sakala']);
+
+// ---- Facility fixtures. Defaults: Choma General Hospital, one HIVVL result of 540, final report. ----
+// o: req, panel, status, ref, uq, ana, auth, eff, iss, results [{ obs, num, text, cmp, coded }], noReport.
+const F_DEFAULTS = {
+  req: 'ZSOUT', panel: 'HIVVL', status: 'final', uq: null,
+  auth: '2026-05-02T08:00:00Z', ana: '2026-05-02T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-02T13:00:00Z',
+  results: [{ obs: 'HIVVL', num: 540 }], noReport: false,
+};
+function fac(labId, o = {}) {
+  const r = { ...F_DEFAULTS, ref: `N${labId}`, ...o };
+  const k = k8();
+  const qid = `t8-q${k}`;
+  R8.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.auth)}, ${lit(r.ana)}, ${lit(r.req)}, null)`);
+  if (!r.noReport) D8.push(`(${lit(`t8-d${k}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.eff)}, ${lit(r.iss)}, 'LUS')`);
+  r.results.forEach((x, i) => {
+    L8.push(`(${lit(`t8-r${k}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs ?? 'HIVVL')}, ${lit(x.text ?? null)}, ${sql6(x.num)}, ${lit(x.cmp ?? null)}, ${lit(x.coded ?? null)})`);
+  });
+  if (r.ref !== null) A8.push(`(${lit(`t8-a${k}r`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(r.ref)})`);
+  if (r.uq !== null) A8.push(`(${lit(`t8-a${k}u`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(UNQ)}, ${lit(r.uq)})`);
+}
+
+// In the window and through every filter. The comment is the row's serial number (the rank of its lab id among
+// all rows in the window, any facility), then what it shows.
+fac('T8-01', { ref: '1001', uq: 'U1' });                                                 // 1: 540 < 1000, ART 1001
+fac('T8-02', { ref: 'AT.2002', results: [{ num: 1500 }] });                              // 2: "AT." removed (facility line 33): 2002
+fac('T8-03', { ref: '', uq: 'U-3 3', results: [{ text: 'target not detected' }] });      // 3: REFNO blank: UNIQUEID as is, spaces and dash kept
+fac('T8-04', { req: 'ZCHO2', ref: 'ART.555', uq: 'AB-1 2', results: [{ text: '>10000000 copies/mL' }] }); // 4: Choma Clinic; starts ART.
+fac('T8-05', { ref: 'ELABS.5', uq: 'E-7', results: [{ num: 999 }] });                    // 5: starts ELABS.: UNIQUEID
+fac('t8-06', { ref: '1006', results: [{ text: 'Rejected sample' }] });                  // 6: a lower-case lab id sorts by its lower-case text; no flag
+// Left out by the invalid-text list or the null result (the 13 texts, NOT IN drops NULL): no serial number.
+fac('T8-07', { results: [{ text: 'haemolysed ' }] });
+fac('T8-08', { results: [{ text: 'INVAL' }] });
+fac('T8-09', { results: [{}] });
+fac('T8-10', { ref: '1010', results: [{ coded: 'BLOQ' }] });                            // 7: result is the coded value; coded value present: Suppressed 1
+fac('T8-11', { ref: ',AT.4004', results: [{ num: 3000, coded: 'HIGH' }] });             // 8: both flags (coded value, and 3000 >= 1000)
+fac('T8-12', { ref: ' ', uq: 'BL 1', results: [{ num: 2000, coded: '   ' }] });         // 9: REFNO only a space: UNIQUEID; a blank coded value has length 0
+fac('T8-13', { ref: '10 01', results: [{ num: 1000 }] });                               // 10: spaces are kept in the ART number; 1000 is not under 1000
+fac('T8-14', { ref: '1014', results: [{ text: '999.5' }] });                            // 11: a decimal text (v1 stops here; the port reads the number)
+fac('T8-15', { ref: '1015', results: [{ text: '1200.5' }] });                           // 12: the same, over 1000
+fac('T8-16', { ref: '1016', results: [{ text: '<20 COPIES/ML ' }] });                   // 13: the list ignores case and trailing spaces
+fac('T8-17', { ref: '1017', results: [{ cmp: '<', num: 20 }] });                        // 14: result text is "< 20", on the list
+fac('T8-18', { ref: '1018', results: [{ text: 'ND' }] });                               // 15: not on this procedure's list
+fac('T8-19', { ref: '1019', results: [{ obs: 'HIVVC', num: 450 }] });                   // 16: observation HIVVC
+fac('T8-20', { ref: '1020', results: [{ obs: 'hivvc', num: 1800 }] });                  // 17: the observation compares ignoring case
+// Left out by panel, observation, report status or no report.
+fac('T8-21', { results: [{ obs: 'HIVTM', num: 100 }] });
+fac('T8-22', { panel: 'POHVL' });
+fac('T8-23', { ref: '1023', panel: 'hivvl', results: [{ num: 320 }] });                  // 18: the panel compares ignoring case
+fac('T8-24', { status: 'cancelled' });
+fac('T8-25', { status: 'unknown' });
+fac('T8-26', { noReport: true });
+fac('T8-27', { ref: '2727', results: [{ obs: 'HIVVL', num: 540 }, { obs: 'HIVVC', num: 540 }] }); // 19 and 20: one row per result
+fac('T8-28', { req: 'ZUNMP' });                                                          // 21: a facility not in the register: numbered, never shown
+fac('T8-29', { req: 'ZNONE' });                                                          // 22: a code not in the map at all
+fac('T8-30', { req: null });                                                             // 23: no requesting facility
+// Turnaround times. Local dates, not UTC (stamps at +02:00 near midnight).
+fac('T8-31', { ref: '3131', results: [{ num: 700 }], eff: '2026-05-01T23:50:00+02:00', auth: '2026-05-02T00:05:00+02:00',
+  ana: '2026-05-02T00:10:00+02:00', iss: '2026-05-02T00:40:00+02:00' });                 // 24: TAT1 1 (local 05-01 to 05-02; UTC would say 0), TAT3 1800 s
+fac('T8-32', { ref: '3232', results: [{ num: 700 }], eff: '2026-05-01T22:00:00+02:00', auth: '2026-05-01T23:30:00+02:00',
+  ana: '2026-05-02T00:10:00+02:00', iss: '2026-05-02T00:11:40+02:00' });                 // 25: TAT2 1 (UTC would say 0), TAT3 100 s
+fac('T8-33', { ref: '3333', results: [{ num: 600 }], eff: null, iss: null });            // 26: no collection date, no authorised date
+fac('T8-34', { ref: '3434', results: [{ num: 600 }], iss: '2026-05-02T08:00:00Z' });     // 27: authorised before analysis: negative hours
+fac('T8-35', { ref: '3535', results: [{ num: 600 }], auth: null });                      // 28: no registered date
+fac('T8-36', { ref: '3636', results: [{ num: 600 }], iss: '2026-05' });                  // 29: a partial stamp gives NULL, never an error
+// The window is on AnalysisDateTime with dates at 00:00:00: from 00:00:00 up to and including to 00:00:00, local time.
+fac('T8-37', { ref: '3737', results: [{ num: 100 }], auth: '2026-05-01T00:00:00+02:00', ana: '2026-05-01T00:00:00+02:00',
+  iss: '2026-05-01T01:00:00+02:00' });                                                   // 30: exactly 05-01 00:00:00 local (UTC 04-30): in
+fac('T8-38', { ana: '2026-04-30T23:59:59+02:00' });                                       // out: one second before
+fac('T8-39', { ref: '3939', results: [{ num: 200 }], eff: '2026-05-30T07:00:00Z', auth: '2026-05-31T00:00:00+02:00',
+  ana: '2026-05-31T00:00:00+02:00', iss: '2026-05-31T02:00:00+02:00' });                 // 31: exactly 05-31 00:00:00 local: in (BETWEEN is inclusive)
+fac('T8-40', { ana: '2026-05-31T00:00:01+02:00' });                                       // out: one second into the end day
+fac('T8-41', { ana: '2026-06-01T00:30:00+02:00' });                                       // out
+fac('T8-42', { ana: null });                                                              // out: no analysis date
+fac('T8-43', { ref: '4343', results: [{ num: 300 }], auth: '2026-05-30T20:00:00Z', ana: '2026-05-30T23:59:59Z',
+  iss: '2026-05-31T00:59:59Z' });                                                        // 32: 05-30 23:59:59: in the 05-31 window, out of a 05-30 window
+fac('T8-44', { req: 'ZCHO3', ref: 'C44', results: [{ num: 100 }] });                    // 33: a second register entry named "Choma Clinic"
+
+const SETUP8 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t8-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t8-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t8-fm3', '', '', 'ZCHO3', 'reg-d', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t8-fm4', '', '', 'ZUNMP', null, null, null, null);
+insert into patients (id, surname, firstname, sex) values ${P8.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id) values ${R8.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values ${D8.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values ${L8.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${A8.join(',\n  ')};`;
+
+// ---- Expected rows: lookup ----
+
+const LOOKUP_COLUMNS = ['Lab Number', 'FIRSTNAME', 'SURNAME'];
+const lk = (lab, first, last) => ({ 'Lab Number': lab, FIRSTNAME: first, SURNAME: last });
+const lookupQuery = queries().find((q) => q.name === 'Client by ART number');
+const lookupSuite = (name, art, rows, setup = '') =>
+  orderedSuite(name, lookupQuery?.sql ?? 'select 1', { art_number: art }, LOOKUP_COLUMNS, rows, setup);
+
+// ---- Expected rows: facility ----
+
+const FACILITY_COLUMNS = ['Facility Name', 'SerialNumber', 'ARTNo', 'VL Result', 'Suppressed', 'Unsupressed', 'TAT1', 'TAT2', 'TAT3'];
+const CGH = 'Choma General Hospital';
+const fv = (serial, art, result, sup, unsup, tat1, tat2, tat3, name = CGH) =>
+  Object.fromEntries(FACILITY_COLUMNS.map((c, i) => [c, [name, serial, art, result, sup, unsup, tat1, tat2, tat3][i]]));
+// Default times: collected 05-01, registered 05-02 (TAT1 1), analysed 05-02 (TAT2 0), authorised 4 hours later (TAT3 4).
+const FAC_GENERAL = [
+  fv(1, '1001', '540', 1, 0, 1, 0, 4),
+  fv(2, '2002', '1500', 0, 1, 1, 0, 4),
+  fv(3, 'U-3 3', 'target not detected', 1, 0, 1, 0, 4),          // 'Target Not Detected' is on the list; the compare ignores case
+  fv(5, 'E-7', '999', 1, 0, 1, 0, 4),
+  fv(6, '1006', 'Rejected sample', 0, 0, 1, 0, 4),
+  fv(7, '1010', 'BLOQ', 1, 0, 1, 0, 4),
+  fv(8, '4004', '3000', 1, 1, 1, 0, 4),
+  fv(9, 'BL 1', '2000', 0, 1, 1, 0, 4),
+  fv(10, '10 01', '1000', 0, 1, 1, 0, 4),
+  fv(11, '1014', '999.5', 1, 0, 1, 0, 4),                         // intent: v1 stops on a decimal text
+  fv(12, '1015', '1200.5', 0, 1, 1, 0, 4),                        // intent: v1 stops on a decimal text
+  fv(13, '1016', '<20 COPIES/ML ', 1, 0, 1, 0, 4),
+  fv(14, '1017', '< 20', 1, 0, 1, 0, 4),
+  fv(15, '1018', 'ND', 0, 0, 1, 0, 4),
+  fv(16, '1019', '450', 1, 0, 1, 0, 4),
+  fv(17, '1020', '1800', 0, 1, 1, 0, 4),
+  fv(18, '1023', '320', 1, 0, 1, 0, 4),
+  fv(19, '2727', '540', 1, 0, 1, 0, 4),                           // two results of one request: same row twice, serials 19 and 20
+  fv(20, '2727', '540', 1, 0, 1, 0, 4),
+  fv(24, '3131', '700', 1, 0, 1, 0, 0.5),
+  fv(25, '3232', '700', 1, 0, 0, 1, 0.0277777),
+  fv(26, '3333', '600', 1, 0, null, 0, null),
+  fv(27, '3434', '600', 1, 0, 1, 0, -1),
+  fv(28, '3535', '600', 1, 0, null, null, 4),
+  fv(29, '3636', '600', 1, 0, 1, 0, null),
+  fv(30, '3737', '100', 1, 0, 0, 0, 1),
+  fv(31, '3939', '200', 1, 0, 1, 0, 2),
+  fv(32, '4343', '300', 1, 0, 29, 0, 1),
+];
+const FAC_CLINIC = [
+  fv(4, 'AB-1 2', '>10000000 copies/mL', 0, 1, 1, 0, 4, 'Choma Clinic'),
+  fv(33, 'C44', '100', 1, 0, 1, 0, 4, 'Choma Clinic'),
+];
+const factSuite = (name, facility, from, to, rows, setup = '') =>
+  orderedSuite(name, factQuery?.sql ?? 'select 1', { facility, from, to }, FACILITY_COLUMNS, rows, setup);
+const factQuery = queries().find((q) => q.name === "VL results for a facility's clients");
+
+// A suite that reads one column as text, for the scale of TAT3 (decimal(15,7) in SQL Server: 7 places, cut not rounded).
+function tat3TextSuite(name, rows) {
+  return {
+    name,
+    sql: `select ${lit(name)} || chr(9) || json_build_object('serial', q."SerialNumber", 't3', q."TAT3"::text)::text
+      from (${bind(factQuery?.sql ?? 'select 1', { facility: CGH, ...win })}) q;`,
+    count: rows.length + 1,
+    check(got) {
+      const bad = [];
+      if (got.length !== FAC_GENERAL.length) bad.push(`expected ${FAC_GENERAL.length} rows, got ${got.length}`);
+      for (const [serial, want] of rows) {
+        const row = got.find((g) => g.serial === serial);
+        if (!row) bad.push(`serial ${serial}: no row`);
+        else if (row.t3 !== want) bad.push(`serial ${serial}: expected TAT3 ${JSON.stringify(want)}, got ${JSON.stringify(row.t3)}`);
+      }
+      return bad;
+    },
+  };
+}
+
+const suites8 = [
+  // v1 lookup lines 22-29, on the 15 cases above. The first suite carries every t8 fixture row.
+  lookupSuite('art-12345', '12345', [lk('T8-A01', 'Ann', 'Bwalya'), lk('T8-A02', 'Ben', 'Chola'), lk('T8-A09', 'Ian', 'Tembo'), lk('T8-A12', null, null)], SETUP8),
+  lookupSuite('art-ab1234', 'AB1234', [lk('T8-A03', 'Carol', 'Daka'), lk('T8-A04', 'Dan', 'Ejoh')]),
+  lookupSuite('art-case', 'ab1234', [lk('T8-A03', 'Carol', 'Daka'), lk('T8-A04', 'Dan', 'Ejoh')]),
+  lookupSuite('art-elabs-prefix', 'X9', [lk('T8-A05', 'Eve', 'Phiri')]),
+  // No ",ELABS" text extraction here: the text after "T." (3456) is not the ART number; the cleaned text is.
+  lookupSuite('art-elabs-text-extraction-absent', '3456', []),
+  lookupSuite('art-elabs-comma', 'ELABS123456', [lk('T8-A06', 'Fay', 'Zulu')]),
+  lookupSuite('art-elabs-comma-case', 'ART12345ELABS99', [lk('T8-A07', 'Gus', 'Mwale')]),
+  lookupSuite('art-blank-ref', 'Q1', [lk('T8-A08', 'Hana', 'Sata')]),
+  lookupSuite('art-art-prefix', 'Z1', [lk('T8-A10', 'Jo', 'Nkole')]),
+  lookupSuite('art-one-row-per-lab-id', '99001', [lk('T8-A13', 'Lee', 'Mumba')]),
+  // SQL Server compares ignoring trailing spaces: a parameter with one still matches.
+  lookupSuite('art-trailing-space', '777 ', [lk('T8-A14', 'Mia', 'Simba'), lk('T8-A15', 'Ned', 'Sakala')]),
+  // The dash is removed from the derived value, not from the parameter: 'AB-1234' matches nothing.
+  lookupSuite('art-dash-in-parameter', 'AB-1234', []),
+  lookupSuite('art-nothing', 'NOPE', []),
+  {
+    name: 'lookup-shape',
+    count: 4,
+    check() {
+      const bad = [];
+      if (!lookupQuery) return ['query "Client by ART number" is missing'];
+      const ids = lookupQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['art_number'])) bad.push(`params: ${ids}`);
+      if (lookupQuery.params[0].type !== 'text' || !lookupQuery.params[0].required) bad.push('art_number is a required text parameter');
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(lookupQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+  // Facility report. The whole window, one facility: serial numbers have gaps (rows of other facilities, of a
+  // facility not in the register, and of a code in no map are numbered too: facility lines 27 and 83).
+  factSuite('facility-choma-general', CGH, '2026-05-01', '2026-05-31', FAC_GENERAL),
+  factSuite('facility-name-fold', 'choma general hospital  ', '2026-05-01', '2026-05-31', FAC_GENERAL),
+  // Two register entries share the name: v1 joins on the code and compares the name, so both show.
+  factSuite('facility-choma-clinic', 'Choma Clinic', '2026-05-01', '2026-05-31', FAC_CLINIC),
+  factSuite('facility-unknown', 'Nowhere Clinic', '2026-05-01', '2026-05-31', []),
+  // v1 has no all-facilities mode: a blank name matches no facility (none has an empty description).
+  factSuite('facility-blank', '', '2026-05-01', '2026-05-31', []),
+  // The window ends at to 00:00:00 (BETWEEN with dates). 05-30: T8-39 (05-31 00:00:00) and T8-43 are out, and the
+  // rows are renumbered (T8-44 is now 31): the numbering runs over the window, before the facility filter.
+  factSuite('facility-window-0530', 'Choma Clinic', '2026-05-01', '2026-05-30', [
+    fv(4, 'AB-1 2', '>10000000 copies/mL', 0, 1, 1, 0, 4, 'Choma Clinic'),
+    fv(31, 'C44', '100', 1, 0, 1, 0, 4, 'Choma Clinic'),
+  ]),
+  // A one-day window holds only analyses at exactly 00:00:00 of that day (v1 end-date quirk): nothing here.
+  factSuite('facility-window-one-day', CGH, '2026-05-02', '2026-05-02', []),
+  // 05-01 00:00:00 local is in a window that starts that day (UTC is 04-30 22:00).
+  factSuite('facility-window-start-edge', CGH, '2026-05-01', '2026-05-01', [fv(1, '3737', '100', 1, 0, 0, 0, 1)]),
+  tat3TextSuite('facility-tat3-scale', [[1, '4.0000000'], [24, '0.5000000'], [25, '0.0277777'], [26, null], [27, '-1.0000000'], [29, null]]),
+  {
+    name: 'facility-shape',
+    count: 5,
+    check() {
+      const bad = [];
+      if (!factQuery) return ['query "VL results for a facility\'s clients" is missing'];
+      const ids = factQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['facility', 'from', 'to'])) bad.push(`params: ${ids}`);
+      const byId = Object.fromEntries(factQuery.params.map((p) => [p.id, p]));
+      if (byId.facility.type !== 'text') bad.push('facility is a text parameter');
+      if (!byId.facility.required || !byId.from.required || !byId.to.required) bad.push('facility, from and to are required (v1 has no all-facilities mode)');
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(factQuery.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      return bad;
+    },
+  },
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }];

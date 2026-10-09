@@ -112,6 +112,35 @@ export function artNumberSql(ref, uniqueId) {
   end`;
 }
 
+// Two shorter ART number rules. v1 repeats the rule in three procedures and each copy differs. Both read `ref` and
+// `uniqueId` as in artNumberSql (never NULL), and both skip the HOSPID steps: HOSPID is not sent (spec ruling 7), so it
+// is read as blank. A blank HOSPID sends a blank REFNO to UNIQUEID, which is rule 2 of each; if v1 held a HOSPID for
+// such a client, v1 shows the HOSPID where the port shows UNIQUEID.
+
+// v1 sp_GetDetailsFromARTNumber lines 22-28: the rule of artNumberSql without its two ",ELABS" text-extraction steps.
+//   1. REFNO blank after removing commas, "AT.", spaces and dashes: UNIQUEID without spaces and dashes.
+//   2. REFNO, less commas and "AT.", starts "ART." or "ELABS.": UNIQUEID without spaces and dashes.
+//   3. Otherwise REFNO without commas, "AT.", spaces and dashes.
+export function artNumberShortSql(ref, uniqueId) {
+  return `case
+    when ${stripRef(ref)} = '' then ${stripId(uniqueId)}
+    when ${dropCommaAt(ref)} ilike 'ART.%' or ${dropCommaAt(ref)} ilike 'ELABS.%' then ${stripId(uniqueId)}
+    else ${stripRef(ref)}
+  end`;
+}
+
+// v1 sp_getFacilityVLClientDetails lines 28-34: the same, but spaces and dashes are never removed.
+//   1. REFNO, less commas and "AT.", is blank (a text of spaces counts as blank): UNIQUEID as it is.
+//   2. That text starts "ART." or "ELABS.": UNIQUEID as it is.
+//   3. Otherwise that text, spaces and dashes kept.
+export function artNumberRawSql(ref, uniqueId) {
+  return `case
+    when rtrim(${dropCommaAt(ref)}) = '' then ${uniqueId}
+    when ${dropCommaAt(ref)} ilike 'ART.%' or ${dropCommaAt(ref)} ilike 'ELABS.%' then ${uniqueId}
+    else ${dropCommaAt(ref)}
+  end`;
+}
+
 // ---- Small v1 functions ----
 
 // v1 dbo.getGenderFromSexCode. The comparison ignores case and trailing spaces, as SQL Server's does.
@@ -779,7 +808,7 @@ export const dateWeekSql = (dateExpr) => `((extract(doy from ${dateExpr})::int -
 // currency sign is not parsed: v1's CONVERT(float, '$5') fails, so such a text has no number here. The exponent has at
 // most three digits.
 const NUMBER_TEXT = String.raw`^\s*[-+]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?\s*$`;
-const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
+export const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
 
 // A date text as 'YYYY-MM-DD', or NULL. Two forms are read: dd/mm/yyyy (the form cdr measured in LIMSRptResult for the
 // date results, apps/cli/src/compare/v1-coverage.ts) and yyyy-mm-dd, each with optional surrounding spaces. A date that
