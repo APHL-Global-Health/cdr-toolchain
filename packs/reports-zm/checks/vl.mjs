@@ -8,6 +8,7 @@
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, hivvlCte } from '../zm-sql.mjs';
 import { queries } from '../queries/vl.mjs';
+import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite } from './epi-fixture.mjs';
 
 // ---- Fixture builder ----
 
@@ -1614,4 +1615,156 @@ const suites9 = [
   },
 ];
 
-export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }];
+// ============================================================================================
+// Group t10: "VL testing summary by province / by district / by facility" (v1 sp_getSummaryTestEpiData, "P" below,
+// sp_getSummaryTestEpiDataDistrict, "D", sp_getSummaryTestEpiDataFacility, "F"). Fixture ids start with "t10-"; lab ids
+// with "T10-". "P line N" is a line of StoredProcedure__dbo_sp_getSummaryTestEpiData.sql, "D line N" of ...District.sql,
+// "F line N" of ...Facility.sql. Expected rows are worked out by hand from the v1 text. Window: 2026-05-01 to 2026-05-31.
+//
+// The facilities (fixture codes ZT10x):
+//   A  Choma General Hospital, Southern/Choma: every result text and turnaround case
+//   B  Choma Clinic, Southern/Choma: window edges (local time, +02:00 stamps)
+//   H  Choma Clinic, Southern/Choma: same name as B, so the facility level merges them
+//   C  Monze Clinic, Southern/Monze: registered only
+//   N  Nowhere Clinic, Southern, no district
+//   D  Chilenje Clinic, Lusaka/Lusaka;  F  Kabwata Clinic, Lusaka/Lusaka: tests but no registration in the window
+//   G  Other Choma Clinic, Central/Choma: a district with the same name in another province
+//   U  not in the register
+// ============================================================================================
+
+const F10 = epiFixture('t10', {
+  panel: 'HIVVL', obs: 'HIVVL', status: 'final', req: 'ZT10A',
+  auth: '2026-05-02T08:00:00Z', ana: '2026-05-03T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z',
+  noReport: false, results: [{ num: 540 }],
+});
+const q10 = F10.req;
+// Facility A. Default turnaround 9 days (05-01 to 05-10). The comment says what each request does at the province
+// level (P) and at the district and facility levels (D).
+q10('T10-A01', { results: [{ num: 540 }] });                                              // test, suppressed
+q10('T10-A02', { iss: '2026-05-12T10:00:00Z', results: [{ text: 'Target Not Detected' }, { obs: 'HIVVC', num: 1500 }] }); // one test, both flags; two turnaround rows of 11
+q10('T10-A03', { iss: '2026-05-05T10:00:00Z', results: [{ text: 'INVAL' }] });           // registered; no test (invalid text); turnaround 4 counts (the turnaround part has no text filter)
+q10('T10-A04', { status: 'cancelled', eff: null, iss: null, results: [] });              // registered only
+q10('T10-A05', { results: [{ text: 'Positive' }] });                                      // P lists Positive as invalid; D and F do not: a test at D and F only
+q10('T10-A06', { results: [{ num: 10000000, cmp: '>' }] });                               // text "> 10000000": unsuppressed (like '>%')
+q10('T10-A07', { results: [{ text: 'GT10' }] });                                          // a test; unsuppressed only at the district level
+q10('T10-A08', { results: [{ text: '<400 copies/mL' }] });                                // a test; suppressed only at D and F (their lists add <400)
+q10('T10-A09', { results: [{ num: 1500, coded: 'X' }] });                                 // a coded value: suppressed beside 1500, which is also unsuppressed
+q10('T10-A10', { results: [{ text: '999.5' }] });                                         // decimal text: v1 stops; intent is a number under 1000 (deviation)
+q10('T10-A11', { panel: 'RTRI', results: [{ num: 100 }] });                               // other panel: nowhere
+q10('T10-A12', { results: [{ obs: 'HIVTM', num: 50 }] });                                 // registered; observation not in the three: no test, no turnaround
+q10('T10-A13', { status: 'preliminary', results: [{ num: 100 }] });                       // registered; not final
+q10('T10-A14', { eff: null, results: [{ num: 200 }] });                                   // a test; no collection date: no turnaround
+q10('T10-A15', { eff: '2026-01-01T07:00:00Z', results: [{ num: 300 }] });                 // a test; 129 days: over 90, no turnaround
+q10('T10-A16', { eff: '2026-02-09T07:00:00Z', results: [{ num: 400 }] });                 // a test; 90 days exactly: in
+q10('T10-A17', { iss: null, results: [{ num: 410 }] });                                   // a test; no authorised date: no turnaround
+q10('T10-A18', { eff: '2026-05-01T23:30:00+02:00', iss: '2026-05-03T00:30:00+02:00', results: [{ num: 500 }] }); // local dates 05-01 and 05-03: 2 days (UTC would say 1)
+q10('T10-A19', { results: [{ text: 'haemolysed ' }] });                                   // invalid text ignoring case and trailing space; turnaround 9 counts
+// Facility B: the window edges. Registered (authored) edges first, no report.
+const noRep = { noReport: true, ana: null, results: [] };
+q10('T10-B01', { req: 'ZT10B', auth: '2026-05-31T23:30:00+02:00', ...noRep });           // local 05-31 23:30: in at P (ends 06-01 00:00), out at D and F (end 05-31 00:00)
+q10('T10-B02', { req: 'ZT10B', auth: '2026-06-01T00:00:00+02:00', ...noRep });           // exactly 06-01 00:00: in at P (BETWEEN is inclusive), out at D and F
+q10('T10-B03', { req: 'ZT10B', auth: '2026-06-01T00:00:01Z', ...noRep });                // one second later: out everywhere
+q10('T10-B04', { req: 'ZT10B', auth: '2026-05-31T00:00:00+02:00', ...noRep });           // exactly 05-31 00:00 (UTC 05-30 22:00): in everywhere
+q10('T10-B05', { req: 'ZT10B', auth: '2026-05-01T00:30:00+02:00', ...noRep });           // local 05-01 (UTC 04-30): in
+q10('T10-B06', { req: 'ZT10B', auth: '2026-04-30T23:30:00+02:00', ...noRep });           // out
+// Analysed edges (registered 05-02, so each also counts as a registration).
+q10('T10-B07', { req: 'ZT10B', ana: '2026-05-31T23:30:00+02:00', iss: '2026-05-02T10:00:00Z', results: [{ num: 100 }] });  // P only; turnaround 1
+q10('T10-B08', { req: 'ZT10B', ana: '2026-06-01T00:00:00+02:00', iss: '2026-05-04T10:00:00Z', results: [{ num: 2000 }] }); // P only; turnaround 3
+q10('T10-B09', { req: 'ZT10B', ana: '2026-05-31T00:00:00+02:00', iss: '2026-05-06T10:00:00Z', results: [{ num: 150 }] });  // all levels; turnaround 5
+q10('T10-B10', { req: 'ZT10B', ana: '2026-04-30T23:30:00+02:00', results: [{ num: 100 }] });                                // out
+q10('T10-B11', { req: 'ZT10B', ana: '2026-05-01T00:30:00+02:00', iss: '2026-05-01T20:00:00Z', results: [{ num: 3000 }] }); // all levels; turnaround 0
+q10('T10-B12', { req: 'ZT10B', ana: '2026-06-01T00:00:01Z', results: [{ num: 100 }] });                                    // out of May
+q10('T10-H01', { req: 'ZT10H', results: [{ num: 600 }] });
+q10('T10-C01', { req: 'ZT10C', ...noRep });
+q10('T10-N01', { req: 'ZT10N', results: [{ num: 800 }] });
+q10('T10-D01', { req: 'ZT10D', results: [{ num: 700 }] });
+q10('T10-F01', { req: 'ZT10F', auth: '2026-04-20T08:00:00Z', results: [{ num: 100 }] });  // tests, no registration in May: dropped (P final joins)
+q10('T10-G01', { req: 'ZT10G', results: [{ num: 5000 }] });
+q10('T10-U01', { req: 'ZT10U', results: [{ num: 100 }] });                                // not in the register: dropped
+
+const SETUP10 = F10.setup(facilityRows('t10', [
+  ['ZT10A', 'Choma General Hospital', 'Southern', 'Choma'],
+  ['ZT10B', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT10H', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT10C', 'Monze Clinic', 'Southern', 'Monze'],
+  ['ZT10N', 'Nowhere Clinic', 'Southern', null],
+  ['ZT10D', 'Chilenje Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT10F', 'Kabwata Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT10G', 'Other Choma Clinic', 'Central', 'Choma'],
+  ['ZT10U', 'Unmapped Clinic', 'Southern', 'Choma', false],
+]));
+
+const COUNTS10 = ['Registrations', 'Tests', 'suppressed', 'Unsuppressed', 'TATTests', 'TATpre'];
+const P10_COLUMNS = ['Province', ...COUNTS10];
+const D10_COLUMNS = ['District', ...COUNTS10];
+const F10_COLUMNS = ['District', 'Facility Name', ...COUNTS10];
+const row10 = (columns, ...values) => Object.fromEntries(columns.map((c, i) => [c, values[i]]));
+const p10 = (...v) => row10(P10_COLUMNS, ...v);
+const d10 = (...v) => row10(D10_COLUMNS, ...v);
+const f10 = (...v) => row10(F10_COLUMNS, ...v);
+const vlSummary = (name) => queries().find((q) => q.name === name);
+const provQ = vlSummary('VL testing summary by province');
+const distQ = vlSummary('VL testing summary by district');
+const facQ = vlSummary('VL testing summary by facility');
+const MAY10 = { from: '2026-05-01', to: '2026-05-31' };
+
+const suites10 = [
+  // Province (P). Southern: registrations A 18 + B 10 (B01, B02, B04, B05, B07-B12) + H 1 + C 1 + N 1 = 31; tests A 12 + B 4 + H 1 + N 1 = 18;
+  // suppressed A 9 + B 2 + H 1 + N 1 = 13; unsuppressed A 3 + B 2 = 5. Turnaround: A has 13 rows summing 190, average 14.6 cut to 14, 12 requests,
+  // so 168; B rows 1, 3, 5, 0 average 2 (9 / 4 cut), 4 requests, 8; H 9; N 9: TATTests 12 + 4 + 1 + 1 = 18, TATpre 168 + 8 + 9 + 9 = 194.
+  // Lusaka is D alone: F has tests but no registration, so the whole facility is dropped. U is not in the register.
+  orderedSuite10('province-may', provQ?.sql ?? 'select 1', MAY10, P10_COLUMNS, [
+    p10('Central', 1, 1, null, 1, 1, 9),
+    p10('Lusaka', 1, 1, 1, null, 1, 9),
+    p10('Southern', 31, 18, 13, 5, 18, 194),
+  ], SETUP10),
+  // One day: the end moves a day forward (P line 19), so 05-02 runs to 05-03 00:00. Registrations on 05-02 count; nothing was analysed then.
+  orderedSuite10('province-one-day', provQ?.sql ?? 'select 1', { from: '2026-05-02', to: '2026-05-02' }, P10_COLUMNS, [
+    p10('Central', 1, null, null, null, null, null),
+    p10('Lusaka', 1, null, null, null, null, null),
+    p10('Southern', 27, null, null, null, null, null),
+  ]),
+  orderedSuite10('province-empty-window', provQ?.sql ?? 'select 1', { from: '2025-01-01', to: '2025-01-31' }, P10_COLUMNS, []),
+  // District (D), Southern. Choma = A + B + H: registrations 18 + 8 + 1 = 27 (B01 and B02 are out: the end is 05-31 00:00); tests 13 + 2 + 1 = 16;
+  // suppressed 10 + 1 + 1 = 12; unsuppressed 4 (GT10 counts) + 1 + 0 = 5; turnaround A 168 over 12 requests, B rows 5 and 0 average 2 (4), H 9:
+  // TATTests 12 + 2 + 1 = 15, TATpre 168 + 4 + 9 = 181.
+  // Monze is registered only: the other sums are NULL. N has no district: a row with a NULL district, which sorts first. Central/Choma (G) is
+  // another province.
+  orderedSuite10('district-southern', distQ?.sql ?? 'select 1', { province: 'Southern', ...MAY10 }, D10_COLUMNS, [
+    d10(null, 1, 1, 1, null, 1, 9),
+    d10('Choma', 27, 16, 12, 5, 15, 181),
+    d10('Monze', 1, null, null, null, null, null),
+  ]),
+  orderedSuite10('district-name-fold', distQ?.sql ?? 'select 1', { province: 'southern  ', ...MAY10 }, D10_COLUMNS, [
+    d10(null, 1, 1, 1, null, 1, 9),
+    d10('Choma', 27, 16, 12, 5, 15, 181),
+    d10('Monze', 1, null, null, null, null, null),
+  ]),
+  orderedSuite10('district-central', distQ?.sql ?? 'select 1', { province: 'Central', ...MAY10 }, D10_COLUMNS, [d10('Choma', 1, 1, null, 1, 1, 9)]),
+  orderedSuite10('district-lusaka', distQ?.sql ?? 'select 1', { province: 'Lusaka', ...MAY10 }, D10_COLUMNS, [d10('Lusaka', 1, 1, 1, null, 1, 9)]),
+  orderedSuite10('district-unknown', distQ?.sql ?? 'select 1', { province: 'Nowhere', ...MAY10 }, D10_COLUMNS, []),
+  // The end is 05-31 00:00 (D has no extra day): B04 (authored exactly then) and B09 (analysed exactly then) are in; B01 (05-31 23:30) is out.
+  orderedSuite10('district-one-day-end', distQ?.sql ?? 'select 1', { province: 'Southern', from: '2026-05-31', to: '2026-05-31' }, D10_COLUMNS, [d10('Choma', 1, 1, 1, null, 1, 5)]),
+  // June: B02 and B03 are registered, B08 (exactly 06-01 00:00) and B12 (one second later) are analysed in the window.
+  orderedSuite10('district-june', distQ?.sql ?? 'select 1', { province: 'Southern', from: '2026-06-01', to: '2026-06-30' }, D10_COLUMNS, [d10('Choma', 2, 2, 1, 1, 2, 12)]),
+  // Facility (F), district Choma: any province (G is Central/Choma). Choma Clinic merges B and H (same description); the district is not a key of the
+  // facility alone, so Other Choma Clinic of Central shows too.
+  orderedSuite10('facility-choma', facQ?.sql ?? 'select 1', { district: 'Choma', ...MAY10 }, F10_COLUMNS, [
+    f10('Choma', 'Choma Clinic', 9, 3, 2, 1, 3, 13),
+    f10('Choma', 'Choma General Hospital', 18, 13, 10, 3, 12, 168),
+    f10('Choma', 'Other Choma Clinic', 1, 1, null, 1, 1, 9),
+  ]),
+  orderedSuite10('facility-name-fold', facQ?.sql ?? 'select 1', { district: 'CHOMA ', ...MAY10 }, F10_COLUMNS, [
+    f10('Choma', 'Choma Clinic', 9, 3, 2, 1, 3, 13),
+    f10('Choma', 'Choma General Hospital', 18, 13, 10, 3, 12, 168),
+    f10('Choma', 'Other Choma Clinic', 1, 1, null, 1, 1, 9),
+  ]),
+  orderedSuite10('facility-monze', facQ?.sql ?? 'select 1', { district: 'Monze', ...MAY10 }, F10_COLUMNS, [f10('Monze', 'Monze Clinic', 1, null, null, null, null, null)]),
+  orderedSuite10('facility-lusaka', facQ?.sql ?? 'select 1', { district: 'Lusaka', ...MAY10 }, F10_COLUMNS, [f10('Lusaka', 'Chilenje Clinic', 1, 1, 1, null, 1, 9)]),
+  orderedSuite10('facility-unknown', facQ?.sql ?? 'select 1', { district: 'Nowhere', ...MAY10 }, F10_COLUMNS, []),
+  shapeSuite('province-shape', provQ, ['from', 'to'], ['text', 'text']),
+  shapeSuite('district-shape', distQ, ['province', 'from', 'to'], ['select', 'text', 'text']),
+  shapeSuite('facility-shape', facQ, ['district', 'from', 'to'], ['select', 'text', 'text']),
+];
+
+export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 }];

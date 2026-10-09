@@ -3,7 +3,7 @@
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte,
-  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey,
+  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
 } from '../zm-sql.mjs';
 
 // Area parameters in SQL. An optional parameter arrives as '' when blank. `same` matches a column on a
@@ -738,6 +738,109 @@ export const historyParams = () => [
   pregnantOnlyParam(),
 ];
 
+// ---- VL testing summary by province, by district, by facility ---------------------------------------------------------
+//
+// Replaces sp_getSummaryTestEpiData (province, "P"), sp_getSummaryTestEpiDataDistrict ("D") and sp_getSummaryTestEpiDataFacility
+// ("F"). The inventory called D and F merges of P. They are three queries here (controller ruling): the three procedures
+// return different column names (Province / District / District and Facility Name) and keep different rules, so one column list
+// could not match v1 at every level. One builder (epiSummarySql in zm-sql.mjs) holds the code they have in common.
+//
+// Columns (v1 names and order). P: Province, Registrations, Tests, suppressed, Unsuppressed, TATTests, TATpre. D: District, then the
+// same six. F: District, Facility Name, then the same six. TATpre = average days x TATTests; the caller divides TATpre by TATTests.
+// Parameters as v1: P from, to; D province, from, to; F district, from, to. Province and district are required selects (v1 has no
+// "all" mode: a blank name matches nothing); from and to are required (spec ruling 3).
+//
+// Rows. One per area name (P: province; D: district of the province, a NULL district is one row; F: district and facility name, so
+// two register entries with one name merge), ordered as v1 orders them (SQL Server text order, NULL first).
+//
+// Counts, per requesting facility, then summed by area name:
+//   Registrations   distinct lab numbers of panel HIVVL registered (RegisteredDateTime = lab_requests.authored_at) in the window,
+//                   any status.
+//   Tests           distinct lab numbers of panel HIVVL with a result of observation HIVVL, HIVVC or HIVVD, a final report
+//                   (HL7ResultStatusCode F), analysed (lab_requests.analysis_at) in the window, whose result text is not on
+//                   the invalid list. A NULL text is out (NOT IN drops NULL).
+//   suppressed      Tests whose text is on the suppressed list, or whose number is under 1000, or that has a coded value.
+//   Unsuppressed    Tests whose number is 1000 or more, or whose text starts with '>' (D adds the text GT10).
+//   TATTests/TATpre lab numbers with a collection date (diagnostic_reports.effective) and at most 90 days (local dates, datediff dd)
+//                   from it to the authorised date (diagnostic_reports.issued); the average is a whole number, cut toward zero.
+//
+// The three procedures use different rules; each level keeps its own (spec ruling 1):
+//   - End date. P adds one day to the end date (P line 19) and D and F do not. v1 compares datetimes with dates, so the window runs
+//     from `from` 00:00:00 to `to` + 1 day 00:00:00 inclusive at P, and to `to` 00:00:00 inclusive at D and F: at D and F a one-day
+//     window holds only what happened at exactly midnight, and the end day is otherwise out. Local wall time of the stamp's own text.
+//     The window applies to RegisteredDateTime and to AnalysisDateTime alike.
+//   - Invalid texts. P: 16 (the 13 of D and F, plus Positive, Negative, No). D and F: 13.
+//   - Suppressed texts. P: 10 ('<20 copies/mL', TAR, 'Target Not Detected', TARG, '< 20', 'RNA not detected', '<30 copies/ml',
+//     '<30 copies/mL', NDET, ND). D and F add '<400 copies/mL', '<400', '<40 copies/mL'.
+//   - GT10 is unsuppressed at D only (D line 101). At P and F it is a test that is neither suppressed nor unsuppressed.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - All five parts are joined on registrations.RequestingFacilityCode (P lines 107-112, D 126-131, F 126-131). A facility with tests
+//     but no registration in the window has no row at all: every count of that facility is dropped, tests included. Registered
+//     facilities with no tests keep NULL in the other columns (a sum over nothing).
+//   - A facility not in the register (no mapped ZMFAC row) has no area, so it drops out (v1 inner-joins the area names).
+//   - The turnaround part has no result filter: a request whose only result is on the invalid list still counts in TATTests, and it
+//     is an average over result rows (a request with HIVVL and HIVVC rows weighs twice), while TATTests counts requests. The average is
+//     cut per facility before the weighting, so TATpre is a sum of (cut average x requests).
+//   - D gives a NULL district its own row (a registered facility whose district is not in the register); F needs the district.
+//   - F filters on the district NAME only. Two provinces with a district of one name mix (v1's flaw, noted in the inventory).
+//   - F's alias `a` is the district area where D's is the province area (inventory note). Here: D filters mapped region = province,
+//     F filters mapped district = district.
+//   - A province over 15 characters or a district over 20 would be cut by v1's varchar parameters and match nothing. The port matches
+//     the full name (evident intent). Names compare ignoring case and trailing spaces, as SQL Server does.
+//   - Facilities are keyed by the register row, where v1 keys by the facility code. Two codes mapped to one register row would merge here.
+//
+// Deviations (spec ruling 2):
+//   - v1 casts the result text to bigint to test it against 1000 (all three procedures). A decimal text ('999.5'), a text with a thousands
+//     comma or an exponent makes the cast fail and v1 stops with a conversion error. The port reads the number (numberOfTextSql), as the
+//     facility report and the recency procedures do. Those expectations are intent, not v1 output.
+//
+// CE gaps (spec ruling 7): none. The area names are the register row's (mapped ZMFAC), so a name can differ from v1's Facilities and
+// HealthcareAreas descriptions (README). v1 joins results on RequestID and OBRSetID; CE keeps one result list per request.
+const VL_INVALID_P = [...INVALID_VL_TEXTS, 'Positive', 'Negative', 'No'];
+const VL_SUPPRESSED_P = [...SUPPRESSED_VL_TEXTS, 'ND'];
+const VL_SUPPRESSED_DF = [...VL_SUPPRESSED_P, '<400 copies/mL', '<400', '<40 copies/mL'];
+
+export function vlTestingSummarySql(level) {
+  const result = rpt('l');
+  const number = numberOfTextSql(result);
+  const province = level === 'province';
+  const lead = {
+    province: [['Province', 'fmr.region']],
+    district: [['District', 'fmr.district']],
+    facility: [['District', 'fmr.district'], ['Facility Name', 'fmr.name']],
+  }[level];
+  const area = {
+    province: 'fmr.region is not null',
+    district: `${foldSql('fmr.region')} = ${foldSql('{{param.province}}')}`,
+    facility: `${foldSql('fmr.district')} = ${foldSql('{{param.district}}')}`,
+  }[level];
+  const unsuppressed = [`${number} >= 1000`, `${result} like '>%'`];
+  if (level === 'district') unsuppressed.push(`${foldSql(result)} = 'gt10'`);
+  return epiSummarySql({
+    panel: 'HIVVL',
+    observations: ['HIVVL', 'HIVVC', 'HIVVD'],
+    anchor: 'reg',
+    endExtraDays: province ? 1 : 0,
+    lead,
+    area,
+    resultWhere: `not ${inListSql(result, province ? VL_INVALID_P : INVALID_VL_TEXTS)}`,
+    splits: [
+      { column: 'suppressed', cond: `(${inListSql(result, province ? VL_SUPPRESSED_P : VL_SUPPRESSED_DF)} or ${number} < 1000 or length(rtrim(l.coded_value)) > 0)` },
+      { column: 'Unsuppressed', cond: `(${unsuppressed.join(' or ')})` },
+    ],
+  });
+}
+
+// Required select parameters, as v1 has no "all" mode.
+const requiredProvince = () => ({ ...provinceParam('province', true), label: 'Province' });
+const requiredDistrict = () => ({ ...districtParam('district', true), label: 'District' });
+export const vlTestingSummaryParams = (level) => ({
+  province: () => [...dateParams(true)],
+  district: () => [requiredProvince(), ...dateParams(true)],
+  facility: () => [requiredDistrict(), ...dateParams(true)],
+})[level]();
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
@@ -747,5 +850,8 @@ export function queries() {
     { name: "VL results for a facility's clients", sql: facilityClientsSql(), params: facilityClientsParams() },
     { name: 'Earlier VL results of high-VL clients', sql: cohortSql(), params: cohortParams() },
     { name: 'VL results history by client', sql: historySql(), params: historyParams() },
+    { name: 'VL testing summary by province', sql: vlTestingSummarySql('province'), params: vlTestingSummaryParams('province') },
+    { name: 'VL testing summary by district', sql: vlTestingSummarySql('district'), params: vlTestingSummaryParams('district') },
+    { name: 'VL testing summary by facility', sql: vlTestingSummarySql('facility'), params: vlTestingSummaryParams('facility') },
   ];
 }

@@ -7,6 +7,8 @@
 
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, eidCte } from '../zm-sql.mjs';
+import { queries } from '../queries/eid.mjs';
+import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite } from './epi-fixture.mjs';
 
 // ---- Fixture builder ----
 
@@ -325,4 +327,150 @@ const suites = [
   },
 ];
 
-export const groups = [{ name: 't3', suites }];
+// ============================================================================================
+// Group t10-eid: "EID testing summary by province / by district / by facility" (v1 sp_getSummaryTestEpiDataEID, "P" below,
+// sp_getSummaryTestEpiDataEIDDistrict, "D", sp_getSummaryTestEpiDataEIDFacility, "F"). Fixture ids start with "t10e-"; lab ids
+// with "T10E-". "P line N" is a line of StoredProcedure__dbo_sp_getSummaryTestEpiDataEID.sql, "D line N" of ...EIDDistrict.sql,
+// "F line N" of ...EIDFacility.sql. Expected rows are worked out by hand from the v1 text. Window: 2026-05-01 to 2026-05-31.
+// The three procedures share every rule; they differ in the group column and the area filters. All end the window at `to` 00:00:00
+// (no extra day). The joins hang off the TESTS part (P lines 106-113), the opposite of the VL procedures.
+//
+// The facilities (fixture codes ZT10x):
+//   A  Choma General Hospital, Southern/Choma: every result text and turnaround case
+//   B  Choma Clinic, Southern/Choma: window edges (local time, +02:00 stamps)
+//   H  Choma Clinic, Southern/Choma: same name as B, so the facility level merges them
+//   C  Monze Clinic, Southern/Monze: registered only (no tests: dropped, unlike the VL procedures)
+//   N  Nowhere Clinic, Southern, no district
+//   D  Chilenje Clinic, Lusaka/Lusaka;  F  Kabwata Clinic, Lusaka/Lusaka: tests but no registration in the window (kept)
+//   G  Other Choma Clinic, Central/Choma: a district with the same name in another province
+//   U  not in the register
+// ============================================================================================
+
+const F10E = epiFixture('t10e', {
+  panel: 'HIVPC', obs: 'HIVPC', status: 'final', req: 'ZT10A',
+  auth: '2026-05-02T08:00:00Z', ana: '2026-05-03T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z',
+  noReport: false, results: [{ text: 'Negative' }],
+});
+const q10e = F10E.req;
+// Facility A. Default turnaround 9 days (05-01 to 05-10).
+q10e('T10E-A01', { results: [{ text: 'Not Detected DBS' }] });                                 // test, negative
+q10e('T10E-A02', { iss: '2026-05-12T10:00:00Z', results: [{ text: 'Negative' }] });          // negative; turnaround 11
+q10e('T10E-A03', { results: [{ text: 'LDL' }] });                                             // negative
+q10e('T10E-A04', { results: [{ text: 'Detected DBS' }] });                                    // positive
+q10e('T10E-A05', { results: [{ text: 'Positive*' }] });                                       // positive
+q10e('T10E-A06', { results: [{ text: 'POS' }] });                                             // positive
+q10e('T10E-A07', { results: [{ text: 'Indeterminate' }] });                                   // a test (P has no text filter), neither split
+q10e('T10E-A08', { results: [{ text: 'Invalid' }] });                                         // a test, neither split
+q10e('T10E-A09', { status: 'cancelled', eff: null, iss: null, results: [] });               // registered only
+q10e('T10E-A10', { results: [{ obs: 'HIVPR', text: 'Negative' }] });                         // registered; observation is not HIVPC: no test
+q10e('T10E-A11', { panel: 'HIVVL', results: [{ text: 'Negative' }] });                       // other panel: nowhere
+q10e('T10E-A12', { status: 'preliminary', results: [{ text: 'Negative' }] });                // registered; not final
+q10e('T10E-A13', { eff: null, results: [{ text: 'Negative' }] });                             // a test, negative; no collection date: no turnaround
+q10e('T10E-A14', { eff: '2026-01-01T07:00:00Z', results: [{ text: 'Positive' }] });          // a test, positive; 129 days: no turnaround
+q10e('T10E-A15', { eff: '2026-02-09T07:00:00Z', results: [{ text: 'Negative' }] });          // negative; 90 days exactly: turnaround in
+q10e('T10E-A16', { eff: '2026-05-01T23:30:00+02:00', iss: '2026-05-03T00:30:00+02:00', results: [{ text: 'Not Detected DBS' }] }); // local dates 05-01 and 05-03: 2 days (UTC would say 1)
+q10e('T10E-A17', { results: [{ text: 'negative' }] });                                       // the list ignores case
+q10e('T10E-A18', { results: [{ text: 'pos ' }] });                                            // and trailing spaces: positive
+q10e('T10E-A19', { iss: '2026-05-08T10:00:00Z', results: [{ text: 'Negative' }, { text: 'Positive' }] }); // one test, in both splits; two turnaround rows of 7
+// Facility B: the window edges. Registered (authored) edges first, no report.
+const noRepE = { noReport: true, ana: null, results: [] };
+q10e('T10E-B01', { req: 'ZT10B', auth: '2026-05-31T23:30:00+02:00', ...noRepE });          // local 05-31 23:30: out (the end is 05-31 00:00)
+q10e('T10E-B02', { req: 'ZT10B', auth: '2026-06-01T00:00:00+02:00', ...noRepE });          // out
+q10e('T10E-B03', { req: 'ZT10B', auth: '2026-06-01T00:00:01Z', ...noRepE });               // out
+q10e('T10E-B04', { req: 'ZT10B', auth: '2026-05-31T00:00:00+02:00', ...noRepE });          // exactly 05-31 00:00 (UTC 05-30 22:00): in
+q10e('T10E-B05', { req: 'ZT10B', auth: '2026-05-01T00:30:00+02:00', ...noRepE });          // local 05-01 (UTC 04-30): in
+q10e('T10E-B06', { req: 'ZT10B', auth: '2026-04-30T23:30:00+02:00', ...noRepE });          // out
+// Analysed edges (registered 05-02, so each also counts as a registration).
+q10e('T10E-B07', { req: 'ZT10B', ana: '2026-05-31T23:30:00+02:00', iss: '2026-05-02T10:00:00Z', results: [{ text: 'Positive' }] }); // out
+q10e('T10E-B08', { req: 'ZT10B', ana: '2026-06-01T00:00:00+02:00', iss: '2026-05-04T10:00:00Z', results: [{ text: 'Negative' }] }); // out of May; in June
+q10e('T10E-B09', { req: 'ZT10B', ana: '2026-05-31T00:00:00+02:00', iss: '2026-05-06T10:00:00Z', results: [{ text: 'Negative' }] }); // in; turnaround 5
+q10e('T10E-B10', { req: 'ZT10B', ana: '2026-04-30T23:30:00+02:00', results: [{ text: 'Positive' }] });                           // out
+q10e('T10E-B11', { req: 'ZT10B', ana: '2026-05-01T00:30:00+02:00', iss: '2026-05-01T20:00:00Z', results: [{ text: 'Positive' }] }); // in; turnaround 0
+q10e('T10E-B12', { req: 'ZT10B', ana: '2026-06-01T00:00:01Z', results: [{ text: 'Negative' }] });                                // out of May; in June
+q10e('T10E-H01', { req: 'ZT10H', results: [{ text: 'Negative' }] });
+q10e('T10E-C01', { req: 'ZT10C', ...noRepE });                                              // registered, no tests: dropped (the joins hang off tests)
+q10e('T10E-N01', { req: 'ZT10N', results: [{ text: 'Negative' }] });
+q10e('T10E-D01', { req: 'ZT10D', results: [{ text: 'Negative' }] });
+q10e('T10E-F01', { req: 'ZT10F', auth: '2026-04-20T08:00:00Z', results: [{ text: 'Positive' }] }); // tests, no registration in May: kept, Registrations NULL
+q10e('T10E-G01', { req: 'ZT10G', results: [{ text: 'Positive' }] });
+q10e('T10E-U01', { req: 'ZT10U', results: [{ text: 'Negative' }] });                       // not in the register: dropped
+
+const SETUP10E = F10E.setup(facilityRows('t10e', [
+  ['ZT10A', 'Choma General Hospital', 'Southern', 'Choma'],
+  ['ZT10B', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT10H', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT10C', 'Monze Clinic', 'Southern', 'Monze'],
+  ['ZT10N', 'Nowhere Clinic', 'Southern', null],
+  ['ZT10D', 'Chilenje Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT10F', 'Kabwata Clinic', 'Lusaka', 'Lusaka'],
+  ['ZT10G', 'Other Choma Clinic', 'Central', 'Choma'],
+  ['ZT10U', 'Unmapped Clinic', 'Southern', 'Choma', false],
+]));
+
+const COUNTS10E = ['Registrations', 'Tests', 'Negative', 'Positive', 'TATTests', 'TATpre'];
+const rowE = (first) => {
+  const columns = [first, ...COUNTS10E];
+  return (...values) => Object.fromEntries(columns.map((c, i) => [c, values[i]]));
+};
+const pE = rowE('Province');
+const dE = rowE('District');
+const fE = rowE('Facility');
+const eidSummary = (name) => queries().find((q) => q.name === name);
+const provE = eidSummary('EID testing summary by province');
+const distE = eidSummary('EID testing summary by district');
+const facE = eidSummary('EID testing summary by facility');
+const MAY_E = { from: '2026-05-01', to: '2026-05-31' };
+const colsE = (first) => [first, ...COUNTS10E];
+
+const suites10e = [
+  // Province (P). Southern = A + B + H + N: registrations 18 + 8 (B04, B05, B07-B12) + 1 + 1 = 28; tests 15 + 2 + 1 + 1 = 19; negative 8 + 1 + 1 + 1 = 11;
+  // positive 6 + 1 = 7. Turnaround: A has 14 rows summing 198, average 14.1 cut to 14, 13 requests, 182; B rows 5 and 0 average 2 (2.5 cut), 2 requests, 4;
+  // H 9; N 9: TATTests 13 + 2 + 1 + 1 = 17, TATpre 182 + 4 + 9 + 9 = 204.
+  // Lusaka = D + F: F has tests but no registration, and stays (the joins hang off tests): registrations 1, tests 2.
+  // C (Monze) is registered only, so it has no row at all. U is not in the register.
+  orderedSuite10('province-may', provE?.sql ?? 'select 1', MAY_E, colsE('Province'), [
+    pE('Central', 1, 1, null, 1, 1, 9),
+    pE('Lusaka', 1, 2, 1, 1, 2, 18),
+    pE('Southern', 28, 19, 11, 7, 17, 204),
+  ], SETUP10E),
+  // One day: no extra day (the window is 05-31 00:00 to 05-31 00:00): B04 registered and B09 analysed at exactly that time.
+  orderedSuite10('province-one-day-end', provE?.sql ?? 'select 1', { from: '2026-05-31', to: '2026-05-31' }, colsE('Province'), [pE('Southern', 1, 1, 1, null, 1, 5)]),
+  orderedSuite10('province-june', provE?.sql ?? 'select 1', { from: '2026-06-01', to: '2026-06-30' }, colsE('Province'), [pE('Southern', 2, 2, 2, null, 2, 12)]),
+  orderedSuite10('province-empty-window', provE?.sql ?? 'select 1', { from: '2025-01-01', to: '2025-01-31' }, colsE('Province'), []),
+  // District (D), Southern. Choma = A + B + H: registrations 27, tests 18, negative 10, positive 7, turnaround 182 + 4 + 9 = 195 over 16. Monze has no tests: no row.
+  // N has no district: a NULL district row, first.
+  orderedSuite10('district-southern', distE?.sql ?? 'select 1', { province: 'Southern', ...MAY_E }, colsE('District'), [
+    dE(null, 1, 1, 1, null, 1, 9),
+    dE('Choma', 27, 18, 10, 7, 16, 195),
+  ]),
+  orderedSuite10('district-name-fold', distE?.sql ?? 'select 1', { province: 'southern  ', ...MAY_E }, colsE('District'), [
+    dE(null, 1, 1, 1, null, 1, 9),
+    dE('Choma', 27, 18, 10, 7, 16, 195),
+  ]),
+  orderedSuite10('district-central', distE?.sql ?? 'select 1', { province: 'Central', ...MAY_E }, colsE('District'), [dE('Choma', 1, 1, null, 1, 1, 9)]),
+  orderedSuite10('district-lusaka', distE?.sql ?? 'select 1', { province: 'Lusaka', ...MAY_E }, colsE('District'), [dE('Lusaka', 1, 2, 1, 1, 2, 18)]),
+  orderedSuite10('district-unknown', distE?.sql ?? 'select 1', { province: 'Nowhere', ...MAY_E }, colsE('District'), []),
+  orderedSuite10('district-june', distE?.sql ?? 'select 1', { province: 'Southern', from: '2026-06-01', to: '2026-06-30' }, colsE('District'), [dE('Choma', 2, 2, 2, null, 2, 12)]),
+  // Facility (F): province and district both. Choma Clinic merges B and H.
+  orderedSuite10('facility-southern-choma', facE?.sql ?? 'select 1', { province: 'Southern', district: 'Choma', ...MAY_E }, colsE('Facility'), [
+    fE('Choma Clinic', 9, 3, 2, 1, 3, 13),
+    fE('Choma General Hospital', 18, 15, 8, 6, 13, 182),
+  ]),
+  orderedSuite10('facility-name-fold', facE?.sql ?? 'select 1', { province: 'SOUTHERN ', district: 'choma ', ...MAY_E }, colsE('Facility'), [
+    fE('Choma Clinic', 9, 3, 2, 1, 3, 13),
+    fE('Choma General Hospital', 18, 15, 8, 6, 13, 182),
+  ]),
+  // The same district name in another province does not mix here (F filters on both).
+  orderedSuite10('facility-central-choma', facE?.sql ?? 'select 1', { province: 'Central', district: 'Choma', ...MAY_E }, colsE('Facility'), [fE('Other Choma Clinic', 1, 1, null, 1, 1, 9)]),
+  orderedSuite10('facility-lusaka', facE?.sql ?? 'select 1', { province: 'Lusaka', district: 'Lusaka', ...MAY_E }, colsE('Facility'), [
+    fE('Chilenje Clinic', 1, 1, 1, null, 1, 9),
+    fE('Kabwata Clinic', null, 1, null, 1, 1, 9),
+  ]),
+  orderedSuite10('facility-wrong-province', facE?.sql ?? 'select 1', { province: 'Southern', district: 'Lusaka', ...MAY_E }, colsE('Facility'), []),
+  orderedSuite10('facility-registered-only-district', facE?.sql ?? 'select 1', { province: 'Southern', district: 'Monze', ...MAY_E }, colsE('Facility'), []),
+  shapeSuite('province-shape', provE, ['from', 'to'], ['text', 'text']),
+  shapeSuite('district-shape', distE, ['from', 'to', 'province'], ['text', 'text', 'select']),
+  shapeSuite('facility-shape', facE, ['from', 'to', 'province', 'district'], ['text', 'text', 'select', 'select']),
+];
+
+export const groups = [{ name: 't3', suites }, { name: 't10-eid', suites: suites10e }];

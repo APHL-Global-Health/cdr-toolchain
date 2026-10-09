@@ -1645,3 +1645,69 @@ export function vleidRequestsCte(name, { from, to, on = 'registered' } = {}) {
       ${viral}
 )`;
 }
+
+// ---- The testing summaries by area (sp_getSummaryTestEpiData*, sp_getSummaryTestEpiDataEID*) ----
+
+// One query of the epi summaries: v1's five CTEs (registrations, tests, two result splits, turnaround) per requesting
+// facility, joined on the facility code and summed by area name. All six v1 procedures have this shape and differ in the
+// lists, the end date, the area they group by and which CTE the joins hang off, so those are the options.
+//   panel, observations   the panel and the observation codes of the results (compared ignoring case)
+//   anchor                'reg' or 'tests': the CTE every other CTE is joined to. A facility with no row in the anchor is
+//                         dropped with all its other counts (v1 keys its joins on registrations.RequestingFacilityCode in the
+//                         VL procedures and on tests.RequestingFacilityCode in the EID ones; the full outer joins keep the
+//                         other rows, but they have no area and the where clause drops them)
+//   endExtraDays          days added to `to` (the VL province procedure moves @EndDate a day forward). v1 compares datetimes
+//                         with dates: the window runs from `from` 00:00:00 to `to` 00:00:00 inclusive, local wall time
+//   lead                  [[output name, expression on fmr]] the group columns, e.g. [['District', 'fmr.district']]; fmr is
+//                         the mapped ZMFAC row of the requesting facility (unmapped facilities drop out)
+//   area                  the filter on fmr that decides which facilities count (province or district parameter)
+//   resultWhere           an extra condition on the result text `rpt('l')` for the tests and the splits (VL's invalid list)
+//   splits                [{ column, cond }]: result counts beside Tests, each over the same rows as Tests plus cond
+// Counts are of distinct requests, as v1's count(distinct requestid). The turnaround is the whole-day average, cut toward zero as
+// SQL Server's int AVG cuts it, over the result rows (not the requests) with a collection date and at most 90 days to the
+// authorised date; TATTests counts those requests and TATpre = average x TATTests, summed over facilities. A sum over nothing is NULL.
+// Rows come ordered by the group columns as SQL Server orders text (NULL first).
+export function epiSummarySql({ panel, observations, anchor, endExtraDays = 0, lead, area, resultWhere = 'true', splits }) {
+  const lo = '({{param.from}})::date::timestamp';
+  const hi = endExtraDays === 0 ? '({{param.to}})::date::timestamp' : `(({{param.to}})::date + ${endExtraDays})::timestamp`;
+  const within = (expr) => `${localTs(expr)} >= ${lo} and ${localTs(expr)} <= ${hi}`;
+  const days = `${localDate('dr.issued')} - ${localDate('dr.effective')}`;
+  const finalResults = (name, extraSelect, extraWhere) => `${name} as (
+  select fmr.id as fid, count(distinct lr.request_id) as n${extraSelect}
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  ${requesterJoin('lr', 'fmr')}
+  where ${inListSql('lr.panel_code', [panel])}
+    and ${inListSql('l.observation_code', observations)}
+    and dr.status = 'final'
+    and ${within('lr.analysis_at')}
+    and ${area}${extraWhere}
+  group by fmr.id
+)`;
+  const splitNames = splits.map((_, i) => `split_${i + 1}`);
+  const ctes = [
+    `reg as (
+  select fmr.id as fid, count(distinct lr.request_id) as n
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  where ${inListSql('lr.panel_code', [panel])}
+    and ${within('lr.authored_at')}
+    and ${area}
+  group by fmr.id
+)`,
+    finalResults('tests', '', `\n    and ${resultWhere}`),
+    ...splits.map((s, i) => finalResults(splitNames[i], '', `\n    and ${resultWhere}\n    and ${s.cond}`)),
+    finalResults('tat', `, trunc(avg(${days}))::int as avg_days`, `\n    and dr.effective is not null\n    and ${days} <= 90`),
+  ];
+  const others = ['reg', 'tests', ...splitNames, 'tat'].filter((c) => c !== anchor);
+  const exprs = lead.map(([, expr]) => expr);
+  return `with ${ctes.join(',\n')}
+select ${lead.map(([name, expr]) => `${expr} as "${name}"`).join(', ')}, sum(reg.n)::bigint as "Registrations", sum(tests.n)::bigint as "Tests",
+  ${splits.map((s, i) => `sum(${splitNames[i]}.n)::bigint as "${s.column}"`).join(', ')}, sum(tat.n)::bigint as "TATTests", sum(tat.avg_days * tat.n)::bigint as "TATpre"
+from ${anchor}
+join facility_map fmr on fmr.id = ${anchor}.fid
+${others.map((c) => `left join ${c} on ${c}.fid = ${anchor}.fid`).join('\n')}
+group by ${exprs.join(', ')}
+order by ${exprs.map((e) => `${ssTextKey(e)} collate "C" nulls first, ${e} collate "C" nulls first`).join(', ')}`;
+}
