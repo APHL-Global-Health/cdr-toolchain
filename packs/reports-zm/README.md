@@ -194,4 +194,6 @@ What this pack has not shown:
   shape, not by observation. Tanzania's v1 has no `Patients` table to compare.
 - **Facility names.** The master facility list names were never compared with Zambia's dictionary.
 - **Zambia's DISA*Lab layout.** It is unmeasured (`config/zambia.yaml`). Until `cdr probe-review`
-  runs, `result_status` and `authorised_at` stay null, and parts 1 and 3 return almost nothing.
+  runs, `result_status` and `authorised_at` stay null. cdr-toolchain then sends report status
+  `unknown`. Every part needs a status: `final` for parts 1 and 3, `cancelled` for part 2. So the
+  whole report is empty until Zambia's DISA*Lab is measured.
