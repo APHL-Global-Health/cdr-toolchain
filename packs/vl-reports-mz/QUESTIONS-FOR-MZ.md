@@ -32,9 +32,24 @@ more than once with different descriptions:
 - `NEG`: "Negative" three times, "NOT DETECTED" once
 - `POS`: "Positive" once, "POS" twice
 - `INVAL`: "Invalid" once, "INVAL" once
+- `NDET`: "NOT DETECTED" twice, "Not Detected" once
 
 The function picks one with no ordering, so SQL Server decides which. Ask which description v1
 actually shows for `LDL` and `NEG`. The sample data in question 4 would also show it.
+
+Until the team answers, the pack keeps the most frequent description, and on a tie the first in
+`(LIMSPanelCode, Description)` order.
+
+**Still open (found porting the functions, 2026-10-09):**
+
+- `ViralLoadFinalResult` turns a plain number in HIVVD into `INDETECTAVEL` when HIVVR, HIVVC and
+  HIVVF are empty. Its rule for that case has no numeric branch. Is that intended? The pack does
+  the same as v1.
+- The function's error list has `Indeterminado` twice. For a request whose only result is the code
+  `I` (`Indeterminado`), SQL Server raises error 512 and the whole `viewVL_Result` query fails. Has
+  the team seen that error? The pack returns an empty `FinalViralLoadResult` there.
+- A coded result whose code is not in `LIMSCodedValues` comes out empty in all four merge columns.
+  Is that what the team sees in v1?
 
 ## 3. Facility type letters and HFStatus (partly answered)
 

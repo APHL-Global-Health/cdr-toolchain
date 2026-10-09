@@ -12,6 +12,8 @@ This is the source of the pack. The signed bundle is built from it.
 | `build.mjs` | Reads the v1 dictionary `OpenLDRDict_MZ` (SELECT only) and writes `dist/`. |
 | `vl-queries.mjs` | The SQL of both queries: "VL info" and "VL results". |
 | `facility-queries.mjs` | The SQL of "Mozambique facilities (v1 layout)", v1's `viewFacilities` read from the warehouse table `facility_registry`. |
+| `vl-coded-results.mjs` | Picks one description per coded VL result for the coded-results code system. |
+| `check-vl-functions.mjs` | Runs the ported v1 functions and both VL queries against the dev Postgres over a table of cases. Run it by hand before a release. |
 | `QUESTIONS-FOR-MZ.md` | Open questions for the Mozambique team. |
 | `PACK.md` | The text an admin reads in the marketplace before installing. It becomes the manifest readme. |
 | `.gitignore` | Keeps `dist/` out of git. |
@@ -38,16 +40,18 @@ the cdr-toolchain path in the script. No password is written to any output file.
 2. `value-set` `urn:openldr:mz:poc-sites`.
 3. `code-system` for the link sites, `urn:openldr:mz:cs:link-sites`.
 4. `value-set` `urn:openldr:mz:link-sites`.
-5. `facility-register` `urn:openldr:mz:laboratories`, code `MZLABS`, with the register CSV.
-6. `facility-register` `urn:openldr:mz:facilities`, code `MZFAC`, from `viewFacilities`.
-7. `link-matching` against the facility register.
-8. `link-matching` against the lab register. Without these two the facility names, provinces
-   and districts stay empty in both queries.
-9. `custom-queries`: "VL info", "VL results" and "Mozambique facilities (v1 layout)". The
-   facilities query reads the warehouse copy of the register, so it needs a CE with the warehouse
-   table `facility_registry`. It leaves out retired rows. `DateTimeStamp` is CE's update time.
+5. `code-system` for the coded VL results, `urn:openldr:mz:cs:vl-coded-results`.
+6. `value-set` `urn:openldr:mz:vl-coded-results`. "VL results" reads it.
+7. `facility-register` `urn:openldr:mz:laboratories`, code `MZLABS`, with the register CSV.
+8. `facility-register` `urn:openldr:mz:facilities`, code `MZFAC`, from `viewFacilities`.
+9. `link-matching` against the facility register.
+10. `link-matching` against the lab register. Without these two the facility names, provinces
+    and districts stay empty in both queries.
+11. `custom-queries`: "VL info", "VL results" and "Mozambique facilities (v1 layout)". The
+    facilities query reads the warehouse copy of the register, so it needs a CE with the warehouse
+    table `facility_registry`. It leaves out retired rows. `DateTimeStamp` is CE's update time.
 
-The order of steps 7 and 8 matters. CE's link-matching (`facility-link-matching.ts`) links every
+The order of steps 9 and 10 matters. CE's link-matching (`facility-link-matching.ts`) links every
 unmapped observed code that equals a register code, from every observed system, and never
 replaces an existing mapping. So the register linked first takes a code both registers share, for
 testing labs (`urn:openldr:default_lab`) and requesting facilities (`urn:openldr:default_fac`)
@@ -157,24 +161,45 @@ These columns have a CE home but cdr-toolchain does not fill it today, so they a
 `CollectionVolume`, `CostUnits`, `Deceased`, `Newborn`, `Repeated` and `EncryptedPatientID` are
 sent only when the lab system has a value. v1 wrote `0` or `false` where CE has nothing.
 
-## Columns left out: the three missing functions
+## The three v1 functions
 
-v1 computed these columns with SQL functions that are not in the views script:
+The Mozambique team sent v1's functions on 2026-10-09
+(`corlix/fixtures/Mozambique_views/openldr-functions-script.sql`, UTF-16). A custom query is one
+SELECT and cannot create SQL functions, so each one is an SQL expression built in `vl-queries.mjs`.
+`check-vl-functions.mjs` runs them over a table of cases.
 
-| v1 column | Function | Returned instead |
+| v1 column | Function | Port |
 |---|---|---|
-| `HIVVL_ViralLoadResult` | `ViralLoadResultMerge(HIVVD)` | `HIVVD_LIMSRptResult`, `HIVVD_LIMSCodedValue` |
-| `HIVVL_ViralLoadCAPCTM` | `ViralLoadResultMerge(HIVVR)` | `HIVVR_LIMSRptResult`, `HIVVR_LIMSCodedValue` |
-| `HIVVL_Low_value` | `ViralLoadResultMerge(HIVVC)` | `HIVVC_LIMSRptResult`, `HIVVC_LIMSCodedValue` |
-| `HIVVL_Viral` | `ViralLoadResultMerge(HIVVF)` | `HIVVF_LIMSRptResult`, `HIVVF_LIMSCodedValue` |
-| `FinalViralLoadResult` | `ViralLoadFinalResult(...)` | the four pairs above |
-| `ReasonForTest` (info) | `GetReasonForTest(ESCOL)` | `ESCOL_LIMSRptResult` |
+| `ReasonForTest` | `GetReasonForTest(ESCOL)` | `reasonForTestSql` |
+| `HIVVL_ViralLoadResult` | `ViralLoadResultMerge(HIVVD)` | `resultMergeSql` |
+| `HIVVL_ViralLoadCAPCTM` | `ViralLoadResultMerge(HIVVR)` | `resultMergeSql` |
+| `HIVVL_Low_value` | `ViralLoadResultMerge(HIVVC)` | `resultMergeSql` |
+| `HIVVL_Viral` | `ViralLoadResultMerge(HIVVF)` | `resultMergeSql` |
+| `FinalViralLoadResult` | `ViralLoadFinalResult(...)` | `finalResultSql` |
+
+The port matches v1, including where v1 looks wrong:
+
+- The merge takes the reported value without the coded fallback that `rpt()` adds. Otherwise it
+  would never be blank and would return a code where v1 returns its description.
+- A code missing from `LIMSCodedValues` gives NULL. v1's `SELECT @x = ... WHERE Code = @code`
+  matches no row and leaves `@x` NULL.
+- Rule 2 of `ViralLoadFinalResult` has no numeric branch. A plain number in HIVVD with nothing in
+  HIVVR, HIVVC or HIVVF gives `INDETECTAVEL`.
+- Rule 3 tests whether the two inputs joined together are a number (`'20' || '1000'`).
+- Comparisons ignore case and trailing spaces, as SQL Server's default collation does.
+- `ISNUMERIC` is a Postgres regular expression: sign, digits with commas, a decimal point, an
+  exponent, `$ £ € ¥`, surrounding spaces. SQL Server also accepts a lone `+`, `$` or `.`, and tabs.
+
+One place the port cannot match: v1's error list has `Indeterminado` twice. Rules 2 and 3 test
+`(SELECT 1 FROM @errors WHERE Error = x) = 1`, which raises SQL Server error 512 when two rows
+match. So v1 fails the whole `viewVL_Result` query on such a request. The port returns NULL.
+
+`LIMSCodedValues` lists five codes with more than one description (`LDL`, `NEG`, `POS`, `INVAL`,
+`NDET`). v1 reads them in no fixed order. The build keeps the most frequent description, and on a
+tie the first in `(LIMSPanelCode, Description)` order. `build-summary.json` lists each choice
+under `vlCodedResults.choices`.
 
 `HIVVL_VRLogValue` needs no function and is returned as v1 did.
-
-**Request to Mozambique:** please send the scripts of `dbo.ViralLoadResultMerge`,
-`dbo.ViralLoadFinalResult` and `dbo.GetReasonForTest` from the OpenLDR data database. With them
-these columns can be ported. Without them we would be guessing, so they stay out.
 
 ## HONEST NON-PROOF
 
@@ -190,7 +215,12 @@ What this pack has not shown:
   but no Mozambique code has been matched against them.
 - **Link matching on real data.** The dev CE has no results, so both link-matching steps link
   nothing. The order rule for the 45 shared codes is reasoned from the code, not observed.
-- **Anything the three missing functions do.**
+- **The ported functions on real results.** `check-vl-functions.mjs` runs every branch on made-up
+  cases in real Postgres. It does not show that v1 and the port agree on Mozambique data. That
+  needs the sample data (QUESTIONS-FOR-MZ.md, question 4): run "VL results" and v1's
+  `viewVL_Result` side by side and compare the six columns request by request.
+- **Which description v1 shows for a duplicated code.** The build's pick is a rule, not an
+  observation.
 - **Duplicate observations.** A request with one observation code twice returns two rows, as v1
   did. No Tanzania HIVVL request has this, so it was not exercised.
 - **Time zones.** The date filter compares text, as the built-in reports do. A request registered
