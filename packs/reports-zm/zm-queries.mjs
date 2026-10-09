@@ -2,37 +2,14 @@
 // (corlix/fixtures/Zambia_views/script.sql, UTF-16). build.mjs puts them in the custom-queries step
 // of dist/pack.json. The SQL may differ from v1's; the output must match.
 
-import { lit as sqlLit, rpt, inListSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
+import { rpt, inListSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
+import {
+  sqlLit, sqlList, inRange, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
+  requesterJoin, areaFilter, zmIdsCte,
+} from './zm-sql.mjs';
 
-// SQL Server's REPLACE ignores case under the default collation, so v1's replace(x, 'AT.', '')
-// also removes 'at.'. Postgres replace() is case-sensitive, so that step is a regexp. The order of
-// the steps is v1's: commas, then 'AT.', then spaces, then dashes.
-const dropCommaAt = (x) => `regexp_replace(replace(${x}, ',', ''), 'AT\\.', '', 'gi')`;
-const stripRef = (x) => `replace(replace(${dropCommaAt(x)}, ' ', ''), '-', '')`;
-const stripId = (x) => `replace(replace(${x}, ' ', ''), '-', '')`;
-
-// The ART number, v1 sp_GetPreviousVLResultforCohort2x. `ref` is REFNO and `uniqueId` UNIQUEID,
-// both SQL text that is never NULL ('' when not sent). v1 LIKE ignores case, so ilike.
-//   1. REFNO starts ",ELABS": the text after the first "T.". Follows v1's LEN/RIGHT arithmetic: LEN ignores
-//      trailing spaces, RIGHT counts them.
-//   2. REFNO contains ",ELABS": the part before ",elabs", less its first 3 characters. Follows v1's LEN/RIGHT
-//      arithmetic. (v1 errors when that part is under 3 characters; port gives ''.)
-//   3. v1: REFNO blank and HOSPID set gives HOSPID. HOSPID is not sent yet (spec section 3), so
-//      this rule never fires and a blank REFNO falls to rule 4.
-//   4. REFNO blank after stripping: UNIQUEID without spaces and dashes.
-//   5. REFNO, less commas and "AT.", starts "ART." or "ELABS.": UNIQUEID without spaces and dashes.
-//   6. Otherwise REFNO without commas, "AT.", spaces and dashes.
-export function artNumberSql(ref, uniqueId) {
-  return `case
-    when ${ref} ilike ',ELABS%' then right(${ref}, greatest(length(rtrim(${ref})) - strpos(upper(${ref}), 'T.') - 1, 0))
-    when ${ref} ilike '%,ELABS%' then right(left(${ref}, strpos(lower(${ref}), ',elabs') - 1), greatest(length(rtrim(left(${ref}, strpos(lower(${ref}), ',elabs') - 1))) - 3, 0))
-    when ${stripRef(ref)} = '' then ${stripId(uniqueId)}
-    when ${dropCommaAt(ref)} ilike 'ART.%' or ${dropCommaAt(ref)} ilike 'ELABS.%' then ${stripId(uniqueId)}
-    else ${stripRef(ref)}
-  end`;
-}
-
-export const ZM_REGISTER_URL = 'urn:openldr:zm:facilities';
+// These moved to zm-sql.mjs; slice 1's importers still get them from here.
+export { artNumberSql, ZM_REGISTER_URL, provinceOptionsSql };
 
 // Zambia's v1 panel and observation codes (content, so they live in the pack).
 export const ZM_CODES = {
@@ -43,8 +20,6 @@ export const ZM_CODES = {
   vlPanel: 'HIVVL',
   unclearObservations: ['HIVVL', 'HIVVC', 'HIVVD'],
 };
-
-const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 
 // v1 TND (sp_GetPreviousVLResultforCohort2x): results left out as not a viral load.
 export const INVALID_RESULTS = [
@@ -66,14 +41,6 @@ export const BELOW_LIMIT_RESULTS = [
   '<400 copies/mL', '<400', '<40 copies/mL',
 ];
 
-const sqlList = (values) => values.map(sqlLit).join(', ');
-const inRange = (x) => `${x} >= {{param.from}} and ${x} <= ({{param.to}} || 'T23:59:59.999Z')`;
-
-// The province picker: the register's provinces. CE runs it through validateSelectSql and uses the
-// first column of each row.
-export const provinceOptionsSql = (registerUrl) =>
-  `select distinct region from facility_registry where facility_system = ${sqlLit(registerUrl)} and register_state = 'in_register' and region is not null and region <> '' order by region`;
-
 // "VL clients by province": v1's 12 sp_<province>_hivvl_clients_month/_quarter procedures as one
 // query. Three parts joined with UNION, as v1's are:
 //   zm_valid    v1 TND: every final VL result in the range that is not an invalid text.
@@ -87,14 +54,7 @@ export const provinceOptionsSql = (registerUrl) =>
 // Part 1 builds the ART number with artNumberSql; parts 2 and 3 show the unique id raw, as v1 does.
 export function provinceClientsSql(codes) {
   const result = rpt('r');
-  return `with zm_ids as (
-  select a.lab_request_id,
-    max(case when a.code = 'reference-numbers' then a.value_text end) as reference_numbers,
-    max(case when a.code = 'unique-id' then a.value_text end) as unique_id
-  from lab_request_attributes a
-  where a.system = ${sqlLit(ATTR_SYSTEM)} and a.code in ('reference-numbers', 'unique-id')
-  group by a.lab_request_id
-),
+  return `with ${zmIdsCte('zm_ids')},
 zm_req as (
   select lr.id, lr.request_id, lr.panel_code, lr.age_years, lr.authored_at,
     fmr.region as province, fmr.district, fmr.name as facility,
@@ -103,11 +63,11 @@ zm_req as (
     zi.reference_numbers, zi.unique_id,
     dr.status as report_status, dr.effective as collected_date, dr.issued as result_date
   from lab_requests lr
-  join facility_map fmr on fmr.source_system = coalesce(lr.source_system, '') and fmr.performer_system = coalesce(lr.requester_system, '') and fmr.source_code = lr.requester_code and fmr.registry_id is not null
+  ${requesterJoin('lr', 'fmr')}
   left join diagnostic_reports dr on dr.based_on_id = lr.id
   left join patients p on p.id = lr.patient_id
   left join zm_ids zi on zi.lab_request_id = lr.id
-  where ({{param.province}} = '' or fmr.region = {{param.province}})
+  where ${areaFilter({ province: 'province' }, 'fmr')}
     and lr.panel_code in (${sqlList([...new Set([...codes.validPanels, codes.vlPanel])])})
     and (${inRange('dr.issued')} or ${inRange('lr.authored_at')})
 ),
@@ -166,9 +126,8 @@ order by 1, 2, 3, 4, 11, 12, 5, 6, 7, 8, 9, 10, 13`;
 }
 
 export const zmParams = (registerUrl) => [
-  { id: 'province', label: 'Province (blank for all)', type: 'select', required: false, optionsSql: provinceOptionsSql(registerUrl) },
-  { id: 'from', label: 'Date from (YYYY-MM-DD)', type: 'text', required: true },
-  { id: 'to', label: 'Date to (YYYY-MM-DD)', type: 'text', required: true },
+  provinceParam('province', false, registerUrl),
+  ...dateParams(true),
 ];
 
 export function zmQueryFile() {

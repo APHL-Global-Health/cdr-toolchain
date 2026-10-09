@@ -1,0 +1,255 @@
+// Group t1: the shared helpers in zm-sql.mjs. Fixture ids start with "t1-".
+
+import { lit, caseSuite } from '../../shared/pg-check.mjs';
+import {
+  sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
+  dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, labNameSql,
+  districtOptionsSql,
+} from '../zm-sql.mjs';
+
+const bind = (sqlText, params) => Object.entries(params)
+  .reduce((s, [k, v]) => s.replaceAll(`{{param.${k}}}`, `'${v.replace(/'/g, "''")}'`), sqlText);
+
+// A suite that runs `selectSql` over fixture rows and compares the exact row set (no extra rows).
+function rowSuite(name, setup, selectSql, expected) {
+  const key = (r) => JSON.stringify(r);
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${selectSql}) q;`,
+    count: expected.length + 1,
+    check(rows) {
+      const failures = [];
+      if (rows.length !== expected.length) failures.push(`expected ${expected.length} rows, got ${rows.length}`);
+      const got = rows.map(key).sort();
+      const want = expected.map(key).sort();
+      for (const w of want) if (!got.includes(w)) failures.push(`missing row ${w}`);
+      for (const g of got) if (!want.includes(g)) failures.push(`unexpected row ${g}`);
+      return failures;
+    },
+  };
+}
+
+// A suite with no SQL: a list of [label, failure-or-null] from plain JS.
+function jsSuite(name, tests) {
+  return {
+    name,
+    count: tests.length,
+    check: () => tests.filter(([, bad]) => bad).map(([label, bad]) => `${label}: ${bad}`),
+  };
+}
+const same = (got, want) => (JSON.stringify(got) === JSON.stringify(want) ? null : `expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
+
+// A suite over fixture rows: one line per (id, wanted value) pair.
+function pairSuite(name, setup, selectSql, wanted) {
+  return {
+    name,
+    setup,
+    sql: selectSql,
+    count: wanted.length,
+    check(rows) {
+      return wanted.flatMap(([id, want, label]) => {
+        const row = rows.find((r) => r.id === id && (label === undefined || r.code === label));
+        const got = row ? row.got : '(no row)';
+        return JSON.stringify(got) === JSON.stringify(want) ? [] : [`${id}${label === undefined ? '' : ` ${label}`}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`];
+      });
+    },
+  };
+}
+
+const suites = [];
+
+// ---- genderSql: v1 getGenderFromSexCode (UserDefinedFunction__dbo_getGenderFromSexCode.sql) ----
+suites.push(caseSuite('gender', ['sex'], [
+  { sex: 'F', expected: 'Female' },
+  { sex: 'M', expected: 'Male' },
+  { sex: 'N', expected: 'Not Applicable' },
+  { sex: 'O', expected: 'Other' },
+  { sex: 'U', expected: 'Unknown' },
+  { sex: 'I', expected: 'Indeterminate' },
+  { sex: 'X', expected: 'Not Specified' },
+  { sex: '', expected: 'Not Specified' },
+  { sex: null, expected: 'Not Specified' },
+  // SQL Server's default collation ignores case and trailing spaces in a comparison.
+  { sex: 'f', expected: 'Female' },
+  { sex: 'm ', expected: 'Male' },
+], genderSql('sex')));
+
+// ---- ageGroupSql: v1 dbo.Agegroup (UserDefinedFunction__dbo_Agegroup.sql). Its 45 to 54 branch
+// is labelled "45-49", so ages 50 to 54 never reach "50+". Kept as is (spec ruling 1). ----
+const AGE_CASES = [
+  [-1, '<1'], [0, '<1'], [1, '1-4'], [4, '1-4'], [5, '5-9'], [9, '5-9'], [10, '10-14'], [14, '10-14'],
+  [15, '15-19'], [19, '15-19'], [20, '20-24'], [24, '20-24'], [25, '25-29'], [29, '25-29'], [30, '30-34'],
+  [34, '30-34'], [35, '35-39'], [39, '35-39'], [40, '40-44'], [44, '40-44'], [45, '45-49'], [49, '45-49'],
+  [50, '45-49'], [54, '45-49'], [55, '50+'], [56, '50+'], [99, '50+'], [null, 'Not Captured'],
+];
+suites.push(caseSuite('age-group', ['age'],
+  AGE_CASES.map(([age, expected]) => ({ age: age === null ? null : String(age), expected })), ageGroupSql('age::int')));
+
+// ---- inRange: a text window, the end day taken to the last millisecond ----
+suites.push(caseSuite('in-range', ['d'], [
+  { d: '2026-04-30T23:59:59.999Z', expected: false },
+  { d: '2026-05-01', expected: true },
+  { d: '2026-05-01T00:00:00Z', expected: true },
+  { d: '2026-05-31T23:59:59.999Z', expected: true },
+  { d: '2026-06-01T00:00:00Z', expected: false },
+  { d: null, expected: null },
+], bind(inRange('d'), { from: '2026-05-01', to: '2026-05-31' })));
+suites.push(caseSuite('in-range-names', ['d'], [
+  { d: '2026-01-15T10:00', expected: true },
+  { d: '2026-01-31T23:59:59.999Z', expected: true },
+  { d: '2026-02-01', expected: false },
+], bind(inRange('d', 'start', 'end'), { start: '2026-01-15', end: '2026-01-31' })));
+
+// ---- sqlList ----
+suites.push(caseSuite('sql-list', ['x'], [
+  { x: 'a', expected: true },
+  { x: "it's", expected: true },
+  { x: 'b', expected: false },
+  { x: null, expected: null },
+], `x in (${sqlList(['a', "it's"])})`));
+
+// ---- formAnswerSql: the VIRAL form answer by observation code ----
+const json = (v) => lit(JSON.stringify(v));
+const FORM_ROWS = `insert into lab_requests (id, request_id) values ('t1-r1', 'A'), ('t1-r2', 'B'), ('t1-r3', 'C'), ('t1-r4', 'D');
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values
+  ('t1-q1', 'q', 'hiv_vl_documentation', 't1-r1', '2026-05-01T10:00:00Z', ${json([
+    { linkId: 'ARTPR', text: 'ART', answer: [{ valueString: 'Option B+' }] },
+    { linkId: 'AGE', answer: [{ valueDecimal: 1.5 }] },
+    { linkId: 'WHOLE', answer: [{ valueDecimal: 20 }] },
+    { linkId: 'EMPTY', answer: [] },
+    { linkId: 'NOANS', text: 'no answer key' },
+    { linkId: 'TWO', answer: [{ valueString: 'first' }, { valueString: 'second' }] },
+    { linkId: 'BOTH', answer: [{ valueString: 'text', valueDecimal: 2 }] },
+    { linkId: 'BLANK', answer: [{ valueString: '' }] },
+  ])}),
+  ('t1-q2', 'q', 'other_form', 't1-r1', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'WRONG FORM' }] }])}),
+  ('t1-q3', 'q', 'hiv_vl_documentation', 't1-r2', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'Other' }] }])}),
+  ('t1-q4a', 'q', 'hiv_vl_documentation', 't1-r4', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'old' }] }])}),
+  ('t1-q4b', 'q', 'hiv_vl_documentation', 't1-r4', '2026-05-02T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'new' }] }])});`;
+const FORM_WANT = [
+  ['t1-r1', 'Option B+', 'ARTPR'],  // text answer; the other form's row for this request is ignored
+  ['t1-r1', '1.5', 'AGE'],          // decimal answer as text
+  ['t1-r1', '20', 'WHOLE'],
+  ['t1-r1', null, 'EMPTY'],         // empty answer list
+  ['t1-r1', null, 'NOANS'],         // no answer key
+  ['t1-r1', 'first', 'TWO'],        // the first answer only
+  ['t1-r1', 'text', 'BOTH'],        // text before decimal
+  ['t1-r1', '', 'BLANK'],           // an empty text is kept
+  ['t1-r1', null, 'MISSING'],       // code not in the form
+  ['t1-r2', 'Other', 'ARTPR'],
+  ['t1-r3', null, 'ARTPR'],         // request without a response
+  ['t1-r4', 'new', 'ARTPR'],        // two responses: the later authored one
+];
+suites.push(pairSuite('form-answer', FORM_ROWS,
+  FORM_WANT.map(([id, , code]) => `select 'form-answer' || chr(9) || json_build_object('id', r.id, 'code', ${lit(code)}, 'got', ${formAnswerSql('r.id', code)})::text from lab_requests r where r.id = ${lit(id)};`).join('\n'),
+  FORM_WANT));
+
+// ---- labNameSql (ruling 8): performer_display, else the mapped register name, else the code ----
+const LAB_ROWS = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t1-fm1', '', '', 'L2', 'reg-2', 'Mapped Lab', 'Southern', 'Choma'),
+  ('t1-fm2', '', '', 'L3', null, null, null, null),
+  ('t1-fm3', 'src', 'ps', 'L7', 'reg-7', 'Source Lab', 'Lusaka', 'Lusaka');
+insert into diagnostic_reports (id, based_on_id, performer, performer_display, performer_system, source_system) values
+  ('t1-d1', 'x', 'L1', 'Lab Display', null, null),
+  ('t1-d2', 'x', 'L2', null, null, null),
+  ('t1-d3', 'x', 'L3', '', null, null),
+  ('t1-d4', 'x', 'L2', '   ', null, null),
+  ('t1-d5', 'x', null, null, null, null),
+  ('t1-d6', 'x', 'L2', null, 'urn:other', null),
+  ('t1-d7', 'x', 'L7', null, 'ps', 'src'),
+  ('t1-d8', 'x', 'L7', null, 'ps', null);`;
+suites.push(pairSuite('lab-name', LAB_ROWS,
+  `select 'lab-name' || chr(9) || json_build_object('id', dr.id, 'got', ${labNameSql('dr')})::text from diagnostic_reports dr;`,
+  [
+    ['t1-d1', 'Lab Display'],  // display wins
+    ['t1-d2', 'Mapped Lab'],   // no display: the mapped register name
+    ['t1-d3', 'L3'],           // blank display, and the map row has no register row: the code
+    ['t1-d4', 'Mapped Lab'],   // spaces only count as blank
+    ['t1-d5', null],           // nothing at all
+    ['t1-d6', 'L2'],           // performer system differs from the map row
+    ['t1-d7', 'Source Lab'],   // source system and performer system both match
+    ['t1-d8', 'L7'],           // source system differs
+  ]));
+
+// ---- requesterJoin + areaFilter: mapped rows only, then the optional area parameters ----
+const AREA_ROWS = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t1-a-s', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t1-a-l', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t1-a-k', '', '', 'ZKAFU', 'reg-k', 'Kafue District Hospital', 'Lusaka', 'Kafue'),
+  ('t1-a-u', '', '', 'ZUNMP', null, null, null, null);
+insert into lab_requests (id, request_id, requester_code) values
+  ('t1-ar1', 'R-S', 'ZSOUT'), ('t1-ar2', 'R-L', 'ZLUSA'), ('t1-ar3', 'R-K', 'ZKAFU'), ('t1-ar4', 'R-U', 'ZUNMP'), ('t1-ar5', 'R-N', 'ZNONE');`;
+const areaSql = (params) => bind(`select lr.request_id from lab_requests lr ${requesterJoin('lr', 'fmr')} where ${areaFilter({ province: 'province', district: 'district', facility: 'facility' }, 'fmr')}`, params);
+const none = { province: '', district: '', facility: '' };
+const AREA_CASES = [
+  ['all', none, ['R-S', 'R-L', 'R-K']],   // R-U (map row without register row) and R-N (no map row) never appear
+  ['province', { ...none, province: 'Lusaka' }, ['R-L', 'R-K']],
+  ['district', { ...none, district: 'Kafue' }, ['R-K']],
+  ['province and district', { ...none, province: 'Southern', district: 'Kafue' }, []],
+  ['facility, other case', { ...none, facility: 'chilenje CLINIC' }, ['R-L']],
+  ['facility, trailing spaces', { ...none, facility: 'Chilenje Clinic  ' }, ['R-L']],
+  ['facility not in register', { ...none, facility: 'Nowhere' }, []],
+  ['all three', { province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic' }, ['R-L']],
+];
+// The runner puts every suite's setup in one transaction, so the shared rows go in the first suite only.
+AREA_CASES.forEach(([label, params, want], i) => {
+  suites.push(rowSuite(`area-${label}`, i === 0 ? AREA_ROWS : '', areaSql(params), want.map((request_id) => ({ request_id }))));
+});
+
+suites.push(jsSuite('area-shape', [
+  ['no filters is true', same(areaFilter({}), 'true')],
+  ['province only', same(areaFilter({ province: 'province' }, 'fmr'), "({{param.province}} = '' or fmr.region = {{param.province}})")],
+  ['district only leaves province out', areaFilter({ district: 'district' }).includes('province') ? 'mentions province' : null],
+  ['custom ids', areaFilter({ province: 'prov', facility: 'fac' }).includes('{{param.prov}}') && areaFilter({ province: 'prov', facility: 'fac' }).includes('{{param.fac}}') ? null : 'param ids not used'],
+]));
+
+// ---- zmIdsCte ----
+const ID_ROWS = `insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values
+  ('t1-i1', 't1-x1', ${lit(ATTR_SYSTEM)}, 'reference-numbers', 'REF-1'),
+  ('t1-i2', 't1-x1', ${lit(ATTR_SYSTEM)}, 'unique-id', 'UID-1'),
+  ('t1-i3', 't1-x2', ${lit(ATTR_SYSTEM)}, 'reference-numbers', 'REF-2'),
+  ('t1-i4', 't1-x3', ${lit(ATTR_SYSTEM)}, 'unique-id', 'UID-3'),
+  ('t1-i5', 't1-x4', 'urn:other', 'unique-id', 'WRONG SYSTEM'),
+  ('t1-i6', 't1-x4', ${lit(ATTR_SYSTEM)}, 'other-code', 'WRONG CODE');`;
+suites.push(rowSuite('zm-ids', ID_ROWS, `with ${zmIdsCte('ids')} select * from ids`, [
+  { lab_request_id: 't1-x1', reference_numbers: 'REF-1', unique_id: 'UID-1' },
+  { lab_request_id: 't1-x2', reference_numbers: 'REF-2', unique_id: null },
+  { lab_request_id: 't1-x3', reference_numbers: null, unique_id: 'UID-3' },
+]));
+
+// ---- parameters ----
+const REGISTRY_ROWS = `insert into facility_registry (id, facility_code, name, facility_system, region, district, register_state) values
+  ('t1-fr1', '1', 'A', ${lit(ZM_REGISTER_URL)}, 'Southern', 'Choma', 'in_register'),
+  ('t1-fr2', '2', 'B', ${lit(ZM_REGISTER_URL)}, 'Lusaka', 'Lusaka', 'in_register'),
+  ('t1-fr3', '3', 'C', ${lit(ZM_REGISTER_URL)}, 'Lusaka', 'Kafue', 'in_register'),
+  ('t1-fr4', '4', 'D', ${lit(ZM_REGISTER_URL)}, 'Western', 'Mongu', 'dropped'),
+  ('t1-fr5', '5', 'E', 'urn:example:other', 'Maputo', 'Matola', 'in_register'),
+  ('t1-fr6', '6', 'F', ${lit(ZM_REGISTER_URL)}, 'Lusaka', null, 'in_register'),
+  ('t1-fr7', '7', 'G', ${lit(ZM_REGISTER_URL)}, 'Lusaka', '', 'in_register');`;
+// The picker reads the first column of each row, in order: distinct in-register ZMFAC districts, sorted.
+suites.push({
+  name: 'district-options',
+  setup: REGISTRY_ROWS,
+  sql: `select 'district-options' || chr(9) || json_build_object('v', q.district)::text from (${districtOptionsSql(ZM_REGISTER_URL)}) q;`,
+  count: 1,
+  check(rows) {
+    const bad = same(rows.map((r) => r.v), ['Choma', 'Kafue', 'Lusaka']);
+    return bad ? [bad] : [];
+  },
+});
+
+suites.push(jsSuite('params-shape', [
+  ['province defaults', same(Object.keys(provinceParam()), ['id', 'label', 'type', 'required', 'optionsSql'])],
+  ['province values', same([provinceParam().id, provinceParam().label, provinceParam().type, provinceParam().required], ['province', 'Province (blank for all)', 'select', false])],
+  ['province id and required', same([provinceParam('prov', true).id, provinceParam('prov', true).required], ['prov', true])],
+  ['district is a select', same([districtParam().id, districtParam().type, districtParam().required], ['district', 'select', false])],
+  ['district id and required', same([districtParam('d2', true).id, districtParam('d2', true).required], ['d2', true])],
+  ['district options', same(districtParam().optionsSql, districtOptionsSql(ZM_REGISTER_URL))],
+  ['facility is optional text', same([facilityParam().id, facilityParam().type, facilityParam().required], ['facility', 'text', false])],
+  ['laboratory is optional text', same([labParam().id, labParam().type, labParam().required], ['laboratory', 'text', false])],
+  ['dates default required', same(dateParams().map((p) => [p.id, p.type, p.required]), [['from', 'text', true], ['to', 'text', true]])],
+  ['dates optional', same(dateParams(false).map((p) => p.required), [false, false])],
+]));
+
+export const groups = [{ name: 't1', suites }];

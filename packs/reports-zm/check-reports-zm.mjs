@@ -4,9 +4,18 @@
 //
 // Uses the shared runner (../shared/pg-check.mjs): temp copies of the warehouse tables in the CE
 // dev Postgres container, rolled back. Exits 1 on any mismatch. Run it by hand before a release.
+// Slice 1 is group "slice1"; "t1" holds the shared helpers; each area adds its groups in checks/.
 
-import { lit, caseSuite, inOrder, runSuites } from '../shared/pg-check.mjs';
+import { lit, caseSuite, inOrder, runSuiteGroups } from '../shared/pg-check.mjs';
 import { artNumberSql, provinceClientsSql, provinceOptionsSql, ZM_CODES, ZM_REGISTER_URL } from './zm-queries.mjs';
+
+import { groups as helperGroups } from './checks/helpers.mjs';
+import { groups as vlGroups } from './checks/vl.mjs';
+import { groups as eidGroups } from './checks/eid.mjs';
+import { groups as tbGroups } from './checks/tb.mjs';
+import { groups as testsGroups } from './checks/tests.mjs';
+import { groups as covidGroups } from './checks/covid.mjs';
+import { groups as labOpsGroups } from './checks/lab-ops.mjs';
 
 const suites = [];
 
@@ -166,4 +175,13 @@ suites.push(querySuite('clients-southern', { province: 'Southern', from: '2026-0
 
 // ---- Suites above this line ----
 
-runSuites(suites);
+runSuiteGroups([
+  { name: 'slice1', suites },
+  ...helperGroups,
+  ...vlGroups,
+  ...eidGroups,
+  ...tbGroups,
+  ...testsGroups,
+  ...covidGroups,
+  ...labOpsGroups,
+]);
