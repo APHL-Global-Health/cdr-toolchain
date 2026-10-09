@@ -173,9 +173,10 @@ SEXES.forEach(([sex, gender], i) => lab(`T2-SEX-${i}`, [{ sex }], { gender }));
 lab('T2-SEX-NOPATIENT', [{ sex: null }], { gender: null });
 
 // TestedAt (v1 lines 76-79). The testing code is the performer. ReceivingFacilityCode is not carried, so a blank
-// testing code gives NULL. A 3-letter ZU code other than ZUE and ZUA becomes ZUL. LIKE keeps trailing spaces.
+// testing code gives NULL. A 3-letter ZU code other than ZUE and ZUA becomes ZUL. SQL Server LIKE ignores trailing
+// blanks in the matched text (non-Unicode data), so 'ZUB ' also becomes ZUL.
 const TESTED_AT = [[null, null], ['', null], ['  ', null], ['ZUB', 'ZUL'], ['zub', 'ZUL'], ['ZU1', 'ZUL'],
-  ['ZUA', 'ZUA'], ['zue', 'zue'], ['ZUEE', 'ZUEE'], ['ZU', 'ZU'], ['ZUB ', 'ZUB ']];
+  ['ZUA', 'ZUA'], ['zue', 'zue'], ['ZUEE', 'ZUEE'], ['ZU', 'ZU'], ['ZUB ', 'ZUL']];
 TESTED_AT.forEach(([performer, testedAt], i) => lab(`T2-TA-${i}`, [{ performer }], { tested_at: testedAt }));
 
 // TAT counts date boundaries, not 24-hour periods (v1 line 96). 14 days is within, 15 is not (line 97).
@@ -185,6 +186,16 @@ lab('T2-TAT-14', [{ effective: '2026-05-01T10:00:00Z', issued: '2026-05-15T01:00
   { tested_date: '2026-05-15T01:00:00Z', collected_date: '2026-05-01T10:00:00Z', tat: 14, tat_within14: 1 });
 lab('T2-TAT-15', [{ effective: '2026-05-01T10:00:00Z', issued: '2026-05-16T01:00:00Z' }],
   { tested_date: '2026-05-16T01:00:00Z', collected_date: '2026-05-01T10:00:00Z', tat: 15, tat_within14: 0 });
+// Dates are local (DISA writes local wall time with its offset): TAT takes each date from the stamp's own text.
+// In UTC the first row would be 04-30 to 05-15, so 15 days and not within 14 (v1 gives 14 and 1).
+lab('T2-TZ-14', [{ effective: '2026-05-01T01:00:00+02:00', issued: '2026-05-15T10:00:00+02:00' }],
+  { tested_date: '2026-05-15T10:00:00+02:00', collected_date: '2026-05-01T01:00:00+02:00', tat: 14, tat_within14: 1 });
+// Local 05-03 to 05-04 is 1 day; in UTC it is 05-02 to 05-04 (2 days).
+lab('T2-TZ-ORD', [{ effective: '2026-05-03T00:30:00+02:00', issued: '2026-05-04T23:45:00+02:00' }],
+  { tested_date: '2026-05-04T23:45:00+02:00', collected_date: '2026-05-03T00:30:00+02:00', tat: 1, tat_within14: 1 });
+// A date-only stamp still gives its date. A partial stamp ('2026-07') is not a date: TAT is NULL and the query does not fail.
+lab('T2-TAT-DATEONLY', [{ effective: '2026-05-05' }], { collected_date: '2026-05-05', tat: 5, tat_within14: 1 });
+lab('T2-TAT-PARTIAL', [{ effective: '2026-07' }], { collected_date: '2026-07', tat: null, tat_within14: 0 });
 lab('T2-TAT-NOCOL', [{ effective: null }], { collected_date: null, tat: null, tat_within14: 0 });
 
 // POC (v1 line 102): a numeric testing code, or a lab id whose first 3 characters are numeric.
@@ -300,12 +311,15 @@ const suites = [
     wantRows.filter((r) => inDay(r, '2026-05-08', '2026-05-08'))),
   {
     name: 'hivvl-shape',
-    count: 4,
+    count: 5,
     check() {
       const text = hivvlCte('anyname');
       const bad = [];
       if (!text.startsWith('anyname as (')) bad.push(`must start with "anyname as (": ${text.slice(0, 30)}`);
       if (hivvlCte('x').includes('{{param.')) bad.push('no window: must not mention a parameter');
+      for (const half of [{ from: 'a' }, { to: 'b' }]) {
+        try { hivvlCte('x', half); bad.push(`half a window ${JSON.stringify(half)} must throw`); } catch { /* expected */ }
+      }
       const windowed = hivvlCte('x', { from: 'a', to: 'b' });
       if (!windowed.includes('{{param.a}}') || !windowed.includes('{{param.b}}')) bad.push('window: must use the given parameter names');
       if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(text.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');

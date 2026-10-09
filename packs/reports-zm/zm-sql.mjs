@@ -172,8 +172,17 @@ const HIVVL_SUPPRESSED = ['<20 copies/mL', 'TAR', 'Target not detected', 'Target
 const HIVVL_UU = ['TAR', 'Target Not Detected', 'Target not detected', 'TARG', 'RNA not detected', 'NDET', 'ND', 'DET'];
 const YES_WORDS = ['Yes', 'Y', 'Yest'];
 
-// A stored text stamp as a UTC timestamp. v1 datetimes have no zone; CE keeps ISO text.
-const utcTs = (x) => `(nullif(${x}, '')::timestamptz at time zone 'UTC')`;
+// Stamps are CE's ISO text, and DISA's local wall time keeps its offset ('2026-05-01T01:00:00+02:00').
+// A FHIR dateTime may also be partial ('2026-07') or a date. Every cast is guarded: text that is not
+// the full pattern gives NULL and never raises.
+const FULL_STAMP = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}'";
+const DATE_START = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}'";
+// The LOCAL calendar date of a stamp, taken from its own text (v1 datediff(dd) counts local dates).
+const localDate = (x) => `(case when ${x} ~ ${DATE_START} then left(${x}, 10)::date end)`;
+// The local wall time of a stamp (offset dropped), for ordering as v1 does.
+const localTs = (x) => `substring(${x} from '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)')::timestamp`;
+// A UTC timestamp, for hour differences (the offsets are fixed whole hours).
+const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at time zone 'UTC' end)`;
 
 // Zambia's `hivvl` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
 //   hivvlCte('hv')                              all rows
@@ -207,15 +216,19 @@ const utcTs = (x) => `(nullif(${x}, '')::timestamptz at time zone 'UTC')`;
 //   - pregnant, breastfeeding, baseline_vl and three_m_post_unsuppressed are 1 or NULL, never 0
 //     (lines 30-44: a left join to the rows where the flag is 1).
 //   - suppressed counts any number under 1000, and a text only when it is on the list (line 87).
-//     A text that is a number ('5,000') passes the valid-result filter but has no numeric value, so
-//     it is neither suppressed nor UU. UU is a number under 200 or a not-detected text (line 95).
-//   - tat counts date boundaries (datediff dd); tat_within14 is 0, not NULL, when tat is NULL.
+//     v1 reads the number (SIValue; here numeric_value) apart from the text, and so does the port. A result
+//     held only as text ('5,000', '120') passes the valid-result filter (ISNUMERIC on the text) and has
+//     no numeric value, so it is neither suppressed nor UU. This is not a v1 defect; it is what the
+//     checks show. UU is a number under 200 or a not-detected text (line 95).
+//   - tat counts date boundaries of the LOCAL dates (datediff dd), each date taken from the stamp's own
+//     text, not shifted to UTC. tat_within14 is 0, not NULL, when tat is NULL.
 //     poc_w48h counts hour boundaries (datediff hh) and tests 24, although its name says 48.
 //   - The valid list holds 'PTLTT' where the suppressed list holds 'PLTT'. DET, PLTT and
 //     '<883 copies/mL' are suppressed texts that never pass the valid-result filter.
 //   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
-//   - tested_at: a 3-character ZU code other than ZUE and ZUA becomes ZUL (lines 76-79). LIKE keeps
-//     trailing spaces, so 'ZUB ' stays as it is.
+//   - tested_at: a 3-character ZU code other than ZUE and ZUA becomes ZUL (lines 76-79). SQL Server
+//     LIKE ignores trailing blanks in the matched text, so 'ZUB ' also becomes ZUL (the port trims first).
+//   - Partial stamps ('2026-07') give NULL dates and TAT, and never raise. A date-only stamp gives its date.
 //
 // CE gaps:
 //   - ReceivingFacilityCode is not carried (ruling 7). receiving_code is a NULL column in the first
@@ -229,6 +242,7 @@ const utcTs = (x) => `(nullif(${x}, '')::timestamptz at time zone 'UTC')`;
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
 export function hivvlCte(name, { from, to } = {}) {
+  if ((from === undefined) !== (to === undefined)) throw new Error('hivvlCte: give both from and to, or neither');
   const windowed = from !== undefined && to !== undefined;
   const result = rpt('l');
   // Rows of the lab ids that have a report issued in the window: the dedupe needs their other rows too.
@@ -258,7 +272,7 @@ export function hivvlCte(name, { from, to } = {}) {
       ${prefilter}
   ),
   ${name}_ranked as (
-    select s.*, row_number() over (partition by s.lab_id order by ${utcTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
+    select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
     from ${name}_src s
   ),
   ${name}_flags as (
@@ -298,7 +312,7 @@ export function hivvlCte(name, { from, to } = {}) {
     case when c.tat <= 14 then 1 else 0 end as tat_within14,
     f.pregnant, f.breastfeeding, f.baseline_vl,
     r.run_date, r.received_date, r.registered_date, r.collected_date,
-    case when c.base_code ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
+    case when rtrim(c.base_code) ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
     case
       when r.receiving_code is null then null::int
       when length(rtrim(r.receiving_code)) > 0 and ${foldSql('r.receiving_code')} <> ${foldSql('r.testing_code')} then 1
@@ -317,7 +331,7 @@ export function hivvlCte(name, { from, to } = {}) {
   from ${name}_ranked r
   left join ${name}_flags f on f.lab_id = r.lab_id
   cross join lateral (select
-    ${utcTs('r.tested_date')}::date - ${utcTs('r.collected_date')}::date as tat,
+    ${localDate('r.tested_date')} - ${localDate('r.collected_date')} as tat,
     extract(epoch from date_trunc('hour', ${utcTs('r.tested_date')}) - date_trunc('hour', ${utcTs('r.collected_date')})) / 3600 as hours_taken,
     ${isNumericSql('r.testing_code')} or ${isNumericSql('left(r.lab_id, 3)')} as is_poc,
     case when length(rtrim(r.testing_code)) = 0 then r.receiving_code else r.testing_code end as base_code,
