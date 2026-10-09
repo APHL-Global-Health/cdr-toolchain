@@ -341,3 +341,154 @@ export function hivvlCte(name, { from, to } = {}) {
     ${finalRange}
 )`;
 }
+
+// ---- The eid copy table ----
+
+// v1 sp_update_EIDTable: the five result lists (lines 45, 51, 62, 63, 69). Compared as in hivvl.
+const EID_POSITIVE = ['Positive', 'Positive*', 'POS', 'Detected DBS', 'Detected', 'DET'];
+const EID_NEGATIVE = ['LDL', 'NDET', 'Negative*', 'Not Detected', 'Not Detected DBS', 'Negative', 'NDDB', 'NDT', 'NDTD'];
+const EID_INVALID = ['Invalid', 'VALID'];
+const EID_ERROR = ['Error'];
+const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
+
+// Zambia's `eid` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   eidCte('ed')                              all rows
+//   eidCte('ed', { from: 'from', to: 'to' })  only rows whose tested_date is in the window; the two
+//                                             values are parameter names, compared as in inRange
+// v1 fills the table with sp_update_EIDTable (a MERGE that also deletes rows missing from its source)
+// and then the eid half of sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
+//
+// Columns, in the order of Table__dbo_EID.sql (v1 spells the fourth date "RecievedDate"; kept):
+//   province, district, facility, lab_id, gender, age_group, tested_date, positive, tat, tat_within14,
+//   run_date, recieved_date, registered_date, collected_date, tested_at, referral, disalink, error,
+//   invalid, negative, indeterminate, poc, poc_w48h
+// The five dates are CE's ISO text (tested_date = diagnostic_reports.issued, run_date =
+// lab_requests.analysis_at, recieved_date = specimens.received_time, registered_date =
+// lab_requests.authored_at, collected_date = diagnostic_reports.effective).
+//
+// One row per final result: a request row (lab_requests) with a result row (lab_results) in panel
+// HIVPC, POCGH or POEID and observation HIVPC, HIVPR or PGHIV, whose report is final (v1 lines
+// 91-93). There is no filter on the result itself, unlike hivvl. The requesting facility must be
+// mapped to a ZMFAC register row, as v1 inner-joins its dictionary (lines 82-87). Panel, observation
+// and the result lists compare ignoring case and trailing spaces, as SQL Server does.
+//
+// The dedupe keeps one row per lab id, the earliest tested_date (sp_remove_dupsHIVVLEID lines 33-44).
+// v1 sorts NULL first, so a row with no tested date wins. Ties are broken on the request row id, the
+// report row id, then the result row id; v1 keeps either one. The dedupe runs over all rows of the lab
+// id before the window, so a lab id whose earliest row is outside the window shows nothing in it.
+// (v1's MERGE ranks rows by a constant, line 10, and only the rank 1 row matches the table, line 95.
+// The other rows are inserted as new rows, so the table holds every source row until the dedupe runs.)
+//
+// Rules, with v1 lines:
+//   - gender: F, M, I, U; anything else is NULL (lines 12-18).
+//   - age_group: bands of lab_requests.age_days, 0-6 'At Birth' up to 750 and over '> 2 years'; a
+//     negative or missing age is NULL (lines 19-29).
+//   - positive, negative, invalid, error, indeterminate: 1 when the result text (rpt) is on the list
+//     of that class, else 0 (lines 43-72). A number or a text on no list sets none.
+//   - tat: datediff(dd) from collected to tested; tat_within14 is 1 when tat <= 14, else 0 (lines 73-74).
+//   - tested_at: the testing code, a 3-character ZU code other than ZUE and ZUA becomes ZUL (lines 35-38).
+//   - disalink: 1 when a pre-registration facility code is present, or the referring request id starts
+//     with a known 5-character facility code that is not a number (lines 41-42).
+//   - poc: observation PGHIV on the result row, or a numeric testing code, or a lab id whose first 3
+//     characters are numeric (line 75). poc_w48h: poc and datediff(hh) from collected to tested <= 24 (line 76).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - invalid lists 'VALID', not 'INVAL' (line 59); 'INVAL' sets no class.
+//   - poc_w48h tests 24 hours, although its name says 48, and counts hour boundaries, not elapsed time.
+//   - tat counts date boundaries of the LOCAL dates, each date taken from the stamp's own text, not
+//     shifted to UTC. tat_within14 is 0, not NULL, when tat is NULL.
+//   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
+//   - disalink does not count a referring id that starts with digits; hivvl's line does (line 41 has no such term).
+//   - tested_at: SQL Server LIKE ignores trailing blanks in the matched text, so 'ZUB ' also becomes ZUL.
+//   - Partial stamps ('2026-07') give NULL TAT and never raise. A date-only stamp gives its date.
+//   - v1's table has narrow columns (lab_id 26, tested_at 10, facility 50); a longer value would stop v1's
+//     insert. The port does not cut.
+//
+// CE gaps:
+//   - ReceivingFacilityCode is not carried (ruling 7). receiving_code is a NULL column in the first CTE, so
+//     the v1 expressions keep their form. tested_at uses only the testing code (the performer). referral is
+//     NULL (v1 gives 0 for a blank code, line 40); when a receiving code arrives it follows line 39 (1 or 0).
+//   - Disalink reads the request attributes prereg-registration-facility (LIMSPreReg_RegistrationFacilityCode)
+//     and referring-request-id (ReferringRequestID). cdr-toolchain does not fill them yet, so disalink is 0
+//     until it does. v1's facility list is the mapped facility_map codes.
+export function eidCte(name, { from, to } = {}) {
+  if ((from === undefined) !== (to === undefined)) throw new Error('eidCte: give both from and to, or neither');
+  const windowed = from !== undefined && to !== undefined;
+  const result = rpt('l');
+  // Rows of the lab ids that have a report issued in the window: the dedupe needs their other rows too.
+  const prefilter = windowed
+    ? `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`
+    : '';
+  const finalRange = windowed ? `and ${inRange('r.tested_date', from, to)}` : '';
+  const flag = (words) => `case when ${inListSql('r.result_text', words)} then 1 else 0 end`;
+  return `${name} as (
+  with ${name}_src as (
+    select lr.id as request_row_id, dr.id as report_row_id, l.id as result_row_id, lr.request_id as lab_id,
+      fmr.region as province, fmr.district as district, fmr.name as facility,
+      p.sex, lr.age_days,
+      dr.issued as tested_date, lr.analysis_at as run_date, s.received_time as recieved_date,
+      lr.authored_at as registered_date, dr.effective as collected_date,
+      dr.performer as testing_code, null::text as receiving_code,
+      l.observation_code as obs_code, ${result} as result_text
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr')}
+    join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join specimens s on s.id = dr.specimen_id
+    left join patients p on p.id = lr.patient_id
+    where ${inListSql('lr.panel_code', ['HIVPC', 'POCGH', 'POEID'])}
+      and ${inListSql('l.observation_code', ['HIVPC', 'HIVPR', 'PGHIV'])}
+      and dr.status = 'final'
+      ${prefilter}
+  ),
+  ${name}_ranked as (
+    select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
+    from ${name}_src s
+  )
+  select r.province, r.district, r.facility, r.lab_id,
+    case upper(rtrim(r.sex)) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end as gender,
+    case
+      when r.age_days between 0 and 6 then 'At Birth'
+      when r.age_days between 7 and 48 then '1 - 6 Weeks'
+      when r.age_days between 49 and 209 then '7 weeks to 6 Months'
+      when r.age_days between 210 and 299 then '7 - 9 Months'
+      when r.age_days between 300 and 389 then '10 - 12 Months'
+      when r.age_days between 390 and 569 then '13 - 18 Months'
+      when r.age_days between 570 and 749 then '19 - 24 Months'
+      when r.age_days >= 750 then '> 2 years'
+    end as age_group,
+    r.tested_date,
+    ${flag(EID_POSITIVE)} as positive,
+    c.tat,
+    case when c.tat <= 14 then 1 else 0 end as tat_within14,
+    r.run_date, r.recieved_date, r.registered_date, r.collected_date,
+    case when rtrim(c.base_code) ilike 'ZU_' and ${foldSql('r.testing_code')} not in ('zue', 'zua') then 'ZUL' else c.base_code end as tested_at,
+    case
+      when r.receiving_code is null then null::int
+      when length(rtrim(r.receiving_code)) > 0 and ${foldSql('r.receiving_code')} <> ${foldSql('r.testing_code')} then 1
+      else 0
+    end as referral,
+    case
+      when length(rtrim(c.prereg_facility)) > 0 then 1
+      when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql('left(c.referring_id, 5)')})
+        and not ${isNumericSql('left(c.referring_id, 5)')} then 1
+      else 0
+    end as disalink,
+    ${flag(EID_ERROR)} as error,
+    ${flag(EID_INVALID)} as invalid,
+    ${flag(EID_NEGATIVE)} as negative,
+    ${flag(EID_INDETERMINATE)} as indeterminate,
+    case when c.is_poc then 1 else 0 end as poc,
+    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
+  from ${name}_ranked r
+  cross join lateral (select
+    ${localDate('r.tested_date')} - ${localDate('r.collected_date')} as tat,
+    extract(epoch from date_trunc('hour', ${utcTs('r.tested_date')}) - date_trunc('hour', ${utcTs('r.collected_date')})) / 3600 as hours_taken,
+    ${foldSql('r.obs_code')} = 'pghiv' or ${isNumericSql('r.testing_code')} or ${isNumericSql('left(r.lab_id, 3)')} as is_poc,
+    case when length(rtrim(r.testing_code)) = 0 then r.receiving_code else r.testing_code end as base_code,
+    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'prereg-registration-facility') as prereg_facility,
+    (select max(a.value_text) from lab_request_attributes a where a.lab_request_id = r.request_row_id and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = 'referring-request-id') as referring_id) c
+  where r.seq = 1
+    ${finalRange}
+)`;
+}
