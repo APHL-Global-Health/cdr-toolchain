@@ -18,6 +18,9 @@ suites.push(caseSuite('art-number', ['ref', 'uq'], [
   { ref: 'ART12345,ELABS 99', uq: 'U', expected: '12345' },
   // v1 raises an error here (RIGHT with a negative length). The port gives ''.
   { ref: 'AB,ELABS', uq: 'U', expected: '' },
+  // v1's LEN ignores trailing spaces but RIGHT counts them.
+  { ref: ',ELABS 12AT.3456 ', uq: 'U', expected: '456 ' },
+  { ref: 'ART12345 ,ELABS 99', uq: 'U', expected: '2345 ' },
   { ref: '', uq: 'AB-12 34', expected: 'AB1234' },
   { ref: ' , AT. ', uq: 'Q-1', expected: 'Q1' },
   { ref: 'ART.555', uq: 'AB-1', expected: 'AB1' },
