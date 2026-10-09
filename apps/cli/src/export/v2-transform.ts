@@ -340,6 +340,11 @@ function buildLabRequest(
   if (codes.therapy !== null && therapyText !== null) attributes.push({ code: codes.therapy, valueString: therapyText });
   const folderNo = nz(s.FolderNo);
   if (codes.folderNumber !== null && folderNo !== null) attributes.push({ code: codes.folderNumber, valueString: folderNo });
+  // v1 Patients.REFNO and UNIQUEID, which Zambia's reports build the ART number from.
+  const referenceNumbers = nz(s.ReferenceNumber);
+  if (codes.referenceNumbers !== null && referenceNumbers !== null) attributes.push({ code: codes.referenceNumbers, valueString: referenceNumbers });
+  const uniqueId = nz(s.UniqueID);
+  if (codes.uniqueId !== null && uniqueId !== null) attributes.push({ code: codes.uniqueId, valueString: uniqueId });
   if (codes.newborn !== null && registration.newborn) attributes.push({ code: codes.newborn, valueBoolean: true });
 
   // Facts v2 has no field for. Only keys with a value are sent.
