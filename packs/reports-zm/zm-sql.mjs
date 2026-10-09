@@ -755,3 +755,500 @@ export function tbgnxCte(name, { from, to } = {}) {
   where ${foldSql('r.tested_at')} <> '000'
 )`;
 }
+
+// ---- Small v1 functions used by the recency and request tables ----
+
+// The gender case of the recency tables (sp_getTestLevelRecency_CIDRZ lines 21-27, sp_recency_surveillance lines
+// 29-35): F, M, U and I; everything else, and a missing sex, is 'Missing'. The compare ignores case and trailing
+// spaces, as SQL Server does.
+export const genderMissingSql = (sexExpr) => `case upper(rtrim(${sexExpr})) when 'F' then 'Female' when 'M' then 'Male' when 'U' then 'Unknown' when 'I' then 'Indeterminate' else 'Missing' end`;
+
+// v1 datepart(wk, d) for a DATE expression: the US week, Sunday first, week 1 holds 1 January (SQL Server's default
+// DATEFIRST 7). NULL for a NULL date. These are not ISO weeks: week 1 and the last week are partial.
+export const dateWeekSql = (dateExpr) => `((extract(doy from ${dateExpr})::int - 1 + extract(dow from make_date(extract(year from ${dateExpr})::int, 1, 1))::int) / 7 + 1)`;
+
+// A result text as a number after v1's REPLACE(x, ',', ''), or NULL when SQL Server's ISNUMERIC would say no. A
+// currency sign is not parsed: v1's CONVERT(float, '$5') fails, so such a text has no number here. The exponent has at
+// most three digits.
+const NUMBER_TEXT = String.raw`^\s*[-+]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?\s*$`;
+const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
+
+// ---- The recency and recency_surveillance copy tables ----
+
+// Panels and observations of both procedures (sp_getTestLevelRecency_CIDRZ lines 58, 66; sp_recency_surveillance
+// lines 64, 73). The surveillance list has no HIVTM.
+const RECENCY_PANEL = 'RTRI';
+const BASELINE_PANEL = 'HIVVL';
+const RECENCY_OBSERVATIONS = ['RTRI', 'HIVVL', 'HIVVC', 'HIVVD', 'HIVTM'];
+const SURVEILLANCE_OBSERVATIONS = ['RTRI', 'HIVVL', 'HIVVC', 'HIVVD'];
+const BASELINE_OBSERVATIONS = ['HIVVL', 'HIVVC', 'HIVVD', 'HIVTM'];
+// sp_getTestLevelRecency_CIDRZ line 71 and sp_recency_surveillance lines 159-162. The two lists differ.
+const RECENCY_SUPPRESSED = ['< 20', '<20 copies/mL', 'Target Not Detected', '<30 copies/mL', '<40 copies/mL', '<400 copies/mL', '<400', '<883 copies/mL'];
+const SURVEILLANCE_SUPPRESSED = ['< 20', '<20 copies/mL', 'Target Not Detected', '<30 copies/mL', '<400 copies/mL', '<400', '<40 copies/mL'];
+// sp_recency_surveillance line 124.
+const MODALITIES = ['PMTCT', 'VCT', 'PITC', 'VMMC', 'Other', 'Index'];
+// sp_getTestLevelRecency_CIDRZ lines 86-98: the first three characters of a lab number name the testing lab.
+const RECENCY_LAB_PREFIXES = [['ZAP', 'Arthur Davison Childrens Hospital Lab'], ['ZKT', 'Kitwe Teaching Hospital Lab'],
+  ['ZUE', 'UTH HAP PCOE Lab'], ['ZUA', 'UTH HAP ACOE Lab'], ['ZUL', 'UTH Virology Lab'], ['ZUF', 'UTH Virology Lab'],
+  ['ZCH', 'CHAZ Complex Lab'], ['ZFP', 'Levy Mwanawasa UTH Lab'], ['ZBP', 'Kabwe General Hospital Lab'],
+  ['ZCM', 'Choma General Hospital Lab'], ['ZMB', 'Mazabuka General Hospital Lab'],
+  ['ZLR', 'Livingstone Teaching Hospital Lab'], ['ZLP', 'Livingstone Teaching Hospital Lab']];
+
+// The lab numbers that have an RTRI request registered in the window (sp_getTestLevelRecency_CIDRZ lines 59-62,
+// sp_recency_surveillance lines 65-69). `finalRange` is the window on lr.authored_at ('' without a window).
+const recencyIdsSql = (finalRange) => `select distinct lr.request_id as lab_id
+    from lab_requests lr
+    where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
+      ${finalRange}`;
+
+// A request row is used when its lab number has such an RTRI request and the row itself is registered in the window
+// (sp_getTestLevelRecency_CIDRZ lines 59-63).
+const recencyScopeSql = (ids, finalRange) => `lr.request_id in (select i.lab_id from ${ids} i)
+      ${finalRange}`;
+
+// The suppression status of a baseline viral load text. `words` is the suppressed list and `unsuppressedText` the SQL
+// for the extra "unsuppressed" test on the text (the two procedures differ). A number under 1000 is suppressed and a
+// number from 1000 up is not. A text that is no number and on no list gives NULL.
+const suppressionSql = (vl, words, unsuppressedText) => {
+  const n = numberOfTextSql(vl);
+  return `case
+      when (${vl} is not null and not ${isNumericSql(vl)} and ${inListSql(vl, words)}) or ${n} < 1000 then 'Suppressed'
+      when ${n} >= 1000 or ${unsuppressedText} then 'UnSuppressed'
+    end`;
+};
+
+// The reporting status from the recency result and the suppression status (sp_getTestLevelRecency_CIDRZ lines
+// 117-122, sp_recency_surveillance lines 175-180).
+const reportingStatusSql = (recency, suppression) => `case
+      when ${foldSql(recency)} = 'long term' then 'Long-Term RTRI'
+      when ${foldSql(recency)} = 'recent' and ${suppression} is null then 'Recent RTRI'
+      when ${foldSql(recency)} = 'recent' and ${suppression} = 'Suppressed' then 'Confirmed Long-Term'
+      when ${foldSql(recency)} = 'recent' and ${suppression} = 'UnSuppressed' then 'Confirmed Recent'
+    end`;
+
+// Zambia's `Recency` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   recencyCte('rc')                              all rows
+//   recencyCte('rc', { from: 'from', to: 'to' })  only RTRI requests registered in the window; the two values are
+//                                                 parameter names, compared as in inRange
+// v1 sp_getTestLevelRecency_CIDRZ drops the table and fills it again on every run. The CTE returns what the table
+// holds after a run. get_Test_level_Recency and get_Test_level_Recency_ZNPHI read it (and tb_edits, see the gaps).
+//
+// Window: the REGISTERED date, lab_requests.authored_at (v1 RegisteredDateTime, lines 61 and 63). v1's fixed window
+// is 2023-10-01 to the end of the current week; the caller passes it as from and to. v1 starts at 00:00:00.001, so a
+// request registered exactly at midnight on the first day is out in v1; here the whole first day is in. A lab number
+// is in the report when one of its RTRI requests is registered in the window. Every row used (the RTRI row, the
+// HIVVL rows) must itself be registered in the window. The answers (modality and the rest) have no window.
+//
+// Columns, in the order of Table__dbo_Recency.sql, in snake_case:
+//   province, district, facility, moh_facility_code, ip, lab_id, gender, age_in_years, recency_result,
+//   baseline_vl_result, suppression_status, testing_laboratory, sample_collection_date, date_registered, tested_date,
+//   reviewed_date, reporting_status, modality, pregnant, breastfeeding, recency_test_date
+// The four dates are CE's ISO text. sample_collection_date = diagnostic_reports.effective (SpecimenDateTime),
+// date_registered = lab_requests.authored_at, tested_date = lab_requests.analysis_at (AnalysisDateTime, line 42) and
+// reviewed_date = diagnostic_reports.issued (AuthorisedDateTime, line 43).
+//
+// Rules, with v1 lines:
+//   - One row per RTRI-panel request row and result row whose observation is RTRI, HIVVL, HIVVC, HIVVD or HIVTM
+//     (lines 58, 66), left-joined to the result rows of the lab number's HIVVL-panel requests (lines 105-111). There
+//     is no test on the report status. The requesting facility must be mapped to a ZMFAC register row with a province
+//     (line 112; v1 left-joins its dictionary and then drops rows with no province).
+//   - recency_result is the result text (rpt) of the RTRI observation, else NULL (line 30). baseline_vl_result is the
+//     text of a HIVVL, HIVVC, HIVVD or HIVTM observation of the HIVVL-panel rows (line 33).
+//   - suppression_status (lines 70-74): a text on the list of eight, or a number under 1000, is 'Suppressed'; a number
+//     of 1000 or more, or the text '> 10000000', is 'UnSuppressed'; anything else, and no baseline, is NULL.
+//   - reporting_status (lines 117-122): 'Long Term' is 'Long-Term RTRI'; 'Recent' with no suppression status is
+//     'Recent RTRI'; 'Recent' and Suppressed is 'Confirmed Long-Term'; 'Recent' and UnSuppressed is 'Confirmed
+//     Recent'; any other recency result gives NULL.
+//   - gender: F, M, U, I, else 'Missing' (lines 21-27). age_in_years is lab_requests.age_years.
+//   - modality is the RTMOD result, pregnant the VPREG or ARTPR result, breastfeeding the VBREA result and
+//     recency_test_date the RTRTD result, all taken from RTRI-panel rows of the lab number (lines 123-148). RTRI is
+//     a lab panel in Zambia, so these are lab results, not form answers.
+//   - testing_laboratory: the first three characters of the lab number name 13 labs (lines 85-100). Any other prefix
+//     takes the name of ruling 8: the report's display, else the mapped register name, else the performer's code.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Rows multiply. A lab number with two HIVVL results gives one row per baseline result. Two answers to one question
+//     (VPREG and ARTPR together, or two OBR sets) give one row each.
+//   - An RTRI-panel result with another observation (HIVVL in the RTRI panel) is a row with an empty recency_result,
+//     an empty baseline_vl_result and an empty reporting_status. The baseline is read from HIVVL-panel rows only.
+//   - The HIVVL-panel rows need no mapped facility. Only the RTRI row does.
+//   - Text compares ignore case and trailing spaces, as SQL Server does. Values come through as stored.
+//   - A text on no list stays: 'Failed' is a baseline with no suppression status.
+//   - '<883 copies/mL' is on the suppressed list here, but not in recencySurveillanceCte's.
+//   - The compare reads the result TEXT. A number with a comparator reads as its text ('< 20', '> 10000000').
+//
+// CE gaps and deviations:
+//   - ip (IPatner, the implementing partner) has no CE source (ruling 7): the column is NULL.
+//   - tb_edits, v1's hand-kept patch table, is not available (ruling 7). get_Test_level_Recency lets a patch fill an
+//     empty baseline. Here the column stays as this table has it.
+//   - moh_facility_code is the national code of the mapped register row (the MFL code in ZMFAC).
+//   - recency_test_date: v1 reads LabResults.DateTimeValue, which CE does not carry. The text is in the result (v1
+//     LIMSRptResult holds the same text for 30,198 of 33,004 rows). The column is the reported text of the RTRTD
+//     result, as sent ('01/03/2013' stays that), not a date.
+//   - Dates are CE's ISO text with the offset DISA wrote. v1's are datetimes.
+//   - The 13 hardcoded lab prefixes are v1's. Any other lab number differs from v1 where Zambia's Laboratories
+//     dictionary names a lab differently from the report (ruling 8).
+export function recencyCte(name, { from, to } = {}) {
+  const { finalRange } = copyWindow('recencyCte', from, to, 'lr.authored_at');
+  const scope = recencyScopeSql(`${name}_ids`, finalRange);
+  const result = rpt('l');
+  const answerJoin = (alias, test) => `left join ${name}_ans ${alias} on ${alias}.lab_id = s.lab_id and ${alias}.obs ${test}`;
+  return `${name} as (
+  with ${name}_ids as (
+    ${recencyIdsSql(finalRange)}
+  ),
+  ${name}_a as (
+    select fmr.region as province, fmr.district as district, fmr.name as facility, fmr.national_code as moh_facility_code,
+      lr.request_id as lab_id, ${genderMissingSql('p.sex')} as gender, lr.age_years as age_in_years,
+      case when ${inListSql('l.observation_code', ['RTRI'])} then ${result} end as recency_result,
+      case ${RECENCY_LAB_PREFIXES.map(([prefix, lab]) => `when ${foldSql('left(lr.request_id, 3)')} = ${sqlLit(prefix.toLowerCase())} then ${sqlLit(lab)}`).join(' ')}
+        else ${labNameSql('dr')} end as testing_laboratory,
+      dr.effective as sample_collection_date, lr.authored_at as date_registered,
+      lr.analysis_at as tested_date, dr.issued as reviewed_date
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr')}
+    left join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join patients p on p.id = lr.patient_id
+    where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
+      and ${inListSql('l.observation_code', RECENCY_OBSERVATIONS)}
+      and fmr.region is not null
+      and ${scope}
+  ),
+  ${name}_b as (
+    select lr.request_id as lab_id,
+      case when ${inListSql('l.observation_code', BASELINE_OBSERVATIONS)} then ${result} end as baseline_vl_result
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    where ${inListSql('lr.panel_code', [BASELINE_PANEL])}
+      and ${inListSql('l.observation_code', RECENCY_OBSERVATIONS)}
+      and ${scope}
+  ),
+  ${name}_ans as (
+    select lr.request_id as lab_id, ${foldSql('l.observation_code')} as obs, ${result} as answer
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
+      and ${inListSql('l.observation_code', ['RTMOD', 'VPREG', 'ARTPR', 'VBREA', 'RTRTD'])}
+      and lr.request_id in (select i.lab_id from ${name}_ids i)
+  ),
+  ${name}_s as (
+    select a.*, b.baseline_vl_result,
+      ${suppressionSql('b.baseline_vl_result', RECENCY_SUPPRESSED, `${foldSql('b.baseline_vl_result')} = '> 10000000'`)} as suppression_status
+    from ${name}_a a
+    left join ${name}_b b on b.lab_id = a.lab_id
+  )
+  select s.province, s.district, s.facility, s.moh_facility_code, null::text as ip, s.lab_id, s.gender, s.age_in_years,
+    s.recency_result, s.baseline_vl_result, s.suppression_status, s.testing_laboratory,
+    s.sample_collection_date, s.date_registered, s.tested_date, s.reviewed_date,
+    ${reportingStatusSql('s.recency_result', 's.suppression_status')} as reporting_status,
+    x.answer as modality, y.answer as pregnant, z.answer as breastfeeding, q.answer as recency_test_date
+  from ${name}_s s
+  ${answerJoin('x', "= 'rtmod'")}
+  ${answerJoin('y', "in ('vpreg', 'artpr')")}
+  ${answerJoin('z', "= 'vbrea'")}
+  ${answerJoin('q', "= 'rtrtd'")}
+)`;
+}
+
+// Zambia's `Recency_Surveillance` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   recencySurveillanceCte('rs')                              all rows
+//   recencySurveillanceCte('rs', { from: 'from', to: 'to' })  only RTRI requests registered in the window
+// v1 sp_recency_surveillance drops the table and fills it again on every run. get_Test_level_Recency_Surveillance is
+// `select *` from it. The CTE returns what the table holds after a run. It has no order (v1's table has none); the
+// query that reads it must order by every column.
+//
+// Window: the REGISTERED date, lab_requests.authored_at (lines 67 and 70), as in recencyCte. v1's fixed window is
+// 2023-10-01 to the end of the current week.
+//
+// Columns, in the order of Table__dbo_Recency_Surveillance.sql, in snake_case:
+//   province, district, facility, implementing_partner, age_group, gender, recency_result, suppression_status,
+//   reporting_status, modality, reg_year, reg_quarter, month, week, count
+//
+// Rules, with v1 lines:
+//   - The rows are the RTRI-panel request rows and result rows with observation RTRI, HIVVL, HIVVC or HIVVD (line 73;
+//     no HIVTM, unlike recencyCte). Each is left-joined to the RTMOD rows of the lab number (lines 115-154, either
+//     panel) and to the result rows of its HIVVL-panel requests (lines 155-172). The requesting facility must be
+//     mapped to a ZMFAC register row with a province (line 189).
+//   - recency_result is the RTRI result text. The baseline is the text of a HIVVL, HIVVC or HIVVD observation of the
+//     HIVVL-panel rows (line 41); it is not a column, only the suppression status is.
+//   - modality is the RTMOD result when it is PMTCT, VCT, PITC, VMMC, Other or Index, else NULL (lines 124-127). A lab
+//     number with RTMOD results on both panels gives a row each.
+//   - suppression_status (lines 158-165): a text on the list of seven, or a number under 1000, is 'Suppressed'; a
+//     number of 1000 or more, or any text starting with '>', is 'UnSuppressed'; anything else is NULL.
+//   - reporting_status as in recencyCte (lines 175-180).
+//   - age_group (lines 17-28): '15 - 19', '20 - 24', ..., '45 - 49' (with spaces), '50+' for over 50, 'Missing' for no
+//     age, and '<15' for everything else.
+//   - gender as in recencyCte (lines 29-35).
+//   - reg_year, reg_quarter, month and week come from the RTRI row's registered date (lines 47-50). The date is the
+//     LOCAL date, taken from the stamp's own text. week is datepart(wk): the US week, Sunday first (dateWeekSql).
+//   - count is the number of distinct lab numbers in the group (line 186).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Age 50 is '<15': the test is "over 50" (line 25). Ages under 15, age 0 and negative ages are '<15' too.
+//   - An RTRI-panel result with another observation (HIVVD in the RTRI panel) is a row with an empty recency_result,
+//     an empty suppression_status and an empty reporting_status.
+//   - A lab number with baseline results in two classes counts once in each group.
+//   - Text compares ignore case and trailing spaces, as SQL Server does. modality and recency_result come through as
+//     stored ('vct' stays 'vct').
+//   - '<883 copies/mL' is not on this list, so it gives no suppression status (recencyCte counts it as suppressed).
+//
+// CE gaps and deviations:
+//   - implementing_partner has no CE source (ruling 7): the column is NULL.
+//   - v1 converts the baseline to INT (line 162). That stops the whole procedure on a decimal ('540.5') or a number over
+//     2,147,483,647. A procedure that stops gives no output, so the port reads the text as a number and a decimal is
+//     under or over 1000 as it looks.
+//   - v1 groups the rows once before the joins (lines 74-111). The counts are of distinct lab numbers, so that step
+//     cannot change them and is left out.
+//   - v1 groups with SQL Server's default collation, so 'VCT' and 'vct', or 'Recent' and 'recent ', fall in one group.
+//     The port groups on the exact text. Real data come in one spelling; the checks avoid mixed spellings in a group.
+//   - Dates are CE's ISO text; the local date comes from the text with no UTC shift.
+export function recencySurveillanceCte(name, { from, to } = {}) {
+  const { finalRange } = copyWindow('recencySurveillanceCte', from, to, 'lr.authored_at');
+  const scope = recencyScopeSql(`${name}_ids`, finalRange);
+  const result = rpt('l');
+  const age = '(lr.age_years)';
+  return `${name} as (
+  with ${name}_ids as (
+    ${recencyIdsSql(finalRange)}
+  ),
+  ${name}_y as (
+    select lr.request_id as lab_id, fmr.region as province, fmr.district as district, fmr.name as facility,
+      case
+        when ${age} between 15 and 19 then '15 - 19'
+        when ${age} between 20 and 24 then '20 - 24'
+        when ${age} between 25 and 29 then '25 - 29'
+        when ${age} between 30 and 34 then '30 - 34'
+        when ${age} between 35 and 39 then '35 - 39'
+        when ${age} between 40 and 44 then '40 - 44'
+        when ${age} between 45 and 49 then '45 - 49'
+        when ${age} > 50 then '50+'
+        when ${age} is null then 'Missing'
+        else '<15'
+      end as age_group,
+      ${genderMissingSql('p.sex')} as gender,
+      case when ${inListSql('l.observation_code', ['RTRI'])} then ${result} end as recency_result,
+      ${localDate('lr.authored_at')} as reg_date
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr')}
+    left join patients p on p.id = lr.patient_id
+    where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
+      and ${inListSql('l.observation_code', SURVEILLANCE_OBSERVATIONS)}
+      and fmr.region is not null
+      and ${scope}
+  ),
+  ${name}_z as (
+    select lr.request_id as lab_id,
+      case when ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVVD'])} then ${result} end as baseline_vl_result
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    where ${inListSql('lr.panel_code', [BASELINE_PANEL])}
+      and ${inListSql('l.observation_code', SURVEILLANCE_OBSERVATIONS)}
+      and ${scope}
+  ),
+  ${name}_xb as (
+    select lr.request_id as lab_id, case when ${inListSql(result, MODALITIES)} then ${result} end as modality
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    where ${inListSql('lr.panel_code', [RECENCY_PANEL, BASELINE_PANEL])}
+      and ${inListSql('l.observation_code', ['RTMOD'])}
+      and ${scope}
+  ),
+  ${name}_alpha as (
+    select y.province, y.district, y.facility, y.age_group, y.gender, y.lab_id, y.recency_result,
+      ${suppressionSql('z.baseline_vl_result', SURVEILLANCE_SUPPRESSED, "z.baseline_vl_result like '>%'")} as suppression_status,
+      xb.modality,
+      extract(year from y.reg_date)::int as reg_year, extract(quarter from y.reg_date)::int as reg_quarter,
+      extract(month from y.reg_date)::int as month, ${dateWeekSql('y.reg_date')} as week
+    from ${name}_y y
+    left join ${name}_xb xb on xb.lab_id = y.lab_id
+    left join ${name}_z z on z.lab_id = y.lab_id
+  )
+  select a.province, a.district, a.facility, null::text as implementing_partner, a.age_group, a.gender, a.recency_result,
+    a.suppression_status, ${reportingStatusSql('a.recency_result', 'a.suppression_status')} as reporting_status,
+    a.modality, a.reg_year, a.reg_quarter, a.month, a.week, count(distinct a.lab_id)::int as count
+  from ${name}_alpha a
+  group by a.province, a.district, a.facility, a.age_group, a.gender, a.recency_result, a.suppression_status,
+    ${reportingStatusSql('a.recency_result', 'a.suppression_status')}, a.modality, a.reg_year, a.reg_quarter, a.month, a.week
+)`;
+}
+
+// ---- The VLEIDRequests copy table ----
+
+// sp_UpdateVLEIDRequests line 23.
+const VLEID_PANELS = ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'];
+
+// The window columns of vleidRequestsCte, `on`: [on a request row, on a VIRAL row]. A VIRAL row has no analysis or
+// authorised date, so it is out of a window on either.
+const VLEID_WINDOWS = {
+  registered: ['lr.authored_at', 'lr.authored_at'],
+  period: ['coalesce(dr.effective, s.received_time, lr.authored_at)', 'coalesce(dr.effective, s.received_time, lr.authored_at)'],
+  analysis: ['lr.analysis_at', 'null::text'],
+  authorised: ['dr.issued', 'null::text'],
+};
+
+// The table's columns, in order: [column, the select item of a request row, the select item of a VIRAL row (the
+// same when left out)]. `lr` is the lab request, `dr` its report, `s` the report's specimen, `p` the patient.
+const VLEID_COLUMNS = [
+  ['date_time_stamp', 'null::text'],
+  ['versionstamp', 'null::text'],
+  ['lims_date_time_stamp', 'null::text'],
+  ['lims_versionstamp', 'null::text'],
+  ['request_id', 'lr.request_id'],
+  ['obr_set_id', 'lr.obr_set_id'],
+  ['loinc_panel_code', 'null::text'],
+  ['lims_panel_code', 'lr.panel_code', "'VIRAL'::text"],
+  ['lims_panel_desc', 'lr.panel_desc', 'null::text'],
+  ['hl7_priority_code', `case ${foldSql('lr.priority')} when 'routine' then 'R' when 'urgent' then 'U' when 'stat' then 'S' end`],
+  ['specimen_date_time', 'dr.effective'],
+  ['registered_date_time', 'lr.authored_at'],
+  ['received_date_time', 's.received_time'],
+  ['analysis_date_time', 'lr.analysis_at', 'null::text'],
+  ['authorised_date_time', 'dr.issued', 'null::text'],
+  ['admit_attend_date_time', 'null::text'],
+  ['collection_volume', 'null::float8'],
+  ['requesting_facility_code', 'lr.requester_code'],
+  ['receiving_facility_code', 'null::text'],
+  ['lims_point_of_care_desc', 'lr.point_of_care'],
+  ['request_type_code', 'lr.request_type'],
+  ['icd10_clinical_info_codes', 'null::text'],
+  ['clinical_info', 'lr.clinical_info'],
+  ['hl7_specimen_source_code', 'null::text'],
+  ['lims_specimen_source_code', 's.type_code'],
+  ['lims_specimen_source_desc', 's.type_text'],
+  ['hl7_specimen_site_code', 'null::text'],
+  ['lims_specimen_site_code', 'null::text'],
+  ['lims_specimen_site_desc', 'null::text'],
+  ['work_units', 'null::float8'],
+  ['cost_units', 'null::float8'],
+  ['hl7_section_code', 'dr.section_code', 'null::text'],
+  ['hl7_result_status_code', `case ${foldSql('dr.status')} when 'final' then 'F' when 'cancelled' then 'X' end`, 'null::text'],
+  ['registered_by', 'lr.registered_by'],
+  ['tested_by', 'lr.tested_by', 'null::text'],
+  ['authorised_by', 'dr.authorised_by', 'null::text'],
+  ['ordering_notes', 'null::text'],
+  ['encrypted_patient_id', 'null::text'],
+  ['age_in_years', 'lr.age_years'],
+  ['age_in_days', 'lr.age_days'],
+  ['hl7_sex_code', 'p.sex'],
+  ['hl7_ethnic_group_code', 'null::text'],
+  ['deceased', 'null::boolean'],
+  ['newborn', 'null::boolean'],
+  ['hl7_patient_class_code', 'null::text'],
+  ['attending_doctor', 'lr.requester_practitioner'],
+  ['testing_facility_code', 'dr.performer'],
+  ['referring_request_id', requestAttrSql('lr.id', 'referring-request-id')],
+  ['therapy', 'null::text'],
+  ['lims_analyzer_code', 'lr.analyzer_code', 'null::text'],
+  ['target_time_days', 'null::int'],
+  ['target_time_mins', 'null::int'],
+  ['lims_rejection_code', 'lr.rejection_code', 'null::text'],
+  ['lims_rejection_desc', 'lr.rejection_reason', 'null::text'],
+  ['lims_facility_code', 'lr.requester_code'],
+  ['repeated', 'null::int'],
+];
+
+// Zambia's `VLEIDRequests` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   vleidRequestsCte('vl')                                         all rows
+//   vleidRequestsCte('vl', { from: 'from', to: 'to' })             only rows registered in the window
+//   vleidRequestsCte('vl', { from: 'from', to: 'to', on: 'period' })  the window is on another date (see below)
+// v1 sp_UpdateVLEIDRequests merges every Requests row of four panels into the table (lines 19-87); it never deletes.
+// The CTE returns what the table holds when it is up to date: one row per lab request row (request number and OBR
+// set) of the panels HIVPC, HIVST, HIVVL and VIRAL (line 23), plus the VIRAL rows below. The view `Requests` of
+// Zambia's reporting database is `select *` from this table; vReceivedRequestsSummary, vVLReportData and
+// vVLReportDatab read it.
+//
+// Window: `from` and `to` are parameter names, compared as in inRange (the local date of the stamp). The window only
+// limits the rows read; each consumer applies its own v1 edges on top. `on` picks the date column:
+//   'registered' (the default)  lab_requests.authored_at, v1 RegisteredDateTime
+//   'period'                    coalesce(specimen date, received date, registered date), the date vWeeklyRequestTrend
+//                               groups on. vReceivedRequestsSummary leaves the received date out of its coalesce, so
+//                               for that one read with a wider window and filter in the query.
+//   'analysis'                  lab_requests.analysis_at, v1 AnalysisDateTime
+//   'authorised'                diagnostic_reports.issued, v1 AuthorisedDateTime
+// A bad `on`, or only one of from and to, throws.
+//
+// Columns, in the order of Table__dbo_VLEIDRequests.sql (56 columns), in snake_case: date_time_stamp, versionstamp,
+// lims_date_time_stamp, lims_versionstamp, request_id, obr_set_id, loinc_panel_code, lims_panel_code, lims_panel_desc,
+// hl7_priority_code, specimen_date_time, registered_date_time, received_date_time, analysis_date_time,
+// authorised_date_time, admit_attend_date_time, collection_volume, requesting_facility_code, receiving_facility_code,
+// lims_point_of_care_desc, request_type_code, icd10_clinical_info_codes, clinical_info, hl7_specimen_source_code,
+// lims_specimen_source_code, lims_specimen_source_desc, hl7_specimen_site_code, lims_specimen_site_code,
+// lims_specimen_site_desc, work_units, cost_units, hl7_section_code, hl7_result_status_code, registered_by, tested_by,
+// authorised_by, ordering_notes, encrypted_patient_id, age_in_years, age_in_days, hl7_sex_code, hl7_ethnic_group_code,
+// deceased, newborn, hl7_patient_class_code, attending_doctor, testing_facility_code, referring_request_id, therapy,
+// lims_analyzer_code, target_time_days, target_time_mins, lims_rejection_code, lims_rejection_desc, lims_facility_code,
+// repeated
+// The five date-time columns are CE's ISO text (specimen_date_time = diagnostic_reports.effective, registered_date_time
+// = lab_requests.authored_at, received_date_time = specimens.received_time, analysis_date_time = lab_requests.analysis_at,
+// authorised_date_time = diagnostic_reports.issued). The load stamps are NULL.
+//
+// From where, column by column:
+//   lab_requests:        request_id, obr_set_id, lims_panel_code (panel_code), lims_panel_desc, registered_date_time,
+//                        analysis_date_time, requesting_facility_code and lims_facility_code (both requester_code),
+//                        lims_point_of_care_desc, request_type_code, clinical_info, registered_by, tested_by,
+//                        attending_doctor (requester_practitioner), age_in_years, age_in_days, lims_analyzer_code,
+//                        lims_rejection_code, lims_rejection_desc (rejection_reason)
+//   diagnostic_reports:  specimen_date_time (effective), authorised_date_time (issued), hl7_section_code,
+//                        authorised_by, testing_facility_code (performer), hl7_result_status_code
+//   specimens:           received_date_time, lims_specimen_source_code (type_code), lims_specimen_source_desc (type_text)
+//   patients:            hl7_sex_code (sex, as stored)
+//   request attribute:   referring_request_id ('referring-request-id'; cdr-toolchain does not fill it yet, so it is
+//                        NULL until it does)
+//   computed:            hl7_priority_code (CE holds the FHIR word that cdr made from R, U and S: routine, urgent, stat
+//                        become R, U, S again; anything else is NULL), hl7_result_status_code (final is F, cancelled is
+//                        X; CE folds every other v1 status to unknown, so those are NULL)
+//
+// VIRAL (spec ruling 6): cdr-toolchain sends Zambia's VIRAL panel as a form, not as a request (config/zambia.yaml). CE
+// has no lab_requests row with the panel VIRAL; it has a questionnaire_responses row of form hiv_vl_documentation whose
+// based_on_id is the request of the specimen's first ordered panel. v1 does hold a VIRAL request, and the consumers count
+// it (vReceivedRequestsSummary counts HIVVL and VIRAL as viral load requests). So each lab request row with such a form
+// gives one more row with lims_panel_code 'VIRAL'. It copies the request's registration facts: lab number, OBR set,
+// priority, specimen, registered and received dates, facility, point of care, request type, clinical info, specimen
+// source, registered by, age, sex, doctor, testing lab, referring request id. It leaves the test's own facts NULL:
+// panel description, analysis and authorised dates, result status, section, tested by, authorised by, analyzer and
+// rejection. Several answers on one request give one VIRAL row. A form with no request, or with a request CE does not
+// hold, gives no row. If CE does hold a VIRAL lab request for the lab number, that row is the VIRAL request and the
+// form adds none. The window on a VIRAL row uses its own (copied) dates, so it is out of an 'analysis' or 'authorised'
+// window.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The table is a plain copy: no facility join, no result join, no test on the report status. A request whose
+//     facility is not in the register is a row; so is one with no report (its report columns are NULL).
+//   - The panel code and the other text come through as stored. The panel test ignores case and trailing spaces, as SQL
+//     Server's IN does ('hivvl ' is HIVVL, and keeps its text).
+//   - The merge key is RequestID and OBRSetID (line 25), so the table holds one row per request and OBR set. CE's
+//     lab_requests holds the same grain.
+//
+// CE gaps (spec ruling 7): date_time_stamp, versionstamp, lims_date_time_stamp and lims_versionstamp (v1 load stamps),
+// loinc_panel_code, hl7_specimen_source_code, the specimen site columns, admit_attend_date_time, collection_volume,
+// receiving_facility_code, icd10_clinical_info_codes, work_units, cost_units, ordering_notes, encrypted_patient_id,
+// hl7_ethnic_group_code, deceased, newborn, hl7_patient_class_code, therapy, target_time_days, target_time_mins and
+// repeated are NULL. v1 holds '' for an absent text, CE has NULL: a consumer that tests `= ''` must test for NULL too
+// (blankSql). lims_facility_code is lab_requests.requester_code: v1's LimsFacilityCode (the DISA facility) and
+// RequestingFacilityCode are one code in CE. hl7_priority_code and hl7_result_status_code are rebuilt from CE's words and
+// lose what CE folded (for status: v1's Y, Z and the like).
+export function vleidRequestsCte(name, { from, to, on = 'registered' } = {}) {
+  const windows = VLEID_WINDOWS[on];
+  if (windows === undefined) throw new Error(`vleidRequestsCte: on must be one of ${Object.keys(VLEID_WINDOWS).join(', ')}`);
+  const real = copyWindow('vleidRequestsCte', from, to, windows[0]).finalRange;
+  const viral = copyWindow('vleidRequestsCte', from, to, windows[1]).finalRange;
+  const items = (isViral) => VLEID_COLUMNS.map(([column, requestItem, viralItem]) => `${isViral && viralItem !== undefined ? viralItem : requestItem} as ${column}`).join(',\n    ');
+  const joins = `from lab_requests lr
+    left join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join specimens s on s.id = dr.specimen_id
+    left join patients p on p.id = lr.patient_id`;
+  return `${name} as (
+  select ${items(false)}
+    ${joins}
+    where ${inListSql('lr.panel_code', VLEID_PANELS)}
+      ${real}
+  union all
+  select ${items(true)}
+    ${joins}
+    where exists (select 1 from questionnaire_responses qr where qr.form_code = ${sqlLit(VL_FORM_CODE)} and qr.based_on_id = lr.id)
+      and not exists (select 1 from lab_requests v where v.request_id = lr.request_id and ${inListSql('v.panel_code', ['VIRAL'])})
+      ${viral}
+)`;
+}
