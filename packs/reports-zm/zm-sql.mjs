@@ -48,8 +48,9 @@ export const dateParams = (required = true) => [
 
 // Join a lab request (`lrAlias`) to its mapped ZMFAC register row (`fmAlias`). Requests whose
 // facility is not mapped drop out, as v1's inner joins drop facilities missing from its dictionary.
-export const requesterJoin = (lrAlias, fmAlias) =>
-  `join facility_map ${fmAlias} on ${fmAlias}.source_system = coalesce(${lrAlias}.source_system, '') and ${fmAlias}.performer_system = coalesce(${lrAlias}.requester_system, '') and ${fmAlias}.source_code = ${lrAlias}.requester_code and ${fmAlias}.registry_id is not null`;
+// `kind` 'left join' keeps them with empty facility columns, as a v1 left join does.
+export const requesterJoin = (lrAlias, fmAlias, kind = 'join') =>
+  `${kind} facility_map ${fmAlias} on ${fmAlias}.source_system = coalesce(${lrAlias}.source_system, '') and ${fmAlias}.performer_system = coalesce(${lrAlias}.requester_system, '') and ${fmAlias}.source_code = ${lrAlias}.requester_code and ${fmAlias}.registry_id is not null`;
 
 // Conditions for the optional area parameters against the mapped row `fmAlias`. Each key of `ids`
 // is the id of a parameter to apply (leave a key out to skip that filter). Returns SQL joined with
@@ -184,19 +185,41 @@ export const localTs = (x) => `coalesce(substring(${x} from '^([0-9]{4}-[0-9]{2}
 /** SQL for a UTC timestamp of a full stamp (NULL otherwise), for hour differences; the offsets are fixed whole hours. */
 export const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at time zone 'UTC' end)`;
 
+// The age bands of the hivvl and tbgnx copy tables (HIVVL lines 56-70, sp_getTBsLastHour lines 35-49):
+// '<01', '01-04', ... '45-49', '50+'. Not the dbo.Agegroup of the other reports (ageGroupSql). A negative or
+// missing age gives NULL.
+export const copyAgeGroupSql = (yearsExpr) => {
+  const a = `(${yearsExpr})`;
+  return `case
+      when ${a} = 0 then '<01'
+      when ${a} between 1 and 4 then '01-04'
+      when ${a} between 5 and 9 then '05-09'
+      when ${a} between 10 and 14 then '10-14'
+      when ${a} between 15 and 19 then '15-19'
+      when ${a} between 20 and 24 then '20-24'
+      when ${a} between 25 and 29 then '25-29'
+      when ${a} between 30 and 34 then '30-34'
+      when ${a} between 35 and 39 then '35-39'
+      when ${a} between 40 and 44 then '40-44'
+      when ${a} between 45 and 49 then '45-49'
+      when ${a} >= 50 then '50+'
+    end`;
+};
+
 // ---- Parts shared by the hivvl and eid copy tables ----
 // Both rebuild a v1 table that has the same shape: one row per result, the earliest tested date per
 // lab id, the same request facts. The builders below call these; each helper returns SQL text.
 
 // The `from`/`to` window of a builder: `prefilter` goes in the source CTE (it keeps every row of the
 // lab ids that have a report issued in the window, so the dedupe sees them all) and `finalRange` goes
-// after the dedupe. Both are '' without a window. Giving only one of the two throws.
-export function copyWindow(who, from, to) {
+// after the dedupe. Both are '' without a window. Giving only one of the two throws. `finalDate` is the
+// date column `finalRange` tests (a builder with no dedupe passes its own source column).
+export function copyWindow(who, from, to, finalDate = 'r.tested_date') {
   if ((from === undefined) !== (to === undefined)) throw new Error(`${who}: give both from and to, or neither`);
   if (from === undefined) return { prefilter: '', finalRange: '' };
   return {
     prefilter: `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to)})`,
-    finalRange: `and ${inRange('r.tested_date', from, to)}`,
+    finalRange: `and ${inRange(finalDate, from, to)}`,
   };
 }
 
@@ -253,6 +276,10 @@ export const disalinkSql = (preregExpr, referringExpr, { digitPrefix = false } =
       else 0
     end`;
 
+// v1 datediff(hh, a, b): the hour boundaries between two stamps, not elapsed hours (09:59 to 10:01 is 1).
+// NULL when either is not a full stamp. The offsets are fixed whole hours, so UTC hours give v1's answer.
+export const hoursBetweenSql = (fromExpr, toExpr) => `extract(epoch from date_trunc('hour', ${utcTs(toExpr)}) - date_trunc('hour', ${utcTs(fromExpr)})) / 3600`;
+
 // The per-row facts both builders need, as select items for a lateral subquery over the ranked rows `r`
 // (columns tested_date, collected_date, testing_code, receiving_code, lab_id, request_row_id):
 //   tat           date boundaries (datediff dd) between the LOCAL collected and tested dates
@@ -261,7 +288,7 @@ export const disalinkSql = (preregExpr, referringExpr, { digitPrefix = false } =
 //   base_code     the testing code, else the receiving code when the testing code is blank
 //   prereg_facility, referring_id   the two request attributes behind disalink
 export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_date`)} - ${localDate(`${r}.collected_date`)} as tat,
-    extract(epoch from date_trunc('hour', ${utcTs(`${r}.tested_date`)}) - date_trunc('hour', ${utcTs(`${r}.collected_date`)})) / 3600 as hours_taken,
+    ${hoursBetweenSql(`${r}.collected_date`, `${r}.tested_date`)} as hours_taken,
     ${pocExtra} or ${isNumericSql(`${r}.testing_code`)} or ${isNumericSql(`left(${r}.lab_id, 3)`)} as is_poc,
     case when length(rtrim(${r}.testing_code)) = 0 then ${r}.receiving_code else ${r}.testing_code end as base_code,
     ${requestAttrSql(`${r}.request_row_id`, 'prereg-registration-facility')} as prereg_facility,
@@ -357,20 +384,7 @@ export function hivvlCte(name, { from, to } = {}) {
   )
   select r.province, r.district, r.facility, r.lab_id,
     ${genderFmiuSql('r.sex')} as gender,
-    case
-      when r.age_years = 0 then '<01'
-      when r.age_years between 1 and 4 then '01-04'
-      when r.age_years between 5 and 9 then '05-09'
-      when r.age_years between 10 and 14 then '10-14'
-      when r.age_years between 15 and 19 then '15-19'
-      when r.age_years between 20 and 24 then '20-24'
-      when r.age_years between 25 and 29 then '25-29'
-      when r.age_years between 30 and 34 then '30-34'
-      when r.age_years between 35 and 39 then '35-39'
-      when r.age_years between 40 and 44 then '40-44'
-      when r.age_years between 45 and 49 then '45-49'
-      when r.age_years >= 50 then '50+'
-    end as age_group,
+    ${copyAgeGroupSql('r.age_years')} as age_group,
     r.tested_date,
     case when (${inListSql('r.result_text', HIVVL_SUPPRESSED)} or (r.numeric_value < 1000 and r.result_text not like '>%')) then 1 else 0 end as suppressed,
     case when (${inListSql('r.result_text', HIVVL_UU)} or r.numeric_value < 200) then 1 else 0 end as uu,
@@ -509,5 +523,222 @@ export function eidCte(name, { from, to } = {}) {
     ${rowFactsSql('r', `${foldSql('r.obs_code')} = 'pghiv'`)}) c
   where r.seq = 1
     ${finalRange}
+)`;
+}
+
+// ---- The tbgnx copy table and its view v_GeneXpert ----
+
+// The two panels of a GeneXpert test (view lines 46 and 73).
+const GX_PANELS = ['TBGNX', 'POCGT'];
+
+// sp_getTBsLastHour lines 51-70: the MTB and RIF clean-up. Each class is [label, words]; a text on no list
+// stays as reported. v1 compares with SQL Server's default collation, so inListSql ignores case and
+// trailing spaces.
+const MTB_CLASSES = [
+  ['MTB Not Detected', ['Not Detected', 'Negative']],
+  ['MTB Detected', ['Detected', 'Positive', 'Detected _ Medium', 'Detected _ Very Low', 'Detected _ High', 'Detected _ Low']],
+  ['No Results', ['NORES']],
+];
+const RIF_CLASSES = [
+  ['Detected', ['DETEC', 'Detected', 'Detected _ Medium', 'Detected _ High', 'Positive', 'Resistant', 'MTB Detected', 'R']],
+  ['Not Detected', ['MTB Not Detected', 'NDET', 'Negative', 'S', 'Sensitive', 'Susceptible', 'Not Detected']],
+  ['Error', ['Error', 'ERR']],
+  ['Indeterminate', ['IND', 'Indeterminate', 'RIF Resistance INDETERMINATE', 'Intermediate']],
+  ['Invalid', ['INV', 'Invalid']],
+  ['No Results', ['NORES']],
+];
+const classSql = (expr, classes) => `case ${classes.map(([label, words]) => `when ${inListSql(expr, words)} then ${sqlLit(label)}`).join(' ')} else ${expr} end`;
+
+// ReceivingFacilityCode is not carried (ruling 7). The view takes it when the testing code is blank
+// (view lines 26-29), so a blank testing code gives NULL here.
+const NO_RECEIVING_CODE = 'null::text';
+
+// One result row of a GeneXpert request (view lines 20-46 and 48-73): the request facts of x and y.
+// `resultAlias` names the result column, `obsCode` picks the observation. A request without a report, a
+// specimen or a patient still shows, with those columns empty (v1 reads Requests alone). The facility is
+// left-joined: an unmapped facility gives no description, province or district, as v1's left join does.
+const gxSourceSql = (obsCode, resultAlias, finalRange) => `select lr.request_id as requestid, lr.requester_code as lims_facility_code, fmr.name as description,
+      case when rtrim(dr.performer) = '' then ${NO_RECEIVING_CODE} else dr.performer end as tested_at,
+      dr.effective as specimen_date_time, lr.authored_at as registered_date_time, s.received_time as received_date_time,
+      lr.analysis_at as analysis_date_time, dr.issued as authorised_date_time, p.sex as hl7_sex_code,
+      lr.age_years as age_in_years, lr.age_days as agein_days, ${rpt('l')} as ${resultAlias}, lr.panel_code as lims_panel_code,
+      fmr.region as province, fmr.district as district, ${labNameSql('dr')} as lab_name
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    ${requesterJoin('lr', 'fmr', 'left join')}
+    left join diagnostic_reports dr on dr.based_on_id = lr.id
+    left join specimens s on s.id = dr.specimen_id
+    left join patients p on p.id = lr.patient_id
+    where ${inListSql('lr.panel_code', GX_PANELS)} and ${inListSql('l.observation_code', [obsCode])}
+      ${finalRange}`;
+
+// The with-list shared by both builders: the view's rows (x joined to y, a, b and id) with the extra
+// columns province, district and lab_name that the table needs. `<name>_rows` is the last item.
+function geneXpertRows(who, name, from, to) {
+  const { finalRange } = copyWindow(who, from, to, 'dr.issued');
+  // View lines 107-120: a GXRIF row joins a GXMTB row when the request number and eleven request facts are
+  // equal. Text compares ignore case and trailing spaces. A NULL fact equals nothing, so the RIF is lost.
+  const sameText = (c) => `${foldSql(`x.${c}`)} = ${foldSql(`y.${c}`)}`;
+  const sameValue = (c) => `x.${c} = y.${c}`;
+  return `${name}_x as (
+    ${gxSourceSql('GXMTB', 'mtb', finalRange)}
+  ),
+  ${name}_y as (
+    ${gxSourceSql('GXRIF', 'rif', finalRange)}
+  ),
+  ${name}_tbcol as (
+    select lr.request_id as requestid, ${foldSql('l.observation_code')} as obs, ${rpt('l')} as answer
+    from lab_requests lr
+    join lab_results l on l.request_id = lr.id
+    where ${inListSql('lr.panel_code', ['TBCOL'])} and ${inListSql('l.observation_code', ['TBHIV', 'TBAGE', 'PADIS'])}
+  ),
+  ${name}_rows as (
+    select id.answer as dist_tb_number, x.requestid, x.lims_facility_code, x.description, x.tested_at,
+      x.specimen_date_time, x.registered_date_time, x.received_date_time, x.analysis_date_time,
+      x.authorised_date_time, x.hl7_sex_code, x.age_in_years, x.agein_days, x.mtb, x.lims_panel_code,
+      y.rif, a.answer as tbhiv, b.answer as tbage, x.province, x.district, x.lab_name
+    from ${name}_x x
+    left join ${name}_y y on x.requestid = y.requestid
+      and ${sameText('lims_facility_code')}
+      and ${sameText('description')}
+      and ${sameText('tested_at')}
+      and ${sameValue('specimen_date_time')}
+      and ${sameValue('registered_date_time')}
+      and ${sameValue('received_date_time')}
+      and ${sameValue('analysis_date_time')}
+      and ${sameValue('authorised_date_time')}
+      and ${sameText('hl7_sex_code')}
+      and ${sameValue('age_in_years')}
+      and ${sameValue('agein_days')}
+    left join ${name}_tbcol a on a.requestid = x.requestid and a.obs = 'tbhiv'
+    left join ${name}_tbcol b on b.requestid = x.requestid and b.obs = 'tbage'
+    left join ${name}_tbcol id on id.requestid = x.requestid and id.obs = 'padis'
+  )`;
+}
+
+// Zambia's view v_GeneXpert, as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   geneXpertCte('gx')                              all rows
+//   geneXpertCte('gx', { from: 'from', to: 'to' })  only rows whose authorised date is in the window;
+//                                                   the two values are parameter names, compared as in inRange
+// The view has no window in v1; the window only limits the rows read.
+//
+// Columns, in the order of the view (View__dbo_v_GeneXpert.sql: line 106 and x.* from lines 20-39), in
+// snake_case. requestid keeps v1's one-word spelling, and v1's "AgeinDays" is agein_days.
+//   dist_tb_number, requestid, lims_facility_code, description, tested_at, specimen_date_time,
+//   registered_date_time, received_date_time, analysis_date_time, authorised_date_time, hl7_sex_code,
+//   age_in_years, agein_days, mtb, lims_panel_code, rif, tbhiv, tbage
+// The five date-time columns are CE's ISO text (specimen_date_time = diagnostic_reports.effective,
+// registered_date_time = lab_requests.authored_at, received_date_time = specimens.received_time,
+// analysis_date_time = lab_requests.analysis_at, authorised_date_time = diagnostic_reports.issued).
+// mtb and rif are the results as reported (LIMSRptResult, here rpt()); the clean-up is in tbgnxCte.
+//
+// Rules, with view lines:
+//   - One row per GXMTB result (lines 20-46) of a request in panel TBGNX or POCGT. Panel and observation
+//     compare ignoring case and trailing spaces. There is no test on the report status.
+//   - requestid is lab_requests.request_id, lims_facility_code is lab_requests.requester_code, and
+//     description is the mapped register name (line 25).
+//   - tested_at is the testing code, the performer of the request's report (lines 26-29).
+//   - rif comes from the GXRIF results of the same two panels (lines 48-73, 107-120): same request number
+//     and the same eleven request facts (listed on lines 110-120). The RIF may sit on another request
+//     row (the other panel) with equal facts.
+//   - dist_tb_number, tbhiv and tbage are the PADIS, TBHIV and TBAGE results of the TBCOL rows of the
+//     request number (lines 75-105, 121-126), joined on the request number alone.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The RIF join compares with plain equality, so a NULL fact on either side loses the RIF while the
+//     MTB row stays: a missing received, specimen, registered, analysis or authorised date, a missing sex,
+//     age in years or age in days, a missing facility, or a facility with no description. A facility that
+//     is not mapped to the register has no description here, as one missing from v1's dictionary has.
+//   - There is no dedupe. Two GXMTB results, two GXRIF results or two answers to one TBCOL question on a
+//     request number give several rows (every match), and two request rows with equal facts cross-match.
+//   - Text compares ignore case and trailing spaces, as SQL Server does; values come through as stored.
+//
+// The window is on the authorised date, as the TB reports filter (cast(AuthorisedDateTime as date)). It
+// also cuts the GXRIF rows. That cannot change a match, because the join needs equal authorised dates.
+//
+// TBCOL: it is not a documentation panel in Zambia's config (config/zambia.yaml lists only VIRAL), so
+// cdr-toolchain sends TBCOL as lab results and the answers are in lab_results, not in a form.
+//
+// CE gaps:
+//   - ReceivingFacilityCode is not carried (ruling 7). v1 takes it as tested_at when the testing code is
+//     blank; here tested_at is NULL then, which also loses the RIF (a NULL fact) and drops the row from
+//     the table (tbgnxCte).
+//   - lims_facility_code is lab_requests.requester_code. v1 reads LimsFacilityCode (the DISA facility),
+//     not RequestingFacilityCode; CE keeps one facility code for the request.
+//   - A partial stamp ('2026-07') stays as text in the date columns and gives NULL hours in tbgnxCte.
+//     v1 cannot hold one.
+export function geneXpertCte(name, { from, to } = {}) {
+  return `${name} as (
+  with ${geneXpertRows('geneXpertCte', name, from, to)}
+  select r.dist_tb_number, r.requestid, r.lims_facility_code, r.description, r.tested_at,
+    r.specimen_date_time, r.registered_date_time, r.received_date_time, r.analysis_date_time,
+    r.authorised_date_time, r.hl7_sex_code, r.age_in_years, r.agein_days, r.mtb, r.lims_panel_code,
+    r.rif, r.tbhiv, r.tbage
+  from ${name}_rows r
+)`;
+}
+
+// Zambia's `TBGNX` copy table, rebuilt as a CTE: `<name> as (...)`. Put it in a `with` list.
+//   tbgnxCte('tb')                              all rows
+//   tbgnxCte('tb', { from: 'from', to: 'to' })  only rows whose authorised date is in the window; the two
+//                                               values are parameter names, compared as in inRange
+// v1 sp_getTBsLastHour drops the table and fills it again from v_GeneXpert on every run. Its name says
+// "last hour", but the code reads the whole view. The CTE returns what the table holds after a run.
+//
+// Columns, in the order of Table__dbo_TBGNX.sql, in snake_case:
+//   province, district, requestid, lims_facility_code, description, tested_at, lab_name,
+//   specimen_date_time, registered_date_time, received_date_time, analysis_date_time,
+//   authorised_date_time, hl7_sex_code, age_in_years, gender, age_group, agein_days, mtb, rif, tbhiv,
+//   tbage, dist_tb_number, poc, tat, w24h, w48h, w72h
+// These are the view's rows (geneXpertCte) with the changes below. v1 has no dedupe, so a request number
+// can appear several times.
+//
+// Rules, with sp_getTBsLastHour lines:
+//   - province, district: the mapped register row's region and district (lines 95-101, left joins: an
+//     unmapped facility gives NULL for both and the row stays).
+//   - lab_name: ruling 8 (v1 joins its Laboratories dictionary, line 89). The report's display, else the
+//     register name of the mapped performer, else the performer's code.
+//   - gender: F, M, I, U only; anything else is NULL (lines 28-34).
+//   - age_group: '<01', '01-04', ... '45-49', '50+' by age in years; a negative or missing age is NULL
+//     (lines 35-49).
+//   - mtb: 'Not Detected' and 'Negative' give 'MTB Not Detected'; 'Detected', 'Positive' and the four
+//     'Detected _ ...' grades give 'MTB Detected'; 'NORES' gives 'No Results'; anything else stays (lines 51-62).
+//   - rif: six lists give 'Detected', 'Not Detected', 'Error', 'Indeterminate', 'Invalid' and 'No Results';
+//     anything else stays (lines 63-70).
+//   - poc: 1 when the panel is POCGT or tested_at is a number (ISNUMERIC, so '1E5' counts), else 0 (line 76).
+//   - tat: datediff(hh) from the specimen date to the authorised date. w24h, w48h and w72h are 1 when tat
+//     is under 24, 48 and 72, else 0, also when tat is NULL (lines 77-80).
+//   - Rows with tested_at '000' or NULL are dropped (line 102).
+//
+// Kept v1 quirks (spec ruling 1), besides those of geneXpertCte:
+//   - tat counts hour boundaries, not elapsed hours: 09:59 to 10:01 is 1. The flags test "under", so a
+//     tat of exactly 24 is not in w24h. A negative tat (authorised before the specimen) is in all three.
+//   - A text on no MTB or RIF list stays as reported, in its own case: 'DET' stays 'DET'. 'Detected _ Low'
+//     is on the MTB list only, so in rif it stays as it is.
+//   - The table's columns are narrow (requestid 26, tested_at 10, mtb 80, and so on); a longer value would
+//     stop v1's insert. The port does not cut.
+//
+// CE gaps: those of geneXpertCte. Also lab_name differs from v1 where Zambia's lab dictionary names a lab
+// differently from the report's display or the register (ruling 8).
+export function tbgnxCte(name, { from, to } = {}) {
+  return `${name} as (
+  with ${geneXpertRows('tbgnxCte', name, from, to)}
+  select r.province, r.district, r.requestid, r.lims_facility_code, r.description, r.tested_at, r.lab_name,
+    r.specimen_date_time, r.registered_date_time, r.received_date_time, r.analysis_date_time,
+    r.authorised_date_time, r.hl7_sex_code, r.age_in_years,
+    ${genderFmiuSql('r.hl7_sex_code')} as gender,
+    ${copyAgeGroupSql('r.age_in_years')} as age_group,
+    r.agein_days,
+    ${classSql('r.mtb', MTB_CLASSES)} as mtb,
+    ${classSql('r.rif', RIF_CLASSES)} as rif,
+    r.tbhiv, r.tbage, r.dist_tb_number,
+    case when ${inListSql('r.lims_panel_code', ['POCGT'])} or ${isNumericSql('r.tested_at')} then 1 else 0 end as poc,
+    c.tat,
+    case when c.tat < 24 then 1 else 0 end as w24h,
+    case when c.tat < 48 then 1 else 0 end as w48h,
+    case when c.tat < 72 then 1 else 0 end as w72h
+  from ${name}_rows r
+  cross join lateral (select (${hoursBetweenSql('r.specimen_date_time', 'r.authorised_date_time')})::int as tat) c
+  where ${foldSql('r.tested_at')} <> '000'
 )`;
 }
