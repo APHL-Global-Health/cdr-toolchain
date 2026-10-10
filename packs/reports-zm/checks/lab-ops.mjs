@@ -2198,6 +2198,10 @@ function group28() {
     ZKAFU: ['Lusaka', 'Kafue', 'Kafue District Hospital'],
     ZEDGE: ['Southern', 'Choma', 'Edge Clinic'],
     ZWIN: ['Western', 'Mongu', 'Window Clinic'],
+    ZDUP: ['Western', 'Kaoma', 'Dup Clinic'],
+    // Two spellings of one code, mapped to different register rows: the names must come from ONE row (the smaller facility name).
+    ZMIX: ['Southern', 'Choma', 'Mix Clinic B'],
+    'zmix ': ['Lusaka', 'Kafue', 'Mix Clinic A'],
   };
   Object.entries(FAC).forEach(([code, [region, district, name]], i) => fmap(A, i + 1, code, true, name, region, district));
   fmap(A, 9, 'ZUNMP', false, null, null, null);
@@ -2303,6 +2307,19 @@ function group28() {
   win({ auth: null, all: null });                                         // w6
   win({ auth: '2026-06-20T09:00:00+02:00', eff: ['2026-06-10T12:00:00+02:00'], all: B('2026-06-20', 25), vl: B('2026-06-10', 24) }); // w7
 
+  // -- S7: rows against distinct requests (A line 12 Count(RequestID), sub-select count(rq.requestid): rows). ZDUP, code CLOT --
+  const MAY11 = '2026-05-11T09:00:00+02:00';   // Monday, week 20 (Sunday 10 May starts it)
+  const JUN15 = '2026-06-15T09:00:00+02:00';   // Monday, week 25 (Sunday 14 June starts it)
+  const dup = (o) => req({ req: 'ZDUP', ...o });
+  dup({ auth: MAY11, all: B(MAY11, 20), rid: 'T28A-X' });                    // x1 one RequestID on two panels (two OBR sets): two rows
+  dup({ auth: MAY11, all: B(MAY11, 20), rid: 'T28A-X', panel: 'HIVPC' });    // x2
+  dup({ auth: JUN15, all: B(JUN15, 25), rid: 'T28A-X' });                    // x3 the same RequestID again in another spelling: still two rows
+  dup({ auth: JUN15, all: B(JUN15, 25), rid: 't28a-x ' });                   // x4
+
+  // -- S8: one folded code, two observed spellings, two register rows --
+  req({ ...W19(), req: 'ZMIX' });                                            // m1
+  req({ ...W19(), req: 'zmix ' });                                           // m2
+
   // ---- The model: what v1 returns for the fixture, grouped by facility code (ignoring case and trailing spaces) and bucket ----
   const panelOk = (mode, panel) => {
     const p = foldKey(panel);
@@ -2322,8 +2339,10 @@ function group28() {
     }
     const rows = [];
     for (const g of groups.values()) {
-      const withName = g.members.find((s) => s.req !== null && FAC[s.req]);
-      const names = withName ? FAC[withName.req] : [null, null, null];
+      // The chosen register row: the smallest facility name, then province, then district (byte order).
+      const named = g.members.filter((s) => s.req !== null && FAC[s.req]).map((s) => FAC[s.req])
+        .sort((p, q) => (p[2] < q[2] ? -1 : p[2] > q[2] ? 1 : p[0] < q[0] ? -1 : p[0] > q[0] ? 1 : p[1] < q[1] ? -1 : p[1] > q[1] ? 1 : 0));
+      const names = named.length > 0 ? named[0] : [null, null, null];
       const spellings = g.members.map((s) => s.req).filter((r) => r !== null).sort();
       const row = {
         ProvinceName: names[0], DistrictName: names[1], FacilityName: names[2], RequestingFacilityCode: spellings.length > 0 ? spellings[0] : null,
@@ -2571,6 +2590,19 @@ insert into diagnostic_reports (id, based_on_id, effective, performer, performer
       Year: 2026, Quarter: 1, Month: 2, Week: 7, TotalSampleRejections: 407,
       ...Object.fromEntries(T28_REASONS.map(([, name], i) => [name, i + 1])),
     }], A, { where: `z."FacilityName" = 'Kafue District Hospital'` }),
+    // Rows, not distinct requests (S7), by hand. Bucket 11 May (week 20): one RequestID on a HIVVL and a HIVPC row. Bucket 15 June (week 25): the same
+    // RequestID in two spellings on two HIVVL rows. v1 counts rows (Count(RequestID), count(rq.requestid)): all views 2 and 2; EID and VL see one row of
+    // the first bucket each.
+    ...[['', [2, 2]], ['EID', [1, 0]], ['VL', [1, 2]]].map(([type, [may, jun]]) => listSuite(`t28-rej-s7-rows-${type || 'all'}`, REJ_Q, { ...NONE, test_type: type }, REJ_COLUMNS,
+      [[may, 20, 5], [jun, 25, 6]].filter(([n]) => n > 0).map(([n, week, month]) => ({
+        ProvinceName: 'Western', DistrictName: 'Kaoma', FacilityName: 'Dup Clinic', RequestingFacilityCode: 'ZDUP', Year: 2026, Quarter: 2, Month: month, Week: week,
+        TotalSampleRejections: n, ...Object.fromEntries(T28_REASONS.map(([, name]) => [name, 0])), [NAME.CLOT]: n,
+      })), A, { where: `z."FacilityName" = 'Dup Clinic'` })),
+    // One folded code, two spellings on two register rows (S8): all three names from the row with the smaller facility name ('Mix Clinic A').
+    listSuite('t28-rej-s8-one-row', REJ_Q, NONE, REJ_COLUMNS, [{
+      ProvinceName: 'Lusaka', DistrictName: 'Kafue', FacilityName: 'Mix Clinic A', RequestingFacilityCode: 'ZMIX', Year: 2026, Quarter: 2, Month: 5, Week: 19,
+      TotalSampleRejections: 2, ...Object.fromEntries(T28_REASONS.map(([, name]) => [name, 0])), [NAME.CLOT]: 2,
+    }], A, { where: `z."FacilityName" like 'Mix Clinic%'` }),
     // The edges (S4): a hand list of the group keys and counts, whatever the model says.
     listSuite('t28-rej-s4-edges', REJ_Q, NONE, ['FacilityName', 'RequestingFacilityCode', 'Year', 'Quarter', 'Month', 'Week', 'TotalSampleRejections', NAME.SWC], [
       [2022, 4, 12, 53, 1], [2023, 1, 1, 1, 2], [2023, 1, 1, 2, 1], [2024, 4, 12, 53, 1], [2025, 4, 12, 53, 1], [2026, 1, 1, 1, 2], [2026, 1, 1, 2, 1],

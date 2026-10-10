@@ -1051,11 +1051,13 @@ order by ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C",
 // name), left join.
 //
 // Deviations and CE gaps:
-//   - The facility mapping matches the requesting code EXACTLY (requesterJoin; v1's join ignores case and trailing spaces). A code spelled in
-//     another case than the register's, with no exactly-spelled row in its group, gets NULL names. It still joins the group of the code it
-//     folds to, so its counts merge as in v1 and the names come from the exactly-spelled rows.
-//   - The facility NAMES are not part of the group key (v1's are): one facility code, one row per period. One code mapped to two register rows
-//     (different source or performer system) shows the smaller name.
+//   - The facility mapping matches the requesting code EXACTLY against facility_map.source_code (requesterJoin). facility_map holds one row
+//     per observed spelling of a code, byte for byte, and cdr trims codes; v1's join ignores case and trailing spaces. A spelling gets NULL
+//     names only when that observed spelling has no mapping. It still joins the group of the code it folds to, so its counts merge as in v1.
+//     A folding join would count a request twice, so the join stays exact.
+//   - The facility NAMES are not part of the group key (v1's are): one folded facility code, one row per period. When the spellings in a group
+//     map to different register rows, the three names come from ONE row, the one with the smallest facility name (then province, then
+//     district, in byte order), so they never mix across register rows.
 //   - Window (spec ruling 7). The views have no window, so from and to are optional and blank is v1's all history. A given side keeps the
 //     rows whose BUCKET date (the local date of the stamp's own text) is on or after from and on or before to; a row with no bucket date is
 //     out as soon as one side is given. The bucket date is the registered date, and for VL the collection date else the registered date.
@@ -1122,7 +1124,9 @@ b as (
   where ${optionalWindowSql("to_char(r.d, 'YYYY-MM-DD')")}
 ),
 g as (
-  select min(b.province collate "C") as province, min(b.district collate "C") as district, min(b.facility collate "C") as facility,
+  select (array_agg(b.province order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as province,
+    (array_agg(b.district order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as district,
+    (array_agg(b.facility order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as facility,
     min(b.requester_code collate "C") as code, ${foldSql('b.requester_code')} as code_key,
     b.y, b.q, b.m, b.w,
     count(b.request_id) as total,
