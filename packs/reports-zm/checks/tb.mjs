@@ -1317,8 +1317,9 @@ req16('T16-HUNK2', { perf: 'HUNK', tbhiv: 'unknown ' });
 req16('T16-HUNK3', { perf: 'HUNK' });
 ex16('HUNK', 'HUNK', '15+', 'Unknown', [3, 3, 0, 0, 0, 0, 0]);
 
-// -- The testing lab (F lines 14-15, 66, 71-72). Rows group on TestedAt and LabName, each compared ignoring case and trailing spaces, and show
-// the smallest spelling in byte order.
+// -- The testing lab (F lines 14-15, 66, 71-72). Rows group on TestedAt (with AgeGroup and TBHIV), compared ignoring case and trailing spaces, and
+// show the smallest spelling in byte order. LabName is not a group key: the row shows ONE name per testing code (ruling 8): a name that is not just
+// the code beats the bare code, then the smallest in byte order (case-sensitive), over the names of all the code's reports in the window.
 req16('T16-LAB1', { perf: 'LUS', disp: 'Lusaka Lab' });
 req16('T16-LAB2', { perf: 'lus', disp: 'LUSAKA LAB' });
 req16('T16-LAB3', { perf: 'LUS ', disp: 'lusaka lab ' });
@@ -1328,17 +1329,25 @@ req16('T16-LAB4', { perf: 'KIT', disp: 'Shared Lab' });
 req16('T16-LAB5', { perf: 'NDO', disp: 'Shared Lab' });
 ex16('KIT', 'Shared Lab', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
 ex16('NDO', 'Shared Lab', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
-// One code with two names is two rows: the name is in the group. v1's dictionary gives one name to a code; CE names a lab from each report.
-req16('T16-LAB6', { perf: 'SPL', disp: 'Name A' });
-req16('T16-LAB7', { perf: 'SPL', disp: 'Name B' });
-ex16('SPL', 'Name A', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
-ex16('SPL', 'Name B', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+// One code with two names is ONE row (v1's dictionary gives one name to a code): the smallest of 'Name A' and 'Name B'.
+req16('T16-LAB6', { perf: 'SPL', disp: 'Name B' });
+req16('T16-LAB7', { perf: 'SPL', disp: 'Name A' });
+ex16('SPL', 'Name A', '15+', 'Unknown', [2, 2, 0, 0, 0, 0, 0]);
 // The name is the report's display, else the register name of the mapped code (a blank display counts as none), else the code.
 req16('T16-LAB8', { perf: 'LUSX' });
 req16('T16-LAB9', { perf: 'LUSX', disp: '  ' });
-ex16('LUSX', 'Lusaka Provincial Lab', '15+', 'Unknown', [2, 2, 0, 0, 0, 0, 0]);
 req16('T16-LAB10', { perf: 'LUSX', disp: 'Override Name' });
-ex16('LUSX', 'Override Name', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+// The register name, a blank display and a display of 'Override Name' on one code: one row, the smallest name.
+ex16('LUSX', 'Lusaka Provincial Lab', '15+', 'Unknown', [3, 3, 0, 0, 0, 0, 0]);
+// A real name beats the bare code even where the code sorts first: 'PRF' < 'Zeta Lab', but the code is not a name.
+req16('T16-LAB11', { perf: 'PRF' });
+req16('T16-LAB12', { perf: 'PRF', disp: 'Zeta Lab' });
+ex16('PRF', 'Zeta Lab', '15+', 'Unknown', [2, 2, 0, 0, 0, 0, 0]);
+// The name is the same on every row of a code, whatever the age or TBHIV group: 'Alpha Lab' on both rows, not 'Beta Lab' on the child row.
+req16('T16-LAB13', { perf: 'XGR', years: 10, disp: 'Beta Lab' });
+req16('T16-LAB14', { perf: 'XGR', years: 40, disp: 'Alpha Lab' });
+ex16('XGR', 'Alpha Lab', '0-14', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+ex16('XGR', 'Alpha Lab', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
 // No testing code: TestedAt is NULL and so is LabName (v1's join finds no lab for a NULL code), even where the report has a display. The RIF is lost
 // (a NULL fact), so these count the MTB only. A blank, a NULL, spaces only and no report at all are one group.
 req16('T16-NUL1', { perf: '', disp: 'Ghost Lab' });

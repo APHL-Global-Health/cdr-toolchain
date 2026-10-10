@@ -1365,7 +1365,7 @@ export const resultBandsParams = () => dateParams(false);
 // UU, TAT, TATWithin14, Pregnant, BreastFeeding, BaseLineVL, RunDate, ReceivedDate, RegisteredDate, CollectedDate, TestedAt, Referral,
 // Disalink, ThreeMPostUnSuppressed, POC, POCW48H, LabName.
 //
-// The fixed window (TestedDate within the last 1,095 days, line 13; no upper bound) is `from` and `to` (spec ruling 3, ruling 2: a rolling window
+// The fixed window (TestedDate within the last 1,095 days, line 13; no upper bound) is `from` and `to` (spec ruling 3: a rolling window
 // becomes from and to); both are required. The window is on the LOCAL date of the tested date, both ends in.
 //
 // Kept v1 quirks (spec ruling 1):
@@ -1385,7 +1385,7 @@ export const resultBandsParams = () => dateParams(false);
 //     LabName is the report's display, else the mapped register name, else the code (ruling 8), taken from the report of the row the hivvl
 //     table kept. For a ZU code stored as ZUL (TestedAt), the name is that of the report's own code, where v1 names ZUL.
 //
-// Deviations (ruling 2): the rolling window becomes from and to (above).
+// Deviations (ruling 3): the rolling window becomes from and to (above).
 
 export function gxVlSql() {
   return `with ${hivvlCte('hv', { from: 'from', to: 'to', rowIds: true })}

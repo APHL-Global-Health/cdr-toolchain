@@ -323,7 +323,7 @@ export const tbTrendParams = () => [
 // results are the RAW reported texts, not the cleaned ones.
 //
 // Columns (v1 names and order, lines 14-64): TestedAt, LabName, AgeGroup, TBHIV, MTB_neg, MTBRIF_neg, MTBRIF_pos, MTBRIF_IND,
-// Error_Results, Invalid_Results, No_Results. One row per group of TestedAt, LabName, AgeGroup and TBHIV.
+// Error_Results, Invalid_Results, No_Results. One row per group of TestedAt, AgeGroup and TBHIV.
 //
 // Rules (function lines):
 //   AgeGroup  by the age in years: 0 to 14 is '0-14', 15 and over '15+' (lines 24-25). A missing age falls back to the TBCOL answer TBAGE:
@@ -348,17 +348,21 @@ export const tbTrendParams = () => [
 //   - A negative age is not NULL: it is 'Unknown' and TBAGE is not read.
 //   - No dedupe (geneXpertCte): two GXMTB results, two GXRIF results or two TBHIV answers on one request number make several rows, and
 //     each counts. A NULL request fact loses the RIF of a row (geneXpertCte), so that row counts the MTB measures only.
-//   - Groups compare as SQL Server compares text: TestedAt, LabName and TBHIV that differ only in case or trailing spaces are one group
+//   - Groups compare as SQL Server compares text: TestedAt and TBHIV that differ only in case or trailing spaces are one group
 //     (and 'Negative' from 'Non-Reactive' is one group with a stored 'negative'). The row shows the smallest spelling in byte order
 //     (v1 shows whichever spelling the group holds first).
+//   - The window drops fractions of a second (localTs): an analysis stamped `to`T00:00:00.500 counts as in, where v1's datetime drops it
+//     (measured: `to` 00:00:00 is in and 00:00:00.003 is out). DISA stamps carry no fraction, so this does not show on real data.
 //   - A stored TBHIV of 'Unknown' is the same group as a missing answer.
 //
 // Deviations (ruling 3): v1's @From and @To are dates with no default that gives a window; here both are required.
 //
 // CE gaps (ruling 7, 8):
-//   - v1 left-joins its laboratory dictionary on TestedAt (line 66). CE has none: LabName is the report's display, else the register name
-//     of the mapped code, else the code (ruling 8). Where the dictionary has one name per code, CE names a lab from each report, so one
-//     code with two display names is two rows here.
+//   - v1 left-joins its laboratory dictionary on TestedAt (line 66), which gives one name per code, so v1 has one row per TestedAt,
+//     AgeGroup and TBHIV. CE has no dictionary (ruling 8): each report has a name (the report's display, else the register name of the
+//     mapped code, else the code). LabName is NOT a group key. Ruling 8 note: the row shows ONE name per testing code, the same on every
+//     row of that code, chosen from the names of all the code's reports in the window: a name that is not just the code beats the bare
+//     code, then the smallest in byte order. So the answer is total and does not depend on row order or on the age or TBHIV group.
 //   - A report with no testing code has TestedAt NULL here (v1 falls back to ReceivingFacilityCode, which CE does not carry). Its LabName
 //     is NULL too, as v1's join finds no lab for a NULL code, whatever the report's display says. Such a row has no RIF (a NULL fact in
 //     geneXpertCte) and forms its own group.
@@ -370,8 +374,7 @@ export function tbReportSql() {
   const stamp = localTs('g.analysis_date_time');
   return `with ${geneXpertCte('gx', { from: 'from', to: 'to', on: 'analysis_at', labName: true })},
 rep as (
-  select g.tested_at,
-    case when g.tested_at is null then null else g.lab_name end as lab_name,
+  select g.tested_at, g.lab_name,
     case
       when g.age_in_years >= 0 and g.age_in_years < 15 then '0-14'
       when g.age_in_years >= 15 then '15+'
@@ -389,8 +392,15 @@ rep as (
     g.mtb, g.rif
   from gx g
   where ${stamp} >= ({{param.from}})::date::timestamp and ${stamp} <= ({{param.to}})::date::timestamp
+),
+names as (
+  select ${foldSql('p.tested_at')} as code_key,
+    (array_agg(p.lab_name order by ${foldSql('p.lab_name')} = ${foldSql('p.tested_at')}, p.lab_name collate "C"))[1] as lab_name
+  from rep p
+  where p.tested_at is not null
+  group by ${foldSql('p.tested_at')}
 )
-select ${sample(`${r}.tested_at`)} as "TestedAt", ${sample(`${r}.lab_name`)} as "LabName", ${r}.age_group as "AgeGroup",
+select ${sample(`${r}.tested_at`)} as "TestedAt", min(n.lab_name) as "LabName", ${r}.age_group as "AgeGroup",
   ${sample(`${r}.tbhiv`)} as "TBHIV",
   ${count1(hit('Not Detected', 'mtb'))} as "MTB_neg",
   ${count1(hit('Not Detected', 'rif'))} as "MTBRIF_neg",
@@ -400,7 +410,8 @@ select ${sample(`${r}.tested_at`)} as "TestedAt", ${sample(`${r}.lab_name`)} as 
   ${count1(either('Invalid'))} as "Invalid_Results",
   ${count1(either('NORES'))} as "No_Results"
 from rep ${r}
-group by ${foldSql(`${r}.tested_at`)}, ${foldSql(`${r}.lab_name`)}, ${r}.age_group, ${foldSql(`${r}.tbhiv`)}
+left join names n on n.code_key = ${foldSql(`${r}.tested_at`)}
+group by ${foldSql(`${r}.tested_at`)}, ${r}.age_group, ${foldSql(`${r}.tbhiv`)}
 order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11`;
 }
 
