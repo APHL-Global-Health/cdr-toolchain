@@ -2,8 +2,8 @@
 
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  dateParams, eidCte, hivvlCte, inRange, labNameSql, localDate, localTs, numberOfTextSql, provinceParam, recencyCte, recencySurveillanceCte,
-  requesterJoin, requestAttrSql, ssTextKey, tndCte,
+  dateParams, eidCte, hivvlCte, inRange, labNameSql, likeVarcharSql, localDate, localTs, numberOfTextSql, provinceParam, recencyCte, recencySurveillanceCte,
+  requesterJoin, requestAttrSql, sqlLit, ssTextKey, tndCte,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -633,6 +633,321 @@ from res
 order by ${orderItems(columns)}`;
 }
 
+// ---- Culture and susceptibility results (Task 20) ----------------------------------------------------------------------------------
+//
+// Replaces sp_Levy_ast_data_month and its three copies sp_LStone_ast_data_month, sp_Ndola_ast_data_month and sp_UTH_ast_data_month. The four
+// procedures are one text: they differ in the testing facility test (AST lines 14 and 34: = 'ZFP', 'ZLP', 'ZNP', and like 'ZU_' for UTH) and
+// in UTH's commented-out join to the comment CTE d (UTH line 117). The `laboratory` parameter picks the test. One row per culture request
+// panel, organism and sensitivity panel, with the client's name, age, birth date and ward, and one column per antibiotic.
+//
+// Columns, v1's 73 (AST lines 58-110): cultureTestCode, CultureTestDescription, LIMSRptResult, RequestID, LIMSSpecimenSourceCode,
+// LIMSSpecimenSourceDesc, IdentificationNumber, AccessionDate, SpecimenDate, FIRSTNAME, LastName, AgeInYears, DOB, sex, LocationCode,
+// Location, AST_TestCode, AST_Test, ORGANISM, then Gram Results and the 53 antibiotics in the order of the final select (lines 104-109).
+//
+// Parameters (spec rulings 3 and 4):
+//   laboratory   a select with four labs. CE's option list is one column, so the option text is the plain name with the test code in
+//                brackets: 'Levy Mwanawasa UTH Lab (ZFP)', 'Livingstone Teaching Hospital Lab (ZLP)', 'Ndola Lab (ZNP)', 'University
+//                Teaching Hospital labs (ZU_)'. The query reads the code between the last pair of brackets, or the whole text when there
+//                are no brackets (so a bare 'ZFP' works from the API). Required: v1 has no all-labs mode. A code other than ZU_ is a
+//                plain equality test (any lab code can be asked for). 'ZU_' is the varchar LIKE of the UTH procedure (likeVarcharSql: 'ZUE',
+//                'ZUA', 'ZUL', 'ZUF', 'ZUB' and also 'ZU ' with one trailing blank).
+//   from, to     replace "the month before getdate()" (lines 15-18, 30-33): the local date of the registered stamp, both ends in. For a
+//                window of one calendar month the rows are v1's rows for that month.
+//
+// The comment join (lines 113-119). CTE d holds the REM comments of the lab number, and the last select is `select distinct c.*` with the
+// comment column commented out. The join can repeat a row (a lab number with two comments), but DISTINCT removes the repeat, so the three
+// procedures that join d and UTH, which does not, give the same rows. The port does not read d. The check group has lab numbers with
+// several REM comments in each of the four labs.
+//
+// What v1 does ("authorised" = AuthorisedDateTime is not null):
+//   a (lines 8-20)  the culture results. A request row (an OBR) of the lab, registered in the window, authorised, whose panel description
+//                   has 'Cult', 'Microbiology' or 'FLUID' (any case), joined to its results of observation 'ORGS%' and to the client. One
+//                   row per ORGS result. LIMSRptResult is the organism text.
+//   b (lines 22-56) the sensitivity results. ASTResults rows of the lab's authorised request rows registered in the window whose panel
+//                   description has 'SENS', pivoted: one row per lab number, panel code, panel description, specimen code, specimen text,
+//                   organism and method; the antibiotic columns hold MAX(ASTValue). The specimen, its text and the method are grouping
+//                   keys although only the panel and the organism are output.
+//   c (lines 57-110) a left join b on the lab number and the organism text; the specimen name from the culture panel code (32 codes), else
+//                   from the specimen text (9 texts), else the text as it is.
+//   last            `select distinct c.*` ordered by RequestID.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - A drug off the 54-name list has no column, but its sensitivity row still makes a pivot row: the AST_ columns show and every antibiotic
+//     is empty (the PIVOT groups all rows).
+//   - The specimen and its text split pivot rows, and the output does not show them: two rows can differ only in their antibiotics, or
+//     come out equal and merge in the final distinct.
+//   - MAX(ASTValue) is text: two results for one drug on one pivot row show S before R before I. The max uses SQL Server's text order
+//     (ssTextKey), not byte order.
+//   - A culture with no sensitivity result shows empty AST_ columns. A sensitivity result with no culture row (no ORGS result, an
+//     unauthorised or out-of-window culture panel) shows nowhere.
+//   - The distinct and every join ignore case and trailing spaces. Rows that differ only in those are one row; the row shown is the
+//     one whose spellings sort first in byte order, column by column (v1 shows whichever it meets first).
+//   - IdentificationNumber is HOSPID when HOSPID is not blank, else REFNO (line 9).
+//   - The panel code mapping (lines 59-90) wins over the specimen text. 'Body fluid' (CULBF) and 'Body Fluid' (FLUID) keep their v1 spellings.
+//   - The ORGS test is a prefix ('ORGS%', any case); the panel tests are substrings. LIKE ignores trailing spaces, as `=` does.
+//
+// CE gaps and choices (spec ruling 7):
+//   - v1's ASTResults is, in CE, a susceptibility result: a lab result with a flag of S, I or R. cdr writes it as an Observation with the
+//     interpretation S, I or R (cdr apps/cli/src/export/fhir-transform.ts:530-579, from v2-transform.ts:654-698 which keeps only results whose
+//     raw value is S, I or R) and CE projects the interpretation into lab_results.abnormal_flag (openldr_ce packages/db/src/relational/
+//     observation.ts:32). The generic result row of the same antibiotic has no flag (v2-transform.ts:564) and is not read. So an AST row is a
+//     result of a SENS panel request with abnormal_flag S, I or R. ASTValue is that flag. The substance is lab_results.observation_desc (the
+//     antibiotic's display name); v1's pivot list is names, so the match is on the name. Methodology has no CE slot (the AST observation's
+//     method is a guess from the unit, v2-transform.ts:646-652, and the warehouse does not keep it): it is the same for every row, so it
+//     never splits a pivot row.
+//   - THE ORGANISM OF AN AST. v1's ASTResults.Organism says which organism a sensitivity result belongs to. CE keeps no such link: cdr
+//     computes it (nearestGrowthPositiveIsolate, v2-transform.ts:449-466: the isolate whose panel is nearest to the AST's panel, the lower
+//     panel on a tie) and writes it as hasMember on the isolate, which the warehouse drops. The port repeats cdr's rule with what CE has: the
+//     organism is the ORGS result, among all the ORGS results of the lab number, on the request row whose OBR set number (obr_set_id) is nearest
+//     to the sensitivity request row's, the lower one on a tie. Two ORGS results on one request row cannot be told apart by this rule: the
+//     one with the smaller text (SQL Server order, then byte order) gets the sensitivity results. cdr also skips no-growth isolates; the
+//     warehouse has no organism class, so a 'no growth' result counts as an organism here. The pool is every ORGS result of the lab number,
+//     whatever its lab, window and report (the link is part of v1's ASTResults). HONEST NON-PROOF: nothing here checks this link against
+//     Zambia data; with one organism per lab number it is exact.
+//   - HOSPID is not sent: read as blank, so IdentificationNumber is REFNO, the text of the reference-numbers request attribute (NULL when
+//     the lab number has none).
+//   - LocationCode (v1 Patients.WARD, the ward code) has no CE source: the warehouse keeps only the resolved ward name (lab_requests.
+//     point_of_care, v1's Location, LIMSPointOfCareDesc). LocationCode is NULL.
+//   - Specimen: the specimen of the request's report (diagnostic_reports.specimen_id): type_code is LIMSSpecimenSourceCode, type_text is
+//     LIMSSpecimenSourceDesc. cdr drops a blank code, so CE holds NULL where v1 holds '' (the specimen name then passes NULL on).
+//   - Dates are CE's ISO text: AccessionDate is lab_requests.authored_at, SpecimenDate is diagnostic_reports.effective, DOB is
+//     patients.date_of_birth.
+//   - The client is the request row's patient (inner join, so a request row without a patients row is out). v1 holds one Patients row per
+//     request number (Task 17 note).
+//   - Row order: v1 orders by RequestID. The port orders by RequestID in SQL Server's word order, then by every other column in byte order
+//     (the order is total, because CE pages with LIMIT and OFFSET).
+const AST_LABS = ['Levy Mwanawasa UTH Lab (ZFP)', 'Livingstone Teaching Hospital Lab (ZLP)', 'Ndola Lab (ZNP)', 'University Teaching Hospital labs (ZU_)'];
+
+// AST lines 40-52 (the PIVOT list) in the order of the final select, lines 104-109.
+const AST_ANTIBIOTICS = ['Gram Results', 'Amikacin', 'Amoxycillin', 'Amoxycillin/Clavulanic acid', 'Ampicillin', 'Ampicillin/Sulbactum', 'Azithromycin',
+  'Carbenicillin', 'Cefazolin', 'Cefepime', 'Cefotaxime', 'Cefoxitin Screen', 'Ceftazidime', 'Ceftriaxone', 'Cefuroxime', 'Cefuroxime (oral)',
+  'Cefuroxime (Parenteral)', 'Cefuroxime Axetil', 'Cephalothin', 'Chloramphenicol', 'Ciprofloxacin', 'Clarithromycin', 'Clindamycin',
+  'Co-amoxiclav', 'Colistin', 'Co-trimoxazole', 'Doripenem', 'Doxycycline', 'Ertapenem', 'Erythromycin', 'Gentamicin', 'Imipenem',
+  'Levofloxacin', 'Linezolid', 'Meropenem', 'Minocycline', 'Moxifloxacin', 'Nalidixic Acid', 'Nitrofurantoin', 'Norfloxacin', 'Oxacillin',
+  'Penicillin', 'Piperacillin', 'Piperacillin/Tazobactam', 'Polymyxin B', 'Quinupristin/Dalfopristin', 'Rifampicin', 'Tetracycline',
+  'Ticarcillin', 'Tigecycline', 'Tobramycin', 'Trimethoprim', 'Trimethoprim/Sulfamethoxazole', 'Vancomycin'];
+// v1's 19 identity columns. Internally they are c01 to c19 in this order and the antibiotics are b01 to b54.
+const AST_IDENTITY = ['cultureTestCode', 'CultureTestDescription', 'LIMSRptResult', 'RequestID', 'LIMSSpecimenSourceCode', 'LIMSSpecimenSourceDesc',
+  'IdentificationNumber', 'AccessionDate', 'SpecimenDate', 'FIRSTNAME', 'LastName', 'AgeInYears', 'DOB', 'sex', 'LocationCode', 'Location',
+  'AST_TestCode', 'AST_Test', 'ORGANISM'];
+// AST lines 59-90.
+const AST_SPECIMEN_BY_PANEL = [['CULPU', 'Pus'], ['MPUS', 'Pus'], ['CULUR', 'Urine'], ['CULPL', 'Pleural Fluid'], ['CSFCU', 'Cerebrospinal Fluid'],
+  ['CULBF', 'Body fluid'], ['CULST', 'Stool'], ['CULBT', 'Stool'], ['CULSE', 'Semen'], ['FLUID', 'Body Fluid'], ['CULSP', 'Sputum'],
+  ['MSPUT', 'Sputum'], ['CULTI', 'Tissue'], ['MTISS', 'Tissue'], ['CULBC', 'Blood'], ['CULB1', 'Blood'], ['CULTS', 'Throat Swab'],
+  ['CULEA', 'Ear Swab'], ['CULEC', 'Endocervical Swab'], ['CULEY', 'Eye Swab'], ['CULSY', 'Synovial Fluid'], ['CULPT', 'Peritoneal Fluid'],
+  ['CULPC', 'Pericardial Fluid'], ['CULUS', 'Urethral Swab'], ['CSF', 'Cerebrospinal Fluid'], ['CULCX', 'Cervical Swab'],
+  ['CULVA', 'Vaginal Swab'], ['CULNS', 'Nasal Swab'], ['CULBU', 'Burn Wound'], ['CULPE', 'Penile Swab'], ['CULRS', 'Rectal Swab'],
+  ['CULGA', 'Gastric Aspirate']];
+// AST lines 91-101.
+const AST_SPECIMEN_BY_TEXT = [['URINE', 'Urine'], ['PLUERAL FLUID', 'Pleural Fluid'], ['Stools', 'Stool'], ['Swab - Vaginal', 'Vaginal Swab'],
+  ['Swab - Throat', 'Throat Swab'], ['SPUTUM', 'Sputum'], ['Stools unformed', 'Stool'], ['PUSWB', 'Pus Swab'],
+  ['CSF-Clear, colorless, no clot', 'Cerebrospinal Fluid']];
+
+const num2 = (i) => String(i + 1).padStart(2, '0');
+
+// The code between the last pair of brackets of the option text, else the text (trailing spaces off).
+const labCodeSql = String.raw`rtrim(coalesce(substring({{param.laboratory}} from '\(([^)]*)\)\s*$'), {{param.laboratory}}))`;
+// The testing facility test on `x` (lines 14 and 34): equality, or the varchar LIKE 'ZU_' of the UTH procedure.
+const labTestSql = (x) => `case when lower(${labCodeSql}) = 'zu_' then ${likeVarcharSql(x, 'ZU', 1)} else ${foldSql(x)} = lower(${labCodeSql}) end`;
+
+// v1's simple CASE on the culture panel code (lines 58-102), then on the specimen text. SQL Server compares ignoring case and trailing spaces.
+const astSpecimenNameSql = (code, text) => `case
+      ${AST_SPECIMEN_BY_PANEL.map(([c, n]) => `when ${inListSql(code, [c])} then ${sqlLit(n)}`).join('\n      ')}
+      else case
+        ${AST_SPECIMEN_BY_TEXT.map(([t, n]) => `when ${inListSql(text, [t])} then ${sqlLit(n)}`).join('\n        ')}
+        else ${text}
+      end
+    end`;
+
+export function astSql() {
+  const outputNames = [...AST_IDENTITY.map((_, i) => `c${num2(i)}`), ...AST_ANTIBIOTICS.map((_, i) => `b${num2(i)}`)];
+  const outputLabels = [...AST_IDENTITY, ...AST_ANTIBIOTICS];
+  const isNumber = (n) => n === 'c12';
+  // The distinct keys: every column, text folded (case and trailing spaces ignored), the age as it is.
+  const distinctKeys = outputNames.map((n) => (isNumber(n) ? `c.${n}` : foldSql(`c.${n}`))).join(',\n    ');
+  const plain = outputNames.map((n) => (isNumber(n) ? `c.${n} nulls first` : `c.${n} collate "C" nulls first`)).join(', ');
+  // PIVOT MAX(ASTValue) for one antibiotic: the largest flag in SQL Server's text order (vkey), then byte order.
+  const pivot = AST_ANTIBIOTICS.map((name, i) => `(array_agg(x.val order by x.vkey desc, x.val collate "C" desc) filter (where x.skey = ${sqlLit(name.toLowerCase())} and x.val is not null))[1] as b${num2(i)}`).join(',\n    ');
+  const bColumns = [...[16, 17, 18].map((i) => `b.c${num2(i)}`), ...AST_ANTIBIOTICS.map((_, i) => `b.b${num2(i)}`)].join(', ');
+  const finalSelect = outputNames.map((n, i) => `res.${n} as "${outputLabels[i]}"`).join(',\n  ');
+  // ORDER BY: v1 orders by RequestID (c04, SQL Server's word order); every other column follows so the order is total.
+  const orderBy = ['c04', ...outputNames.filter((n) => n !== 'c04')].map((n, i) => {
+    if (i === 0) return `${ssTextKey(`res.${n}`)} collate "C" nulls first, res.${n} collate "C" nulls first`;
+    return isNumber(n) ? `res.${n} nulls first` : `res.${n} collate "C" nulls first`;
+  }).join(',\n  ');
+  return `with req as (
+  select lr.id as row_id, lr.request_id, lr.panel_code, lr.panel_desc, lr.authored_at, lr.point_of_care, lr.age_years, lr.obr_set_id, lr.patient_id,
+    dr.effective, dr.specimen_id
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${labTestSql('dr.performer')}
+    and dr.issued is not null
+    and ${inRange('lr.authored_at')}
+),
+a as (
+  select q.panel_code as c01, q.panel_desc as c02, ${rpt('l')} as c03, q.request_id as c04, s.type_code as c05,
+    ${astSpecimenNameSql('q.panel_code', 's.type_text')} as c06,
+    ${requestAttrSql('q.row_id', 'reference-numbers')} as c07,
+    q.authored_at as c08, q.effective as c09, p.firstname as c10, p.surname as c11, q.age_years as c12, p.date_of_birth as c13, p.sex as c14,
+    null::text as c15, q.point_of_care as c16
+  from req q
+  join lab_results l on l.request_id = q.row_id and l.observation_code ilike 'ORGS%'
+  join patients p on p.id = q.patient_id
+  left join specimens s on s.id = q.specimen_id
+  where (q.panel_desc ilike '%Cult%' or q.panel_desc ilike '%Microbiology%' or q.panel_desc ilike '%FLUID%')
+),
+ast as (
+  select l.id as rid, ${foldSql('q.request_id')} as lab_key, q.obr_set_id, q.panel_code, q.panel_desc, s.type_code, s.type_text,
+    ${foldSql('l.observation_desc')} as skey, l.abnormal_flag as val, ${ssTextKey('l.abnormal_flag')} collate "C" as vkey
+  from req q
+  join lab_results l on l.request_id = q.row_id and l.abnormal_flag in ('S', 'I', 'R')
+  left join specimens s on s.id = q.specimen_id
+  where q.panel_desc ilike '%SENS%'
+),
+orgs as (
+  select ${foldSql('lr2.request_id')} as lab_key, lr2.obr_set_id, ${rpt('l2')} as organism, ${ssTextKey(rpt('l2'))} collate "C" as okey
+  from lab_requests lr2
+  join lab_results l2 on l2.request_id = lr2.id
+  where l2.observation_code ilike 'ORGS%'
+    and rtrim(${rpt('l2')}) <> ''
+    and ${foldSql('lr2.request_id')} in (select y.lab_key from ast y)
+),
+ast_org as (
+  select distinct on (x.rid) x.*, o.organism
+  from ast x
+  left join orgs o on o.lab_key = x.lab_key
+  order by x.rid, abs(o.obr_set_id - x.obr_set_id) nulls last, o.obr_set_id nulls last, o.okey, o.organism collate "C"
+),
+b as (
+  select x.lab_key, ${foldSql('x.organism')} as org_key,
+    min(x.panel_code collate "C") as c17, min(x.panel_desc collate "C") as c18, min(x.organism collate "C") as c19,
+    ${pivot}
+  from ast_org x
+  group by x.lab_key, ${foldSql('x.panel_code')}, ${foldSql('x.panel_desc')}, ${foldSql('x.type_code')}, ${foldSql('x.type_text')}, ${foldSql('x.organism')}
+),
+c as (
+  select a.*, ${bColumns}
+  from a
+  left join b on b.lab_key = ${foldSql('a.c04')} and b.org_key = ${foldSql('a.c03')}
+),
+res as (
+  select distinct on (
+    ${distinctKeys}
+  ) ${outputNames.map((n) => `c.${n}`).join(', ')}
+  from c
+  order by ${distinctKeys},
+    ${plain}
+)
+select ${finalSelect}
+from res
+order by ${orderBy}`;
+}
+
+export const astParams = () => [
+  {
+    id: 'laboratory', label: 'Laboratory', type: 'select', required: true,
+    optionsSql: AST_LABS.map((l, i) => (i === 0 ? `select ${sqlLit(l)} as laboratory` : `select ${sqlLit(l)}`)).join(' union all '),
+  },
+  ...dateParams(true),
+];
+
+// ---- HIV drug resistance (Task 20) -------------------------------------------------------------------------------------------------
+//
+// Replaces the view v_HIVDR. One row per lab number, facility, laboratory and the five request dates, with a column per antiretroviral
+// drug (26): the result text. v1 has no window and no filter on the result status.
+//
+// Columns, v1's 35 (View lines 25-39): Province, District, Facility, LabID, LabName, CollectedDate, ReceivedDate, AnalysisDateTime,
+// AuthorisedDate, then the 26 drugs in the order of the PIVOT list (lines 32-38). The five dates are CE's ISO text (CollectedDate =
+// diagnostic_reports.effective, ReceivedDate = specimens.received_time, AnalysisDateTime = lab_requests.analysis_at, AuthorisedDate =
+// diagnostic_reports.issued).
+//
+// Parameters: `from` and `to`, required. v1 has no window (View header: "None, no date window"); the brief for this task gives the query a
+// window. It is on the local date of the registered stamp (lab_requests.authored_at), the same date the other reports window on. Both ends are
+// in. This is a deviation from v1 (spec ruling 3 extended to a view with no window): over all dates v1's view is every request; a window
+// wide enough gives the same rows.
+//
+// What v1 does:
+//   a (lines 8-24)  every Requests row of the panel DRUGR, left-joined to its results (the where on the result's code makes it an inner
+//                   join), with the results whose observation code is not like '%TXT' (LIKE ignores trailing spaces: 'EFVTXT ' is excluded).
+//                   The facility is a left join to the dictionary and to the province and district names.
+//   pivot (28-39)   one row per Province, District, Facility, LabID, LabName and the five dates; a column per drug holds MAX(Result)
+//                   where the drug is the observation description. LabName is the testing laboratory's dictionary name (left join).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - No result-status filter: cancelled, preliminary and unreported requests show. A request with no report shows with empty LabName,
+//     CollectedDate and AuthorisedDate; one with no specimen has an empty ReceivedDate.
+//   - A drug outside the 26 names is dropped, but its request still makes a row (every drug empty). So does a result with no description.
+//   - The drug names compare as SQL Server compares them (case and trailing spaces ignored; a leading space counts).
+//   - Two results for one drug on one row show the larger text in SQL Server's order (ssTextKey, then byte order), so 'Z1' beats 'a1'
+//     and 'Susceptible' beats 'resistant'. A missing result is ignored (MAX skips NULL). The result is the report text (LIMSRptResult).
+//   - Rows split on every key: a request number with two request rows that differ in any date, facility or laboratory is two rows.
+//   - Text groups ignore case and trailing spaces (the lab number 'hh-6' and 'HH-6 ' are one row, shown as the smaller spelling).
+//
+// CE gaps and choices (spec rulings 7 and 8):
+//   - The facility is the requesting facility's mapped register row (province = region, district, facility = name). A facility the register
+//     does not hold, and a request with no requester, is a row with empty Province, District and Facility (a left join, as v1's).
+//   - LabName comes from CE, not from v1's Laboratories dictionary (ruling 8): the report's display, else the register name of the mapped
+//     code, else the code. v1's name is per code, so the row grain is per code, not per name: the rows group on the testing code (case and
+//     trailing spaces ignored) and show ONE name for the code, the same on every row of the code, chosen from the names of all the code's
+//     reports in the window (a name that is not just the code beats the bare code, then the smallest in byte order). The Task 16 rule.
+//     A report with no testing code, or spaces only, has a NULL LabName, as v1's join finds no lab for a NULL code. A request with no report
+//     has no code either.
+//   - Result text: rpt() (the text, else the number with its comparator, else the coded value).
+const HIV_DRUGS = ['Stavudine (D4T)', 'Nevirapine (NVP)', 'Bictegravir', 'Lopinavir/r (LPV/r)', 'Elvitegravir', 'Tipranavir/r (TPV/r)',
+  'Saquinavir/r (SQV/r)', 'Atazanavir/r (ATV/r)', 'Dolutegravir', 'Emtricitabine (FTC)', 'Etravirine (ETR)', 'Cabotegravir', 'Lamivudine (3TC)',
+  'Tenofovir (TDF)', 'Didanosine (DDI)', 'Efavirenz (EFV)', 'Fosamprenavir/r (FPV/r)', 'Nelfinavir (NFV)', 'Raltegravir',
+  'HIVVL BELOW THRESHOLD', 'Indinavir/r (IDV/r)', 'Rilpivirine (RPV)', 'Zidovudine (AZT)', 'Doravirine (DOR)', 'Darunavir/r (DRV/r)',
+  'Abacavir (ABC)'];
+const HIV_IDENTITY = ['Province', 'District', 'Facility', 'LabID', 'LabName', 'CollectedDate', 'ReceivedDate', 'AnalysisDateTime', 'AuthorisedDate'];
+
+export function hivdrSql() {
+  const labels = [...HIV_IDENTITY, ...HIV_DRUGS];
+  const names = labels.map((_, i) => `c${num2(i)}`);
+  const pivot = HIV_DRUGS.map((drug, i) => `(array_agg(s.result order by s.rkey desc, s.result collate "C" desc) filter (where s.dkey = ${sqlLit(drug.toLowerCase())} and s.result is not null))[1] as c${num2(HIV_IDENTITY.length + i)}`).join(',\n    ');
+  const finalSelect = names.map((n, i) => `res.${n} as "${labels[i]}"`).join(',\n  ');
+  // No ORDER BY in v1: order by every column. The five text keys use SQL Server's word order, the rest byte order; a missing value first.
+  const orderBy = names.map((n, i) => (i < 5
+    ? `${ssTextKey(`res.${n}`)} collate "C" nulls first, res.${n} collate "C" nulls first`
+    : `res.${n} collate "C" nulls first`)).join(',\n  ');
+  return `with src as (
+  select lr.request_id as lab_id, fmr.region as province, fmr.district as district, fmr.name as facility,
+    case when rtrim(dr.performer) = '' then null else dr.performer end as code,
+    ${labNameSql('dr')} as report_name,
+    dr.effective as collected, s.received_time as received, lr.analysis_at as analysis, dr.issued as authorised,
+    ${foldSql('l.observation_desc')} as dkey, ${rpt('l')} as result, ${ssTextKey(rpt('l'))} collate "C" as rkey
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', ['DRUGR'])}
+    and not (rtrim(l.observation_code) ilike '%TXT')
+    and ${inRange('lr.authored_at')}
+),
+names as (
+  select ${foldSql('p.code')} as code_key,
+    (array_agg(p.report_name order by ${foldSql('p.report_name')} = ${foldSql('p.code')}, p.report_name collate "C"))[1] as lab_name
+  from src p
+  where p.code is not null
+  group by ${foldSql('p.code')}
+),
+res as (
+  select min(s.province collate "C") as c01, min(s.district collate "C") as c02, min(s.facility collate "C") as c03,
+    min(s.lab_id collate "C") as c04, min(n.lab_name collate "C") as c05,
+    s.collected as c06, s.received as c07, s.analysis as c08, s.authorised as c09,
+    ${pivot}
+  from src s
+  left join names n on n.code_key = ${foldSql('s.code')}
+  group by ${foldSql('s.province')}, ${foldSql('s.district')}, ${foldSql('s.facility')}, ${foldSql('s.lab_id')}, ${foldSql('s.code')},
+    s.collected, s.received, s.analysis, s.authorised
+)
+select ${finalSelect}
+from res
+order by ${orderBy}`;
+}
+
+export const hivdrParams = () => [...dateParams(true)];
+
 export function queries() {
   return [
     { name: 'Recency tests', sql: recencyTestsSql(), params: windowParams() },
@@ -641,5 +956,7 @@ export function queries() {
     { name: 'DBS monitoring (VL and EID)', sql: dbsMonitoringSql(), params: dbsMonitoringParams() },
     { name: 'CD4 by area, age and sex', sql: cd4Sql(), params: windowParams() },
     { name: 'HPV results by month', sql: hpvSql(), params: windowParams() },
+    { name: 'Culture and susceptibility results', sql: astSql(), params: astParams() },
+    { name: 'HIV drug resistance', sql: hivdrSql(), params: hivdrParams() },
   ];
 }

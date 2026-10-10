@@ -1835,10 +1835,641 @@ const suites19 = [
   shapeSuite17('hpv-shape', HPV_19, orderNeedles19(['province', 'district', 'description', 'lab_name', 'lab_type', 'year', 'month', 'tests', 'positives', 'hpv16', 'hpv18', 'hpvot', 'hpvhr'])),
 ];
 
+// ======================================================================
+// Group t20: Culture and susceptibility results (sp_Levy_ast_data_month and its three copies) and HIV drug resistance (v_HIVDR)
+// ======================================================================
+//
+// Fixture ids start with "t20-". "AST line N" is a line of StoredProcedure__dbo_sp_Levy_ast_data_month.sql (the three copies differ only
+// in the testing facility test, lines 14 and 34, and UTH's commented-out join at line 117/119). "DR line N" is a line of View__dbo_v_HIVDR.sql.
+// Both queries read lab requests, reports, results, patients and specimens. The cases of one cell share a lab (a performer code) and a
+// month, so the expected rows can be worked out one cell at a time.
+
+const AST_20 = 'Culture and susceptibility results';
+const DR_20 = 'HIV drug resistance';
+
+// The four laboratories of the parameter, as the option list shows them (one column, so the text carries the code in brackets).
+const LAB_LEVY = 'Levy Mwanawasa UTH Lab (ZFP)';
+const LAB_LSTONE = 'Livingstone Teaching Hospital Lab (ZLP)';
+const LAB_NDOLA = 'Ndola Lab (ZNP)';
+const LAB_UTH = 'University Teaching Hospital labs (ZU_)';
+
+// AST lines 40-52 (the pivot list, 54 names) in the order of the final select, lines 104-109. Copied by hand, not from the query.
+const AB_20 = ['Gram Results', 'Amikacin', 'Amoxycillin', 'Amoxycillin/Clavulanic acid', 'Ampicillin', 'Ampicillin/Sulbactum', 'Azithromycin',
+  'Carbenicillin', 'Cefazolin', 'Cefepime', 'Cefotaxime', 'Cefoxitin Screen', 'Ceftazidime', 'Ceftriaxone', 'Cefuroxime', 'Cefuroxime (oral)',
+  'Cefuroxime (Parenteral)', 'Cefuroxime Axetil', 'Cephalothin', 'Chloramphenicol', 'Ciprofloxacin', 'Clarithromycin', 'Clindamycin',
+  'Co-amoxiclav', 'Colistin', 'Co-trimoxazole', 'Doripenem', 'Doxycycline', 'Ertapenem', 'Erythromycin', 'Gentamicin', 'Imipenem',
+  'Levofloxacin', 'Linezolid', 'Meropenem', 'Minocycline', 'Moxifloxacin', 'Nalidixic Acid', 'Nitrofurantoin', 'Norfloxacin', 'Oxacillin',
+  'Penicillin', 'Piperacillin', 'Piperacillin/Tazobactam', 'Polymyxin B', 'Quinupristin/Dalfopristin', 'Rifampicin', 'Tetracycline',
+  'Ticarcillin', 'Tigecycline', 'Tobramycin', 'Trimethoprim', 'Trimethoprim/Sulfamethoxazole', 'Vancomycin'];
+const AST_IDENT_20 = ['cultureTestCode', 'CultureTestDescription', 'LIMSRptResult', 'RequestID', 'LIMSSpecimenSourceCode', 'LIMSSpecimenSourceDesc',
+  'IdentificationNumber', 'AccessionDate', 'SpecimenDate', 'FIRSTNAME', 'LastName', 'AgeInYears', 'DOB', 'sex', 'LocationCode', 'Location',
+  'AST_TestCode', 'AST_Test', 'ORGANISM'];
+const AST_COLUMNS_20 = [...AST_IDENT_20, ...AB_20];
+
+// AST lines 59-90: the culture panels and the specimen they name. Copied by hand.
+const SPEC_BY_PANEL_20 = [['CULPU', 'Pus'], ['MPUS', 'Pus'], ['CULUR', 'Urine'], ['CULPL', 'Pleural Fluid'], ['CSFCU', 'Cerebrospinal Fluid'],
+  ['CULBF', 'Body fluid'], ['CULST', 'Stool'], ['CULBT', 'Stool'], ['CULSE', 'Semen'], ['FLUID', 'Body Fluid'], ['CULSP', 'Sputum'],
+  ['MSPUT', 'Sputum'], ['CULTI', 'Tissue'], ['MTISS', 'Tissue'], ['CULBC', 'Blood'], ['CULB1', 'Blood'], ['CULTS', 'Throat Swab'],
+  ['CULEA', 'Ear Swab'], ['CULEC', 'Endocervical Swab'], ['CULEY', 'Eye Swab'], ['CULSY', 'Synovial Fluid'], ['CULPT', 'Peritoneal Fluid'],
+  ['CULPC', 'Pericardial Fluid'], ['CULUS', 'Urethral Swab'], ['CSF', 'Cerebrospinal Fluid'], ['CULCX', 'Cervical Swab'],
+  ['CULVA', 'Vaginal Swab'], ['CULNS', 'Nasal Swab'], ['CULBU', 'Burn Wound'], ['CULPE', 'Penile Swab'], ['CULRS', 'Rectal Swab'],
+  ['CULGA', 'Gastric Aspirate']];
+
+// DR lines 32-38: the 26 drugs, in the pivot's order. Copied by hand.
+const DRUGS_20 = ['Stavudine (D4T)', 'Nevirapine (NVP)', 'Bictegravir', 'Lopinavir/r (LPV/r)', 'Elvitegravir', 'Tipranavir/r (TPV/r)',
+  'Saquinavir/r (SQV/r)', 'Atazanavir/r (ATV/r)', 'Dolutegravir', 'Emtricitabine (FTC)', 'Etravirine (ETR)', 'Cabotegravir', 'Lamivudine (3TC)',
+  'Tenofovir (TDF)', 'Didanosine (DDI)', 'Efavirenz (EFV)', 'Fosamprenavir/r (FPV/r)', 'Nelfinavir (NFV)', 'Raltegravir',
+  'HIVVL BELOW THRESHOLD', 'Indinavir/r (IDV/r)', 'Rilpivirine (RPV)', 'Zidovudine (AZT)', 'Doravirine (DOR)', 'Darunavir/r (DRV/r)',
+  'Abacavir (ABC)'];
+const DR_COLUMNS_20 = ['Province', 'District', 'Facility', 'LabID', 'LabName', 'CollectedDate', 'ReceivedDate', 'AnalysisDateTime', 'AuthorisedDate', ...DRUGS_20];
+
+const ATTR_20 = 'urn:openldr:cs:request-attribute';
+
+// ---- The fixture ----
+// One lab_requests row per add(): its patient, report, specimen, results and reference-number attribute.
+//   patient: { first, last, dob, sex }, null for none, 'dangling' for a patient id that points at nothing
+//   spec:    { code, text, received } or null for a report with no specimen
+//   report:  false for a request with no report
+const DEF_20 = {
+  obr: 1, panel: 'CULUR', desc: 'Urine Culture', authored: '2026-05-10T08:00:00Z', poc: 'Ward 1', years: 30, req: 'ZSOUT', analysis: null,
+  performer: 'ZFP', display: 'Levy Lab', issued: '2026-05-12T10:00:00Z', effective: '2026-05-09T07:00:00Z', status: 'final', report: true,
+  patient: { first: 'Mary', last: 'Banda', dob: '1996-01-01', sex: 'F' }, spec: { code: 'UR', text: 'Urine', received: null },
+  refno: 'R1', refSystem: ATTR_20, refCode: 'reference-numbers', results: [],
+};
+
+function makeFixture20(p) {
+  const patients = [];
+  const requests = [];
+  const reports = [];
+  const specimens = [];
+  const results = [];
+  const attrs = [];
+  let seq = 0;
+  return {
+    add(labId, o = {}) {
+      const r = { ...DEF_20, ...o };
+      const n = ++seq;
+      const qid = `${p}-q${pad(n)}`;
+      let patientId = null;
+      if (r.patient === 'dangling') patientId = `${p}-ghost`;
+      else if (r.patient !== null) {
+        patientId = `${p}-p${pad(n)}`;
+        patients.push(`(${lit(patientId)}, ${lit(r.patient.first)}, ${lit(r.patient.last)}, ${lit(r.patient.dob)}, ${lit(r.patient.sex)})`);
+      }
+      requests.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.desc)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${lit(r.poc)}, ${lit(r.req)}, ${lit(patientId)}, ${num(r.years)}, ${r.obr})`);
+      if (r.report) {
+        let specId = null;
+        if (r.spec !== null) {
+          specId = `${p}-s${pad(n)}`;
+          specimens.push(`(${lit(specId)}, ${lit(r.spec.code)}, ${lit(r.spec.text)}, ${lit(r.spec.received ?? null)})`);
+        }
+        reports.push(`(${lit(`${p}-d${pad(n)}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.effective)}, ${lit(r.issued)}, ${lit(r.performer)}, ${lit(r.display)}, ${lit(specId)})`);
+      }
+      r.results.forEach((x, j) => {
+        results.push(`(${lit(`${p}-r${pad(n)}-${j + 1}`)}, ${lit(qid)}, ${lit(x.obs === undefined ? 'X' : x.obs)}, ${lit(x.desc ?? null)}, ${lit(x.text ?? null)}, ${lit(x.coded ?? null)}, ${num(x.num)}, ${lit(x.cmp ?? null)}, ${lit(x.flag ?? null)})`);
+      });
+      if (r.refno !== null) attrs.push(`(${lit(`${p}-a${pad(n)}`)}, ${lit(qid)}, ${lit(r.refSystem)}, ${lit(r.refCode)}, ${lit(r.refno)})`);
+    },
+    setup() {
+      return `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t20-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t20-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t20-fm3', '', '', 'ZUNMP', null, null, null, null),
+  ('t20-fm4', '', '', 'ZNORG', 'reg-n', 'No Province Clinic', null, null),
+  ('t20-fm5', '', '', 'ZPERF', 'reg-p', 'Perf Lab Register', 'Southern', 'Choma');
+insert into patients (id, firstname, surname, date_of_birth, sex) values ${patients.join(',\n  ')};
+insert into specimens (id, type_code, type_text, received_time) values ${specimens.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, panel_desc, authored_at, analysis_at, point_of_care, requester_code, patient_id, age_years, obr_set_id) values ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display, specimen_id) values ${reports.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, observation_desc, text_value, coded_value, numeric_value, numeric_comparator, abnormal_flag) values ${results.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${attrs.join(',\n  ')};`;
+    },
+  };
+}
+const f20 = makeFixture20('t20');
+
+// A culture request (OBR 1): one ORGS result per organism text. v1 reads LIMSObservationCode like 'ORGS%' (AST line 19).
+const cult20 = (lab, orgs, o = {}) => f20.add(lab, { obr: 1, results: orgs.map((t) => (typeof t === 'string' ? { obs: 'ORGS', text: t } : t)), ...o });
+// A sensitivity request (OBR 2): AST results are [drug, flag]. v1 reads ASTResults; CE holds them as results with an S, I or R flag.
+const sens20 = (lab, asts, o = {}) => f20.add(lab, {
+  obr: 2, panel: 'SENS', desc: 'Antibiotic Sensitivity',
+  results: asts.map(([d, flag]) => ({ obs: 'AB', desc: d, flag })), ...o,
+});
+
+// What a default culture request gives (AST lines 8-20 and 58-110), by hand.
+const aRow = (lab, org, o = {}) => ({
+  cultureTestCode: 'CULUR', CultureTestDescription: 'Urine Culture', LIMSRptResult: org, RequestID: lab,
+  LIMSSpecimenSourceCode: 'UR', LIMSSpecimenSourceDesc: 'Urine', IdentificationNumber: 'R1',
+  AccessionDate: '2026-05-10T08:00:00Z', SpecimenDate: '2026-05-09T07:00:00Z', FIRSTNAME: 'Mary', LastName: 'Banda',
+  AgeInYears: 30, DOB: '1996-01-01', sex: 'F', LocationCode: null, Location: 'Ward 1',
+  AST_TestCode: null, AST_Test: null, ORGANISM: null, ...o,
+});
+// The same row with a sensitivity panel attached to it (the organism is the culture's organism).
+const withAst = (row, ab = {}, code = 'SENS', test = 'Antibiotic Sensitivity') => ({ ...row, AST_TestCode: code, AST_Test: test, ORGANISM: row.LIMSRptResult, ...ab });
+
+const W20 = { from: '2026-05-01', to: '2026-05-31' };
+const wantAst20 = [];
+// Adds the fixture and the expected rows (default set, the Levy lab, the May window).
+const case20 = (labs) => { wantAst20.push(...labs); };
+
+// ---- Cell A: the pivot. Each of the 54 names has its own column (AST lines 40-52). ----
+cult20('A-all', ['Klebsiella pneumoniae']);
+sens20('A-all', AB_20.map((n, i) => [n, 'SIR'[i % 3]]));
+case20([withAst(aRow('A-all', 'Klebsiella pneumoniae'), Object.fromEntries(AB_20.map((n, i) => [n, 'SIR'[i % 3]])))]);
+
+// Names compare as SQL Server compares them (case and trailing spaces ignored; a leading space counts). A drug off the list has no column,
+// but its row still makes the pivot row: the AST_ columns show, every antibiotic is empty.
+cult20('A-names', ['Escherichia coli']);
+sens20('A-names', [['AMIKACIN ', 'S'], ['ciprofloxacin  ', 'R'], ['  Gentamicin', 'I'], ['Ampicillin 2', 'S'], ['Cefepime/x', 'R'], [null, 'I']]);
+case20([withAst(aRow('A-names', 'Escherichia coli'), { Amikacin: 'S', Ciprofloxacin: 'R' })]);
+cult20('A-unlisted', ['Escherichia coli']);
+sens20('A-unlisted', [['Mystery drug', 'R']]);
+case20([withAst(aRow('A-unlisted', 'Escherichia coli'))]);
+
+// ---- Cell B: the four laboratories (AST lines 14 and 34 and the copies). Every lab number is one culture request. ----
+// [lab number, testing code, group]. levy: = 'ZFP'; lstone: = 'ZLP'; ndola: = 'ZNP'; uth: like 'ZU_' (varchar LIKE, so 'ZU ' counts).
+const LABS_20 = [
+  ['B-zfp1', 'ZFP', 'levy'], ['B-zfp2', 'zfp ', 'levy'], ['B-zfp3', 'Zfp   ', 'levy'],
+  ['B-zlp1', 'ZLP', 'lstone'], ['B-zlp2', 'zlp ', 'lstone'],
+  ['B-znp1', 'ZNP', 'ndola'], ['B-znp2', 'Znp', 'ndola'],
+  ['B-zue', 'ZUE', 'uth'], ['B-zua', 'ZUA', 'uth'], ['B-zul', 'zul', 'uth'], ['B-zuf', 'ZUF ', 'uth'], ['B-zu3', 'ZU ', 'uth'], ['B-zu4', 'ZU  ', 'uth'],
+  ['B-zub', 'ZUB ', 'uth'], ['B-zu5', 'ZU2', 'uth'], ['B-zu6', 'zu_', 'uth'],
+  ['B-x1', 'ZFPX', 'none'], ['B-x2', 'XZFP', 'none'], ['B-x3', ' ZFP', 'none'], ['B-x4', null, 'none'], ['B-x5', 'ZLPN', 'none'], ['B-x6', 'ZNO', 'none'],
+  ['B-x7', 'ZU', 'none'], ['B-x8', 'ZUBC', 'none'], ['B-x9', 'AZUE', 'none'], ['B-xa', ' ZUE', 'none'], ['B-xb', 'ZUE X', 'none'], ['B-xc', '', 'none'],
+];
+const LAB_ROWS_20 = { levy: [], lstone: [], ndola: [], uth: [] };
+for (const [lab, code, group] of LABS_20) {
+  cult20(lab, [`Org-${lab}`], { performer: code });
+  if (group !== 'none') LAB_ROWS_20[group].push(aRow(lab, `Org-${lab}`));
+}
+// A lab number with a request row of REM comments (the join to CTE d, AST lines 113-119, adds no column and, with select distinct, no row).
+// Two different comments on one lab number, in every lab: the rows must not repeat.
+for (const lab of ['B-zfp1', 'B-zlp1', 'B-znp1', 'B-zue']) {
+  const code = LABS_20.find((x) => x[0] === lab)[1];
+  f20.add(lab, { obr: 3, panel: 'COMM', desc: 'Comment', performer: code, results: [{ obs: 'REM', text: 'First comment' }, { obs: 'REM', text: 'Second comment' }, { obs: 'rem', text: 'First comment' }] });
+  f20.add(lab, { obr: 4, panel: 'COMM', desc: 'Comment', performer: code, results: [{ obs: 'REM', text: 'Third comment' }] });
+}
+
+// ---- Cell C: the panel filter (AST line 13). Blood specimens with an unmapped panel code, so the specimen name is the text. ----
+const PANEL_20 = [
+  ['C-in1', 'Culture', true], ['C-in2', 'CULTURE ', true], ['C-in3', 'blood cult', true], ['C-in4', 'Microbiology', true],
+  ['C-in5', 'MICROBIOLOGY - general ', true], ['C-in6', 'Body FLUID', true], ['C-in7', 'fluid', true], ['C-in8', 'Cultures and more', true],
+  ['C-out1', 'Chemistry', false], ['C-out2', null, false], ['C-out3', 'Cul ture', false], ['C-out4', 'Micro biology', false],
+  ['C-out5', 'Flu id', false], ['C-out6', '', false],
+];
+for (const [lab, desc, inside] of PANEL_20) {
+  cult20(lab, ['Org-C'], { panel: 'CXX', desc, spec: { code: 'BL', text: 'Blood' } });
+  if (inside) case20([aRow(lab, 'Org-C', { cultureTestCode: 'CXX', CultureTestDescription: desc, LIMSSpecimenSourceCode: 'BL', LIMSSpecimenSourceDesc: 'Blood' })]);
+}
+
+// ---- Cell D: the specimen name (AST lines 58-102). ----
+// A mapped panel code gives its name whatever the specimen says (the specimen text is ignored).
+for (const [code, name] of SPEC_BY_PANEL_20) {
+  cult20(`D-${code}`, ['Org-D'], { panel: code, desc: 'Culture', spec: { code: 'XC', text: 'Ignored text' } });
+  case20([aRow(`D-${code}`, 'Org-D', { cultureTestCode: code, CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: 'XC', LIMSSpecimenSourceDesc: name })]);
+}
+// The panel code compares ignoring case and trailing spaces.
+cult20('D-case1', ['Org-D'], { panel: 'culpu ', desc: 'Culture', spec: { code: 'XC', text: 'Ignored text' } });
+case20([aRow('D-case1', 'Org-D', { cultureTestCode: 'culpu ', CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: 'XC', LIMSSpecimenSourceDesc: 'Pus' })]);
+cult20('D-case2', ['Org-D'], { panel: 'CulUr', desc: 'Culture', spec: { code: 'XC', text: 'Ignored text' } });
+case20([aRow('D-case2', 'Org-D', { cultureTestCode: 'CulUr', CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: 'XC', LIMSSpecimenSourceDesc: 'Urine' })]);
+// Any other panel code: the specimen text, mapped by the nine rules, else as stored.
+const SPEC_TEXT_20 = [
+  ['URINE', 'Urine'], ['urine ', 'Urine'], ['Urine', 'Urine'], ['PLUERAL FLUID', 'Pleural Fluid'], ['Stools', 'Stool'], ['STOOLS', 'Stool'],
+  ['Swab - Vaginal', 'Vaginal Swab'], ['Swab - Throat', 'Throat Swab'], ['swab - throat  ', 'Throat Swab'], ['SPUTUM', 'Sputum'], ['sputum', 'Sputum'],
+  ['Stools unformed', 'Stool'], ['PUSWB', 'Pus Swab'], ['CSF-Clear, colorless, no clot', 'Cerebrospinal Fluid'],
+  ['Pleural Fluid', 'Pleural Fluid'], ['Wound swab', 'Wound swab'], ['Swab - Vaginal x', 'Swab - Vaginal x'], [' URINE', ' URINE'], ['', ''],
+];
+SPEC_TEXT_20.forEach(([text, shown], i) => {
+  const lab = `D-text${i + 1}`;
+  cult20(lab, ['Org-D'], { panel: 'CULXX', desc: 'Culture', spec: { code: 'SC', text } });
+  case20([aRow(lab, 'Org-D', { cultureTestCode: 'CULXX', CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: 'SC', LIMSSpecimenSourceDesc: shown })]);
+});
+cult20('D-nospec', ['Org-D'], { panel: 'CULXX', desc: 'Culture', spec: null });
+case20([aRow('D-nospec', 'Org-D', { cultureTestCode: 'CULXX', CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: null, LIMSSpecimenSourceDesc: null })]);
+cult20('D-nulltext', ['Org-D'], { panel: 'CULXX', desc: 'Culture', spec: { code: 'SC', text: null } });
+case20([aRow('D-nulltext', 'Org-D', { cultureTestCode: 'CULXX', CultureTestDescription: 'Culture', LIMSSpecimenSourceCode: 'SC', LIMSSpecimenSourceDesc: null })]);
+
+// ---- Cell E: the window and the report (AST lines 15-18). The window is the month of the REGISTERED date (the local date of the stamp). ----
+const AUTH_20 = [
+  ['E-01', '2026-05-01T00:30:00+02:00', true], ['E-02', '2026-04-30T23:30:00-02:00', false], ['E-03', '2026-05-31T23:30:00+02:00', true],
+  ['E-04', '2026-06-01T00:30:00+02:00', false], ['E-05', '2026-05-31T23:59:59Z', true], ['E-06', '2026-06-01T00:00:00Z', false],
+  ['E-07', '2026-05-01T00:00:00Z', true], ['E-08', '2026-04-30T23:59:59Z', false], ['E-09', '2026-05-15', true], ['E-10', '2026-05', false],
+  ['E-11', null, false], ['E-12', 'garbage', false], ['E-13', '2026-05-31', true], ['E-14', '2026-06-01', false],
+  ['E-15', '2026-05-31T23:59:59.999Z', true], ['E-16', '2026-05-01T00:00:00+02:00', true], ['E-17', '2026-04-30T22:59:59-01:00', false],
+];
+for (const [lab, authored, inside] of AUTH_20) {
+  cult20(lab, ['Org-E'], { authored });
+  if (inside) case20([aRow(lab, 'Org-E', { AccessionDate: authored })]);
+}
+// AuthorisedDateTime is not null (line 18); a request with no report has no authorised date. No test on the report status.
+cult20('E-noissue', ['Org-E'], { issued: null });
+cult20('E-noreport', ['Org-E'], { report: false });
+cult20('E-cancel', ['Org-E'], { status: 'cancelled' });
+cult20('E-prelim', ['Org-E'], { status: 'preliminary', issued: '2026-05-13T10:00:00+02:00' });
+case20([aRow('E-cancel', 'Org-E'), aRow('E-prelim', 'Org-E')]);
+// The sensitivity request has its own window, report and lab (lines 30-36): it attaches only if it passes all three.
+cult20('E-a1', ['Org-E']); sens20('E-a1', [['Amikacin', 'S']], { authored: '2026-06-02T08:00:00Z' });
+cult20('E-a2', ['Org-E']); sens20('E-a2', [['Amikacin', 'S']], { issued: null });
+cult20('E-a3', ['Org-E']); sens20('E-a3', [['Amikacin', 'S']], { performer: 'ZLP' });
+cult20('E-a4', ['Org-E']); sens20('E-a4', [['Amikacin', 'S']], { performer: 'zfp ' });
+cult20('E-a5', ['Org-E']); sens20('E-a5', [['Amikacin', 'S']], { authored: '2026-05-31T23:30:00+02:00' });
+cult20('E-a6', ['Org-E']); sens20('E-a6', [['Amikacin', 'S']], { authored: '2026-06-01T00:30:00+02:00' });
+cult20('E-a7', ['Org-E']); sens20('E-a7', [['Amikacin', 'S']], { report: false });
+cult20('E-a8', ['Org-E']); sens20('E-a8', [['Amikacin', 'S']], { authored: '2026-05-01T00:30:00+02:00' });
+cult20('E-a9', ['Org-E']); sens20('E-a9', [['Amikacin', 'S']], { authored: '2026-04-30T23:30:00-02:00' });
+case20([aRow('E-a1', 'Org-E'), aRow('E-a2', 'Org-E'), aRow('E-a3', 'Org-E'), withAst(aRow('E-a4', 'Org-E'), { Amikacin: 'S' }),
+  withAst(aRow('E-a5', 'Org-E'), { Amikacin: 'S' }), aRow('E-a6', 'Org-E'), aRow('E-a7', 'Org-E'),
+  withAst(aRow('E-a8', 'Org-E'), { Amikacin: 'S' }), aRow('E-a9', 'Org-E')]);
+
+// ---- Cell F: the client (AST lines 9-12). ----
+cult20('F-ref', ['Org-F'], { refno: 'ART-777' });
+case20([aRow('F-ref', 'Org-F', { IdentificationNumber: 'ART-777' })]);
+cult20('F-sys', ['Org-F'], { refSystem: 'urn:other', refno: 'WRONG' });                 // another system: no REFNO
+cult20('F-code', ['Org-F'], { refCode: 'unique-id', refno: 'WRONG' });                  // another attribute: no REFNO
+cult20('F-none', ['Org-F'], { refno: null });
+case20([aRow('F-sys', 'Org-F', { IdentificationNumber: null }), aRow('F-code', 'Org-F', { IdentificationNumber: null }), aRow('F-none', 'Org-F', { IdentificationNumber: null })]);
+cult20('F-nopat', ['Org-F'], { patient: null });                                         // the inner join to Patients drops it
+cult20('F-ghost', ['Org-F'], { patient: 'dangling' });
+cult20('F-bare', ['Org-F'], { patient: { first: null, last: null, dob: null, sex: null }, years: null, poc: null });
+case20([aRow('F-bare', 'Org-F', { FIRSTNAME: null, LastName: null, DOB: null, sex: null, AgeInYears: null, Location: null })]);
+cult20('F-other', ['Org-F'], { patient: { first: 'Joe', last: 'Zulu', dob: '2001-02-03T00:00:00Z', sex: 'M' }, poc: 'Ward 7', years: 25 });
+case20([aRow('F-other', 'Org-F', { FIRSTNAME: 'Joe', LastName: 'Zulu', DOB: '2001-02-03T00:00:00Z', sex: 'M', Location: 'Ward 7', AgeInYears: 25 })]);
+// The ORGS observation: like 'ORGS%' (line 19), case ignored. The result is the report text (LIMSRptResult).
+[['F-o1', 'ORGS', true], ['F-o2', 'orgs1', true], ['F-o3', 'ORGSX', true], ['F-o4', 'XORGS', false], ['F-o5', 'ORG', false], ['F-o6', null, false]].forEach(([lab, obs, inside]) => {
+  cult20(lab, [{ obs, text: 'Org-F' }]);
+  if (inside) case20([aRow(lab, 'Org-F')]);
+});
+cult20('F-coded', [{ obs: 'ORGS', coded: 'ECOLI' }]);
+cult20('F-numeric', [{ obs: 'ORGS', num: 5, cmp: '<' }]);
+cult20('F-notext', [{ obs: 'ORGS' }]);
+case20([aRow('F-coded', 'ECOLI'), aRow('F-numeric', '< 5'), aRow('F-notext', null)]);
+
+// ---- Cell G: how an organism meets its sensitivity results. v1's join is by lab number and organism name (line 110). ----
+// One organism, one sensitivity panel.
+cult20('G-one', ['Alpha org']);
+sens20('G-one', [['Amikacin', 'S'], ['Gentamicin', 'R']]);
+case20([withAst(aRow('G-one', 'Alpha org'), { Amikacin: 'S', Gentamicin: 'R' })]);
+// Two organisms, each with its own sensitivity panel: an AST belongs to the nearest culture panel (the lower on a tie).
+cult20('G-two', ['Org A']); sens20('G-two', [['Amikacin', 'S']]);
+cult20('G-two', ['Org B'], { obr: 3 }); sens20('G-two', [['Amikacin', 'R']], { obr: 4 });
+case20([withAst(aRow('G-two', 'Org A'), { Amikacin: 'S' }), withAst(aRow('G-two', 'Org B'), { Amikacin: 'R' })]);
+// Panels 2, 3 and 5 are sensitivity panels. 2 is nearest to A (1 against 2), 3 to B (2 against 1), 5 to B. B's two panels share a code,
+// description and organism, so they are one pivot row.
+cult20('G-near', ['Org A']); sens20('G-near', [['Amikacin', 'I']]); sens20('G-near', [['Gentamicin', 'S']], { obr: 3 });
+cult20('G-near', ['Org B'], { obr: 4 }); sens20('G-near', [['Amikacin', 'R']], { obr: 5 });
+case20([withAst(aRow('G-near', 'Org A'), { Amikacin: 'I' }), withAst(aRow('G-near', 'Org B'), { Amikacin: 'R', Gentamicin: 'S' })]);
+// Two organisms on one culture panel: the sensitivity results cannot be told apart; the smaller organism text gets them.
+cult20('G-same', ['Zed org', 'Abc org']); sens20('G-same', [['Amikacin', 'S']]);
+case20([aRow('G-same', 'Zed org'), withAst(aRow('G-same', 'Abc org'), { Amikacin: 'S' })]);
+// Two spellings of one organism are one organism: the join and the distinct ignore case and trailing spaces.
+cult20('G-spell', ['E. coli', 'e. coli ']); sens20('G-spell', [['Amikacin', 'S']]);
+case20([withAst(aRow('G-spell', 'E. coli'), { Amikacin: 'S' })]);
+// MAX of the text (PIVOT, line 39), in SQL Server's order: S above R above I. Two panel codes make two pivot rows.
+cult20('G-max', ['Org M']);
+sens20('G-max', [['Amikacin', 'R'], ['Amikacin', 'S'], ['Gentamicin', 'I'], ['Gentamicin', 'R'], ['Ampicillin', 'I'], ['Ampicillin', 'S'], ['Penicillin', 'R'], ['Penicillin', 'R'], ['Colistin', 'I']]);
+sens20('G-max', [['Amikacin', 'I']], { obr: 3, panel: 'SENS2', desc: 'Second Sensitivity' });
+case20([withAst(aRow('G-max', 'Org M'), { Amikacin: 'S', Gentamicin: 'R', Ampicillin: 'S', Penicillin: 'R', Colistin: 'I' }),
+  withAst(aRow('G-max', 'Org M'), { Amikacin: 'I' }, 'SENS2', 'Second Sensitivity')]);
+// The same panel code and description on two request rows is one pivot row: MAX over both.
+cult20('G-join', ['Org J']);
+sens20('G-join', [['Amikacin', 'I'], ['Ceftriaxone', 'R']]);
+sens20('G-join', [['Amikacin', 'R'], ['Gentamicin', 'S']], { obr: 3 });
+case20([withAst(aRow('G-join', 'Org J'), { Amikacin: 'R', Ceftriaxone: 'R', Gentamicin: 'S' })]);
+// A culture with no sensitivity: the AST columns are empty. A sensitivity with no culture: no row.
+cult20('G-noast', ['Org N']);
+case20([aRow('G-noast', 'Org N')]);
+sens20('G-noorg', [['Amikacin', 'S']], { obr: 1 });
+// Only results with an S, I or R flag are susceptibility results; the others (no flag, H, a lower-case s) are not.
+cult20('G-flags', ['Org Q']);
+sens20('G-flags', [['Amikacin', null], ['Gentamicin', 'H'], ['Ampicillin', 'S'], ['Colistin', 's'], ['Penicillin', '']]);
+case20([withAst(aRow('G-flags', 'Org Q'), { Ampicillin: 'S' })]);
+cult20('G-flags2', ['Org Q']);
+sens20('G-flags2', [['Amikacin', null], ['Gentamicin', 'H']]);
+case20([aRow('G-flags2', 'Org Q')]);
+// Only the panels whose description has SENS (line 36). 'Sensitivity' and 'culture and sensitivity' have it; 'Susceptibility' does not.
+cult20('G-desc1', ['Org P']); sens20('G-desc1', [['Amikacin', 'S']], { desc: 'sens panel' });
+cult20('G-desc2', ['Org P']); sens20('G-desc2', [['Amikacin', 'S']], { desc: 'Susceptibility' });
+cult20('G-desc3', ['Org P']); sens20('G-desc3', [['Amikacin', 'S']], { desc: null });
+case20([withAst(aRow('G-desc1', 'Org P'), { Amikacin: 'S' }, 'SENS', 'sens panel'), aRow('G-desc2', 'Org P'), aRow('G-desc3', 'Org P')]);
+// The specimen and the method split the pivot rows although they are not output (lines 24-25); rows that come out the same are one.
+cult20('G-spec1', ['Org S']);
+sens20('G-spec1', [['Amikacin', 'S']], { spec: { code: 'UR', text: 'Urine' } });
+sens20('G-spec1', [['Gentamicin', 'R']], { obr: 3, spec: { code: 'BL', text: 'Blood' } });
+case20([withAst(aRow('G-spec1', 'Org S'), { Amikacin: 'S' }), withAst(aRow('G-spec1', 'Org S'), { Gentamicin: 'R' })]);
+cult20('G-spec2', ['Org S']);
+sens20('G-spec2', [['Amikacin', 'S']], { spec: { code: 'UR', text: 'Urine' } });
+sens20('G-spec2', [['Amikacin', 'S']], { obr: 3, spec: { code: 'BL', text: 'Blood' } });
+case20([withAst(aRow('G-spec2', 'Org S'), { Amikacin: 'S' })]);
+// The pivot row is keyed on the panel code and on the panel description, each by itself.
+cult20('G-code', ['Org C']);
+sens20('G-code', [['Amikacin', 'S']], { panel: 'SENSA' });
+sens20('G-code', [['Amikacin', 'S']], { obr: 3, panel: 'SENSB' });
+case20([withAst(aRow('G-code', 'Org C'), { Amikacin: 'S' }, 'SENSA'), withAst(aRow('G-code', 'Org C'), { Amikacin: 'S' }, 'SENSB')]);
+cult20('G-text', ['Org C']);
+sens20('G-text', [['Amikacin', 'S']], { desc: 'Sens first' });
+sens20('G-text', [['Amikacin', 'S']], { obr: 3, desc: 'Sens second' });
+case20([withAst(aRow('G-text', 'Org C'), { Amikacin: 'S' }, 'SENS', 'Sens first'), withAst(aRow('G-text', 'Org C'), { Amikacin: 'S' }, 'SENS', 'Sens second')]);
+// The organism of a sensitivity result is found among ALL the lab number's ORGS results, also on a request row that is out of the report
+// (here not authorised): panel 4 is nearest to panel 3, so Org A (an authorised row) gets no sensitivity result.
+cult20('G-pool', ['Org A']);
+cult20('G-pool', ['Org B'], { obr: 3, issued: null });
+sens20('G-pool', [['Amikacin', 'S']], { obr: 4 });
+case20([aRow('G-pool', 'Org A')]);
+// An organism whose culture panel is not authorised makes no row, even though its sensitivity panel is.
+cult20('G-unauth', ['Org U'], { issued: null });
+sens20('G-unauth', [['Amikacin', 'S']]);
+
+// ---- Cell H: select distinct (lines 118 and 24). ----
+// Lab numbers that differ in case or a trailing space are one (the join and the distinct ignore both): one row, the smaller spelling.
+cult20('H-case', ['Org H']);
+cult20('h-CASE ', ['Org H'], { obr: 2 });
+case20([aRow('H-case', 'Org H')]);
+// The sensitivity request of the other spelling meets both.
+cult20('H-join', ['Org H']); sens20('h-join ', [['Amikacin', 'S']], { obr: 2 });
+case20([withAst(aRow('H-join', 'Org H'), { Amikacin: 'S' })]);
+// The same organism on two culture panels of one code, or twice on one panel, is one row; another panel code or another client is another.
+cult20('H-dup', ['Org D']);
+cult20('H-dup', ['Org D'], { obr: 2 });
+cult20('H-twice', ['Org D', 'Org D']);
+cult20('H-code', ['Org D']);
+cult20('H-code', ['Org D'], { obr: 2, panel: 'CULPU' });
+cult20('H-pat', ['Org D']);
+cult20('H-pat', ['Org D'], { obr: 2, patient: { first: 'Grace', last: 'Banda', dob: '1996-01-01', sex: 'F' } });
+cult20('H-fold', ['Org D']);
+cult20('H-fold', ['org d  '], { obr: 2, patient: { first: 'MARY', last: 'banda ', dob: '1996-01-01', sex: 'f' }, poc: 'WARD 1', refno: 'r1' });
+case20([aRow('H-dup', 'Org D'), aRow('H-twice', 'Org D'), aRow('H-code', 'Org D'),
+  aRow('H-code', 'Org D', { cultureTestCode: 'CULPU', LIMSSpecimenSourceDesc: 'Pus' }),
+  aRow('H-pat', 'Org D'), aRow('H-pat', 'Org D', { FIRSTNAME: 'Grace' }),
+  aRow('H-fold', 'Org D')]);
+
+// ---- Cell L: the parameter's laboratory (the whole of the lab test, each value). ----
+const wantLab20 = {
+  levy: [...LAB_ROWS_20.levy],
+  lstone: [...LAB_ROWS_20.lstone],
+  ndola: [...LAB_ROWS_20.ndola],
+  uth: [...LAB_ROWS_20.uth],
+};
+// Every other cell is in the Levy lab (performer ZFP, 'zfp ' for the sensitivity of E-a4): the Levy answer is B's three plus the cells.
+wantLab20.levy = [...LAB_ROWS_20.levy, ...wantAst20];
+
+// ---- Order fixture: January 2029, Levy. ----
+const ord20 = { authored: '2029-01-10T08:00:00Z', issued: '2029-01-12T10:00:00Z', effective: '2029-01-09T07:00:00Z' };
+['10', '9', 'A1', 'a10', 'b2', 'Z'].forEach((lab) => cult20(lab, ['Org O'], ord20));
+// 'a1' is 'A1' to SQL Server: the same row would merge, so this one is another client's.
+cult20('a1', ['Org O'], { ...ord20, patient: { first: 'Grace', last: 'Banda', dob: '1996-01-01', sex: 'F' } });
+cult20('a10', ['Org O'], { ...ord20, obr: 2, panel: 'CULPU' });
+cult20('a10', ['Org N'], { ...ord20, obr: 3 });
+const ordRow20 = (lab, org, o = {}) => aRow(lab, org, { AccessionDate: '2029-01-10T08:00:00Z', SpecimenDate: '2029-01-09T07:00:00Z', ...o });
+// One lab number, three rows: the ties on RequestID break on the next columns (cultureTestCode, then CultureTestDescription, then LIMSRptResult).
+const wantOrder20 = [
+  ordRow20('10', 'Org O'), ordRow20('9', 'Org O'), ordRow20('A1', 'Org O'), ordRow20('a1', 'Org O', { FIRSTNAME: 'Grace' }),
+  ordRow20('a10', 'Org O', { cultureTestCode: 'CULPU', LIMSSpecimenSourceDesc: 'Pus' }), ordRow20('a10', 'Org N'), ordRow20('a10', 'Org O'),
+  ordRow20('b2', 'Org O'), ordRow20('Z', 'Org O'),
+];
+
+// ======================================================================
+// v_HIVDR cells. The window is on the registered date (v1 has none), the May window of the AST cells.
+// ======================================================================
+const drugResult = (i) => ['Susceptible', 'Resistant', 'Intermediate', 'Low-Level Resistance', 'Potential Low-Level Resistance'][i % 5];
+// A drug resistance request (DR line 23).
+const DRDEF_20 = {
+  panel: 'DRUGR', desc: null, performer: 'LUS', display: 'Lusaka Lab', analysis: '2026-05-10T12:00:00Z', patient: null,
+  spec: { code: 'P', text: 'Plasma', received: '2026-05-10T09:00:00Z' }, refno: null,
+};
+const dr20 = (lab, results, o = {}) => f20.add(lab, { ...DRDEF_20, results: results.map((x) => (Array.isArray(x) ? { obs: 'DRG', desc: x[0], text: x[1], ...(x[2] ?? {}) } : x)), ...o });
+const drRow = (lab, o = {}) => ({
+  Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', LabID: lab, LabName: 'Lusaka Lab',
+  CollectedDate: '2026-05-09T07:00:00Z', ReceivedDate: '2026-05-10T09:00:00Z', AnalysisDateTime: '2026-05-10T12:00:00Z',
+  AuthorisedDate: '2026-05-12T10:00:00Z', ...o,
+});
+const wantDr20 = [];
+
+// Cell HA: one request with a result for every drug; each column shows its own result.
+dr20('HA-all', DRUGS_20.map((d, i) => [d, drugResult(i)]));
+wantDr20.push(drRow('HA-all', Object.fromEntries(DRUGS_20.map((d, i) => [d, drugResult(i)]))));
+
+// Cell HB: the panel (line 23) and the observation filter (line 24: not like '%TXT', trailing spaces ignored by LIKE).
+[['HB-p1', 'DRUGR', true], ['HB-p2', 'drugr ', true], ['HB-p3', 'DRUG', false], ['HB-p4', 'DRUGRX', false], ['HB-p5', null, false], ['HB-p6', ' DRUGR', false]].forEach(([lab, panel, inside]) => {
+  dr20(lab, [['Efavirenz (EFV)', 'Resistant']], { panel });
+  if (inside) wantDr20.push(drRow(lab, { 'Efavirenz (EFV)': 'Resistant' }));
+});
+[['HB-o1', 'EFV', true], ['HB-o2', 'EFVTXT', false], ['HB-o3', 'efvtxt', false], ['HB-o4', 'TXT', false], ['HB-o5', 'EFVTXT ', false],
+  ['HB-o6', 'TXTEFV', true], ['HB-o7', null, false], ['HB-o8', 'EF TXT', false], ['HB-o9', 'EFVTX', true], ['HB-oa', 'EFVTXT2', true]].forEach(([lab, obs, inside]) => {
+  dr20(lab, [{ obs, desc: 'Efavirenz (EFV)', text: 'Resistant' }]);
+  if (inside) wantDr20.push(drRow(lab, { 'Efavirenz (EFV)': 'Resistant' }));
+});
+dr20('HB-mix', [{ obs: 'EFVTXT', desc: 'Efavirenz (EFV)', text: 'comment' }, { obs: 'EFV', desc: 'Efavirenz (EFV)', text: 'Susceptible' }]);
+wantDr20.push(drRow('HB-mix', { 'Efavirenz (EFV)': 'Susceptible' }));
+
+// Cell HC: no result-status filter, and a request without a report or a specimen is a row (the joins are left joins).
+dr20('HC-1', [['Efavirenz (EFV)', 'Resistant']], { status: 'cancelled' });
+dr20('HC-2', [['Efavirenz (EFV)', 'Resistant']], { status: 'preliminary' });
+dr20('HC-3', [['Efavirenz (EFV)', 'Resistant']], { report: false });
+dr20('HC-4', [['Efavirenz (EFV)', 'Resistant']], { spec: null });
+dr20('HC-5', [['Efavirenz (EFV)', 'Resistant']], { issued: null });
+dr20('HC-6', [['Efavirenz (EFV)', 'Resistant']], { performer: '', display: 'Ignored name' });
+dr20('HC-7', [['Efavirenz (EFV)', 'Resistant']], { performer: '   ', display: 'Ignored name' });
+dr20('HC-8', [['Efavirenz (EFV)', 'Resistant']], { performer: null, display: 'Ignored name' });
+dr20('HC-9', [['Efavirenz (EFV)', 'Resistant']], { analysis: null, effective: null });
+wantDr20.push(
+  drRow('HC-1', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HC-2', { 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-3', { LabName: null, CollectedDate: null, ReceivedDate: null, AuthorisedDate: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-4', { ReceivedDate: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-5', { AuthorisedDate: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-6', { LabName: null, 'Efavirenz (EFV)': 'Resistant' }), drRow('HC-7', { LabName: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-8', { LabName: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HC-9', { AnalysisDateTime: null, CollectedDate: null, 'Efavirenz (EFV)': 'Resistant' }),
+);
+
+// Cell HD: drug names compare as SQL Server compares them; a drug off the list is dropped but its request is still a row (all empty).
+dr20('HD-1', [['DOLUTEGRAVIR ', 'Resistant'], ['  Raltegravir', 'Susceptible'], ['Not a drug', 'Resistant'], [null, 'Susceptible']]);
+dr20('HD-2', [['Not a drug', 'Resistant']]);
+dr20('HD-3', [[null, 'Resistant']]);
+dr20('HD-4', [['hivvl below threshold', 'Below threshold'], ['Abacavir (ABC)', null]]);
+wantDr20.push(drRow('HD-1', { Dolutegravir: 'Resistant' }), drRow('HD-2'), drRow('HD-3'), drRow('HD-4', { 'HIVVL BELOW THRESHOLD': 'Below threshold' }));
+
+// Cell HE: two results for one drug show the larger text in SQL Server's order (not byte order); a missing result is ignored.
+dr20('HE-1', [['Efavirenz (EFV)', 'a1'], ['Efavirenz (EFV)', 'Z1']]);
+dr20('HE-2', [['Efavirenz (EFV)', null], ['Efavirenz (EFV)', 'x'], ['Efavirenz (EFV)', null]]);
+dr20('HE-3', [['Efavirenz (EFV)', 'Intermediate'], ['Efavirenz (EFV)', 'Susceptible'], ['Efavirenz (EFV)', 'Resistant']]);
+dr20('HE-4', [{ obs: 'DRG', desc: 'Efavirenz (EFV)', num: 5 }, { obs: 'DRG', desc: 'Efavirenz (EFV)', text: '10' }]);
+dr20('HE-5', [{ obs: 'DRG', desc: 'Efavirenz (EFV)', coded: 'MUT' }]);
+dr20('HE-6', [{ obs: 'DRG', desc: 'Efavirenz (EFV)', num: 20, cmp: '<' }]);
+dr20('HE-7', [['Efavirenz (EFV)', 'resistant'], ['Efavirenz (EFV)', 'Susceptible']]);
+dr20('HE-8', [['Efavirenz (EFV)', 'Resistant'], ['efavirenz (efv)  ', 'Intermediate'], ['Nevirapine (NVP)', 'B'], ['Nevirapine (NVP)', 'a']]);
+wantDr20.push(drRow('HE-1', { 'Efavirenz (EFV)': 'Z1' }), drRow('HE-2', { 'Efavirenz (EFV)': 'x' }), drRow('HE-3', { 'Efavirenz (EFV)': 'Susceptible' }),
+  drRow('HE-4', { 'Efavirenz (EFV)': '5' }), drRow('HE-5', { 'Efavirenz (EFV)': 'MUT' }), drRow('HE-6', { 'Efavirenz (EFV)': '< 20' }),
+  drRow('HE-7', { 'Efavirenz (EFV)': 'Susceptible' }), drRow('HE-8', { 'Efavirenz (EFV)': 'Resistant', 'Nevirapine (NVP)': 'B' }));
+
+// Cell HF: the laboratory name is per testing code (v1 reads a dictionary), so a lab's rows never split on the name.
+dr20('HF-1', [['Efavirenz (EFV)', 'Resistant']], { performer: 'LAB1', display: 'Zeta Lab' });
+dr20('HF-2', [['Efavirenz (EFV)', 'Resistant']], { performer: 'lab1 ', display: 'Alpha Lab' });
+dr20('HF-3', [['Efavirenz (EFV)', 'Resistant']], { performer: 'Lab1', display: null });
+dr20('HF-4', [['Efavirenz (EFV)', 'Resistant']], { performer: 'BARE', display: null });
+dr20('HF-5', [['Efavirenz (EFV)', 'Resistant']], { performer: 'ZPERF', display: null });
+dr20('HF-6', [['Efavirenz (EFV)', 'Resistant']], { performer: 'XYZ', display: '   ' });
+// A name that is not just the code beats the bare code, although the code sorts first.
+dr20('HF-7', [['Efavirenz (EFV)', 'Resistant']], { performer: 'AAA', display: null });
+dr20('HF-8', [['Efavirenz (EFV)', 'Resistant']], { performer: 'aaa ', display: 'Zeta Named' });
+// One lab number, two request rows of one code with two names: one row, one name, both drugs.
+dr20('HF-merge', [['Efavirenz (EFV)', 'Resistant']], { performer: 'MRG', display: 'Zeta Merge' });
+dr20('HF-merge', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, performer: 'mrg ', display: 'Alpha Merge' });
+dr20('HF-merge2', [['Efavirenz (EFV)', 'Resistant']], { performer: 'MG2', display: null });
+dr20('HF-merge2', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, performer: 'mg2 ', display: null });
+wantDr20.push(
+  drRow('HF-1', { LabName: 'Alpha Lab', 'Efavirenz (EFV)': 'Resistant' }), drRow('HF-2', { LabName: 'Alpha Lab', 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HF-3', { LabName: 'Alpha Lab', 'Efavirenz (EFV)': 'Resistant' }), drRow('HF-4', { LabName: 'BARE', 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HF-5', { LabName: 'Perf Lab Register', 'Efavirenz (EFV)': 'Resistant' }), drRow('HF-6', { LabName: 'XYZ', 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HF-7', { LabName: 'Zeta Named', 'Efavirenz (EFV)': 'Resistant' }), drRow('HF-8', { LabName: 'Zeta Named', 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HF-merge', { LabName: 'Alpha Merge', 'Efavirenz (EFV)': 'Resistant', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HF-merge2', { LabName: 'MG2', 'Efavirenz (EFV)': 'Resistant', 'Nevirapine (NVP)': 'Susceptible' }),
+);
+
+// Cell HG: the window on the registered date (the local date of the stamp).
+[['HG-1', '2026-05-01T00:30:00+02:00', true], ['HG-2', '2026-04-30T23:30:00-02:00', false], ['HG-3', '2026-05-31T23:30:00+02:00', true],
+  ['HG-4', '2026-06-01T00:30:00+02:00', false], ['HG-5', null, false], ['HG-6', '2026-05', false], ['HG-7', '2026-05-31', true],
+  ['HG-8', '2026-06-01', false], ['HG-9', '2026-05-31T23:59:59.999Z', true]].forEach(([lab, authored, inside]) => {
+  dr20(lab, [['Efavirenz (EFV)', 'Resistant']], { authored });
+  if (inside) wantDr20.push(drRow(lab, { 'Efavirenz (EFV)': 'Resistant' }));
+});
+
+// Cell HH: the rows are grouped on the lab number and the five dates (and the area and lab); other fields do not split them.
+dr20('HH-1', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-1', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, effective: '2026-05-09T08:00:00Z' });
+dr20('HH-2', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-2', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2 });
+dr20('HH-3', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-3', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, issued: '2026-05-12T10:00:01Z' });
+dr20('HH-4', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-4', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, analysis: '2026-05-10T12:00:01Z' });
+dr20('HH-5', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-5', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, spec: { code: 'P', text: 'Plasma', received: '2026-05-10T09:00:01Z' } });
+dr20('hh-6', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-6 ', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2 });
+dr20('HH-7', [['Efavirenz (EFV)', 'Resistant']]);
+dr20('HH-7', [['Nevirapine (NVP)', 'Susceptible']], { obr: 2, req: 'ZLUSA' });
+wantDr20.push(
+  drRow('HH-1', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HH-1', { CollectedDate: '2026-05-09T08:00:00Z', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-2', { 'Efavirenz (EFV)': 'Resistant', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-3', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HH-3', { AuthorisedDate: '2026-05-12T10:00:01Z', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-4', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HH-4', { AnalysisDateTime: '2026-05-10T12:00:01Z', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-5', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HH-5', { ReceivedDate: '2026-05-10T09:00:01Z', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-6 ', { 'Efavirenz (EFV)': 'Resistant', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HH-7', { 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HH-7', { Province: 'Lusaka', District: 'Lusaka', Facility: 'Chilenje Clinic', 'Nevirapine (NVP)': 'Susceptible' }),
+);
+
+// Cell HI: the requesting facility is a left join (a facility the register does not hold is a row with empty area columns).
+dr20('HI-1', [['Efavirenz (EFV)', 'Resistant']], { req: 'ZUNMP' });
+dr20('HI-2', [['Efavirenz (EFV)', 'Resistant']], { req: 'ZNONE' });
+dr20('HI-3', [['Efavirenz (EFV)', 'Resistant']], { req: null });
+dr20('HI-4', [['Efavirenz (EFV)', 'Resistant']], { req: 'ZNORG' });
+wantDr20.push(
+  drRow('HI-1', { Province: null, District: null, Facility: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HI-2', { Province: null, District: null, Facility: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HI-3', { Province: null, District: null, Facility: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HI-4', { Province: null, District: null, Facility: 'No Province Clinic', 'Efavirenz (EFV)': 'Resistant' }),
+);
+
+// Order fixture, January 2029: no ORDER BY in v1, so the port orders by every column (text in SQL Server's order, a missing value first).
+const dord20 = { authored: '2029-01-10T08:00:00Z' };
+['HOB', 'HOA', 'HO10', 'HO9'].forEach((lab) => dr20(lab, [['Efavirenz (EFV)', 'Resistant']], dord20));
+// 'HOa' is 'HOA' to SQL Server: the same row would merge, so this one differs in its analysis time.
+dr20('HOa', [['Efavirenz (EFV)', 'Resistant']], { ...dord20, analysis: '2026-05-10T12:00:05Z' });
+dr20('HOz', [['Efavirenz (EFV)', 'Resistant']], { ...dord20, req: null });
+dr20('HOa', [['Nevirapine (NVP)', 'Susceptible']], { ...dord20, obr: 2, effective: '2026-05-08T07:00:00Z' });
+const wantDrOrder20 = [
+  drRow('HOz', { Province: null, District: null, Facility: null, 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HO10', { 'Efavirenz (EFV)': 'Resistant' }), drRow('HO9', { 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HOA', { 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HOa', { CollectedDate: '2026-05-08T07:00:00Z', 'Nevirapine (NVP)': 'Susceptible' }),
+  drRow('HOa', { AnalysisDateTime: '2026-05-10T12:00:05Z', 'Efavirenz (EFV)': 'Resistant' }),
+  drRow('HOB', { 'Efavirenz (EFV)': 'Resistant' }),
+];
+
+// ---- Suites ----
+
+// The ORDER BY must list every output column, in order. The needles are column names of the final select.
+function shapeSuite20(name, queryName, wantIds, needles) {
+  return {
+    name,
+    count: 8,
+    check() {
+      const query = query17(queryName);
+      if (!query) return [`query "${queryName}" is missing`];
+      const bad = [];
+      const ids = query.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}; got ${ids}`);
+      for (const p of query.params) {
+        if (p.required !== true) bad.push(`${p.id}: must be required`);
+        const want = p.id === 'laboratory' ? 'select' : 'text';
+        if (p.type !== want) bad.push(`${p.id}: expected type ${want}, got ${p.type}`);
+      }
+      const text = query.sql;
+      if (BANNED_17.test(text.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(text)) bad.push('does not start with "with"');
+      for (const id of wantIds) if (!text.includes(`{{param.${id}}}`)) bad.push(`must use the parameter ${id}`);
+      const at = text.lastIndexOf('order by');
+      if (at < 0) bad.push('must end with an ORDER BY');
+      else {
+        let pos = at;
+        for (const n of needles) {
+          const i = text.indexOf(n, pos);
+          if (i < 0) { bad.push(`ORDER BY must list ${n}, after the column before it`); break; }
+          pos = i + n.length;
+        }
+      }
+      return bad;
+    },
+  };
+}
+
+// The option list runs: one column of the four laboratories, in this order.
+const optionsSuite20 = {
+  name: 'ast-options',
+  count: 3,
+  sql: `select 'ast-options' || chr(9) || json_build_object('v', q.v)::text from (${query17(AST_20)?.params.find((p) => p.id === 'laboratory')?.optionsSql ?? 'select 1'}) as q(v);`,
+  check(rows) {
+    const got = rows.map((r) => r.v);
+    const want = [LAB_LEVY, LAB_LSTONE, LAB_NDOLA, LAB_UTH];
+    return JSON.stringify(got) === JSON.stringify(want) ? [] : [`expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`];
+  },
+};
+
+const withLab = (lab, w = W20) => ({ laboratory: lab, ...w });
+const AST_ORDER_NAMES_20 = ['RequestID', ...AST_COLUMNS_20.filter((c) => c !== 'RequestID')];
+const needlesAst20 = AST_ORDER_NAMES_20.map((c) => `res.${astAlias20(c)}`);
+// The final select's internal names: the query writes res.<name in snake case>. The needles use the same function as the query's own names.
+function astAlias20(c) {
+  const i = AST_IDENT_20.indexOf(c);
+  return i >= 0 ? `c${String(i + 1).padStart(2, '0')}` : `b${String(AB_20.indexOf(c) + 1).padStart(2, '0')}`;
+}
+const needlesDr20 = DR_COLUMNS_20.map((c, i) => `res.c${String(i + 1).padStart(2, '0')}`);
+
+const suites20 = [
+  // The fixture rows go in the first suite only.
+  setSuite17('ast-levy', AST_20, withLab(LAB_LEVY), AST_COLUMNS_20, wantLab20.levy, f20.setup()),
+  setSuite17('ast-lstone', AST_20, withLab(LAB_LSTONE), AST_COLUMNS_20, wantLab20.lstone),
+  setSuite17('ast-ndola', AST_20, withLab(LAB_NDOLA), AST_COLUMNS_20, wantLab20.ndola),
+  setSuite17('ast-uth', AST_20, withLab(LAB_UTH), AST_COLUMNS_20, wantLab20.uth),
+  setSuite17('ast-code-only', AST_20, withLab('ZLP'), AST_COLUMNS_20, wantLab20.lstone),
+  setSuite17('ast-unknown-lab', AST_20, withLab('Nowhere (ZXX)'), AST_COLUMNS_20, []),
+  setSuite17('ast-empty', AST_20, withLab(LAB_LEVY, { from: '2030-01-01', to: '2030-12-31' }), AST_COLUMNS_20, []),
+  orderedSuite17('ast-order', AST_20, withLab(LAB_LEVY, { from: '2029-01-01', to: '2029-01-31' }), AST_COLUMNS_20, wantOrder20),
+  optionsSuite20,
+  shapeSuite20('ast-shape', AST_20, ['laboratory', 'from', 'to'], needlesAst20),
+  setSuite17('dr-main', DR_20, W20, DR_COLUMNS_20, wantDr20),
+  setSuite17('dr-empty', DR_20, { from: '2030-01-01', to: '2030-12-31' }, DR_COLUMNS_20, []),
+  orderedSuite17('dr-order', DR_20, { from: '2029-01-01', to: '2029-01-31' }, DR_COLUMNS_20, wantDrOrder20),
+  shapeSuite20('dr-shape', DR_20, ['from', 'to'], needlesDr20),
+];
+
 export const groups = [
   { name: 't5-recency', suites: recencySuites },
   { name: 't5-surveillance', suites: survSuites },
   { name: 't17', suites: suites17 },
   { name: 't18', suites: suites18 },
   { name: 't19', suites: suites19 },
+  { name: 't20', suites: suites20 },
 ];
