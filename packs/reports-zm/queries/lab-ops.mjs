@@ -3,7 +3,7 @@
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
-  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql,
+  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql, vleidRequestsCte,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -1588,6 +1588,188 @@ export const labTurnaroundSql = () => tatSql({ level: 'lab' });
 export const provinceTurnaroundSql = () => tatSql({ level: 'province' });
 export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 
+// ---- Requests received by week (Task 30) ----
+//
+// Replaces vWeeklyRequestTrend (W, the target) and vReceivedRequestsSummary (V, its merge). Both count the requests received at each laboratory
+// per year, quarter, month and week, and split them into PCR (EID), viral load and other. They differ in their output columns (V has labFacility
+// beside LabPrefix and LabName), so they are two queries (the Task 10, 24, 29a ruling: the column set decides the query count), built by one
+// helper, weeklySql:
+//   Requests received by week                  W   Labprefix, LabName, Year, Quarter, Month, Week, TotalRequests, PCRRequests, VLRequests, OtherRequests
+//   Requests received by week (VLEID copy)     V   LabPrefix, labFacility, LabName, then the same eight columns
+// Both take `from` and `to` (text, YYYY-MM-DD, optional; a final wave adds validation).
+//
+// What differs (W lines, V lines):
+//
+//                      W                                              V
+//   rows               every request (OpenLDRData.Requests)           the copy VLEIDRequests: panels HIVPC, HIVST, HIVVL, VIRAL only
+//   bucket date        coalesce(collection, received, registered)     coalesce(collection, registered)                    (W 15-18, V 25-28)
+//   PCR                HIVPC                                          HIVPC, HIVWB                                        (W 22, V 33)
+//   VL                 HIVVL                                          HIVVL, VIRAL                                        (W 29, V 41)
+//   Other              not HIVPC, HIVST, HIVVL, VIRAL                 not HIVPC, HIVWB, HIVVL, VIRAL                      (W 36, V 49)
+//   floor              coalesce(...) > '2018-05-31'                   none                                                (W 47)
+//   labs               Laboratories (inner, the WHERE kills the NULLs) LabList (right join, labs without requests are listed)
+//
+// The mapping (global constraints). Requests are lab_requests rows. Collection is diagnostic_reports.effective, received is
+// specimens.received_time (the report's specimen), registered is lab_requests.authored_at. V's copy is vleidRequestsCte (sp_UpdateVLEIDRequests):
+// the four panels plus a VIRAL row for each host request with a VIRAL questionnaire answer (spec ruling 6), so the VIRAL members of V's VL group
+// come from those rows. The lab is the report's performer (testingCodeSql), which is cdr's configured OPENLDR_LAB_CODE for each push
+// (cdr v2-transform.ts:401); LabPrefix is that code, LabFacility and LabName are the lab's one name (labNamesCte, the Task 16 rule: the display,
+// else the register name, else the code; a name that is not just the code first, then the smallest in byte order).
+//
+// Counts. Every count is COUNT(DISTINCT RequestID) (W lines 19, 20, 27, 34; V lines 29, 30, 38, 46): distinct request numbers, compared as SQL Server
+// compares text (case and trailing spaces ignored), a NULL number not counted. Not rows. So a request on two panels is one request in Total and
+// in each part it belongs to; the same number on three rows is one; and a week whose requests all have no number is a row of zeros.
+// The base set is one row per request row and folded lab code (the Task 29a pattern), never one per report: a request with two reports of one
+// lab (the code in two spellings) is one row with the earliest valid date of each column, a request with reports from two labs counts for each
+// lab. V's copy holds one row per v1 key (request number, OBR set, panel) and lab, so V folds on that key (the copy does not carry the request
+// row's id; CE data cannot hold two rows with one key, so this only changes two rows that share a key and have no number).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Total counts every panel at the lab (W has no panel filter on the group; V's copy has four). PCR, VL and Other follow the panel rules, so Total
+//     is not PCR + VL + Other. In W, HIVST and VIRAL are in Total only (Other excludes them) and so is a request with a NULL panel (a NULL fails
+//     `not in`); a request on HIVWB, on any other panel or on '' is Other. In V the copy holds HIVST as its only Other; a request on HIVWB, TB,
+//     '' or NULL is not in the copy, so it is not there at all. HIVWB can never reach V's PCR (not in the copy), as the inventory says.
+//   - The three sub-selects (W lines 20-40, V lines 30-53) are not the group. They count over ALL the lab's requests of the same year, month and
+//     week: no floor, no window, no panel filter beyond their own. So with a floor or an end date PCR, VL and Other can pass Total (a week the
+//     floor cuts in two: Total counts the part after the floor, the parts count the whole week). `to` is not in v1; it ends the group like the
+//     floor and, like the floor, not the sub-selects.
+//   - The sub-selects match year, month and week but not quarter. A month is in one quarter, so leaving the quarter out changes no output
+//     (the mutation "match the quarter too" is an equivalent change; the month and the year are what the fixtures pin).
+//   - A group whose bucket date is NULL (V only; W's WHERE drops a request with no date, as it drops any NULL under a floor) has NULL year, quarter,
+//     month and week; the sub-selects compare a NULL year with `=` and match nothing, so its PCR, VL and Other are 0 and Total counts its requests.
+//   - Year, Quarter, Month, Week are DATEPART of the bucket date (integers); Week is SQL Server's US week (dateWeekSql: Sunday first, week 1 holds
+//     1 January), so a year has a partial week 1 and a week 53, and a week crossing a month is two groups.
+//   - The group shows the lab code as the smaller spelling in byte order (v1's pick among spellings is not defined); the groups fold case and
+//     trailing spaces. Two codes with one name are two rows.
+//
+// The floor (spec ruling 3). W's `> '2018-05-31'` (W line 47) compares a datetime with a date: the stamp must be after 00:00:00 of that day. It
+// becomes the parameter `from`, and keeps that compare: a stamp at exactly 00:00:00 of the day (also a stamp that is a date alone) is out, one
+// second later is in; the time is the stamp's own local wall time (a +02:00 stamp stays on its local day). A stamp with a fraction of a second
+// is read to the second (v1's datetime would keep the fraction), so one at 00:00:00.5 is out here and in v1. Blank `from` is no floor. `to` is
+// a whole local day, inclusive. V has no floor in v1: its `from` and `to` are the usual inclusive local-date window on the bucket date, and
+// blank both is all history (the NULL-date group stays; as soon as one side is given it goes, as in Task 29b). W drops a NULL bucket date always.
+//
+// Differences from v1 and CE gaps (spec ruling 7):
+//   - LabList (V) and Laboratories (W) are not in the script. CE lists every lab it has a report for; v1 lists the codes in its dictionary. A lab
+//     that CE has no report for has no row, and neither does a lab with no row in the copy. V's right join to LabList lists a lab with no
+//     requests as one row with NULL year, quarter, month and week and four zeros; CE cannot list a lab without requests (it has no lab list), so
+//     those rows are missing. W's WHERE on the request's date makes its right join an inner join, so W has no such rows in v1 either.
+//   - V's labFacility is the lab's name (as LabFacility is in Tasks 29a and 29b), the same as LabName; v1's LabName is likely a lab area name that
+//     Zambia has not sent (QUESTIONS-FOR-ZM).
+//   - A lab is the performer of a report. A request with no report, or a report with a blank performer, has no lab here and is in no row. cdr gives
+//     every report the pushing lab as performer (v2-transform.ts:401), so on cdr data this is a request with no report yet, not a lost lab code.
+//     v1's fallback to the receiving and requesting facility codes when the testing code is blank has no CE source (the receiving code is not
+//     carried; the requesting code is a facility, not a lab).
+//   - A VIRAL request in v1 shares the host's request number, bucket date and lab, and the group counts it in nothing (W: Other excludes VIRAL) or
+//     in VL (V). In W it adds nothing, so W reads plain lab_requests. A specimen with only a VIRAL panel (no host) is in v1 and not in CE
+//     (the form has no request to attach to).
+//   - The lab's name is taken from all the reports of the lab, not only the listed ones (the copy does not carry the report's display, and the
+//     two queries should name a lab the same way). The names never depend on the window.
+//   - The date windows are not validated (a final wave adds one check).
+//
+// Order: v1 has no ORDER BY; the port orders by every output column (the lab code and name in SQL Server's text order, then year, quarter,
+// month, week and the four counts, NULL first), so CE can page the result. labFacility and LabName are one value, so one key covers both.
+function weeklySql({ copy }) {
+  const panels = copy
+    ? { pcr: ['HIVPC', 'HIVWB'], vl: ['HIVVL', 'VIRAL'], other: ['HIVPC', 'HIVWB', 'HIVVL', 'VIRAL'] }
+    : { pcr: ['HIVPC'], vl: ['HIVVL'], other: ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'] };
+  const rows = copy
+    ? `${vleidRequestsCte('vleid')},
+rr as (
+  select v.request_id, v.obr_set_id as obr, v.lims_panel_code as panel,
+    case when rtrim(v.testing_facility_code) = '' then null else v.testing_facility_code end as code,
+    ${localTs('v.specimen_date_time')} as spec, null::timestamp as recv, ${localTs('v.registered_date_time')} as reg
+  from vleid v
+),
+rq as (
+  select min(r.request_id) as request_id, min(r.panel) as panel, min(r.code collate "C") as code,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.reg) as reg
+  from rr r
+  where r.code is not null
+  group by ${foldSql('r.request_id')}, r.obr, ${foldSql('r.panel')}, ${foldSql('r.code')}
+)`
+    : `rr as (
+  select lr.id as row_id, lr.request_id, lr.panel_code as panel, ${testingCodeSql('dr')} as code,
+    ${localTs('dr.effective')} as spec, ${localTs('s.received_time')} as recv, ${localTs('lr.authored_at')} as reg
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+),
+rq as (
+  select r.row_id, min(r.request_id) as request_id, min(r.panel) as panel, min(r.code collate "C") as code,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.reg) as reg
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
+)`;
+  const bucket = copy ? 'coalesce(q.spec, q.reg)' : 'coalesce(q.spec, q.recv, q.reg)';
+  const window = copy
+    ? optionalWindowSql("to_char(c.b, 'YYYY-MM-DD')")
+    : `c.b is not null
+    and ({{param.from}} = '' or c.b > nullif({{param.from}}, '')::date::timestamp)
+    and ({{param.to}} = '' or c.b::date <= nullif({{param.to}}, '')::date)`;
+  const distinctIds = (cond) => `count(distinct ${foldSql('c.request_id')})${cond === undefined ? '' : ` filter (where ${cond})`}`;
+  const lead = copy ? ['"LabPrefix"', '"labFacility"', '"LabName"'] : ['"Labprefix"', '"LabName"'];
+  const leadValues = copy ? ['g.code', 'g.nm', 'g.nm'] : ['g.code', 'g.nm'];
+  return `with ${rows},
+calc as (
+  select q.request_id, q.panel, q.code, ${bucket} as b
+  from rq q
+),
+base as (
+  select c.*, extract(year from c.b)::int as y, extract(quarter from c.b)::int as qt, extract(month from c.b)::int as mo, ${dateWeekSql('c.b::date')} as wk
+  from calc c
+),
+sel as (
+  select c.*
+  from base c
+  where ${window}
+),
+parts as (
+  select ${foldSql('c.code')} as k, c.y, c.mo, c.wk,
+    ${distinctIds(inListSql('c.panel', panels.pcr))} as pcr,
+    ${distinctIds(inListSql('c.panel', panels.vl))} as vl,
+    ${distinctIds(`not (${inListSql('c.panel', panels.other)})`)} as oth
+  from base c
+  where c.b is not null
+  group by ${foldSql('c.code')}, c.y, c.mo, c.wk
+),
+src as (
+  select ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name
+  from diagnostic_reports dr
+  where ${foldSql('dr.performer')} in (select ${foldSql('q.code')} from sel q)
+),
+${labNamesCte()},
+grp as (
+  select min(c.code collate "C") as code, c.y, c.qt, c.mo, c.wk, ${distinctIds()} as tot
+  from sel c
+  group by ${foldSql('c.code')}, c.y, c.qt, c.mo, c.wk
+),
+g as (
+  select p.code, n.lab_name as nm, p.y, p.qt, p.mo, p.wk, p.tot::int as tot,
+    coalesce(s.pcr, 0)::int as pcr, coalesce(s.vl, 0)::int as vl, coalesce(s.oth, 0)::int as oth
+  from grp p
+  join names n on n.code_key = ${foldSql('p.code')}
+  left join parts s on s.k = ${foldSql('p.code')} and s.y = p.y and s.mo = p.mo and s.wk = p.wk
+)
+select ${lead.map((name, i) => `${leadValues[i]} as ${name}`).join(', ')}, g.y as "Year", g.qt as "Quarter", g.mo as "Month", g.wk as "Week",
+  g.tot as "TotalRequests", g.pcr as "PCRRequests", g.vl as "VLRequests", g.oth as "OtherRequests"
+from g
+order by ${ssTextKey('g.code')} collate "C" nulls first, g.code collate "C" nulls first,
+  ${ssTextKey('g.nm')} collate "C" nulls first, g.nm collate "C" nulls first,
+  g.y nulls first, g.qt nulls first, g.mo nulls first, g.wk nulls first, g.tot, g.pcr, g.vl, g.oth`;
+}
+
+export const weeklyRequestsSql = () => weeklySql({ copy: false });
+export const weeklyRequestsCopySql = () => weeklySql({ copy: true });
+
+// The two date parameters of the weekly request queries. W's `from` is v1's floor (a datetime after 00:00:00 of the day); V's is the usual
+// inclusive date. Both are optional text; a final wave validates them.
+const weeklyParams = (floor) => [
+  { id: 'from', label: floor ? 'Date after (YYYY-MM-DD; blank for no limit; v1 used 2018-05-31; a request at exactly 00:00 of that day is out)' : 'Date from (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
+  { id: 'to', label: 'Date to (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
+];
+
 const windowParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
 
 // The test type of the two completeness queries that have v1 variants. Facility: v1 has the all view, so blank is all. Lab facility: v1 has
@@ -1625,5 +1807,7 @@ export function queries() {
     { name: 'Turnaround times by lab', sql: labTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
     { name: 'Turnaround times by province', sql: provinceTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
     { name: 'VL turnaround by month', sql: monthTurnaroundSql(), params: windowParams() },
+    { name: 'Requests received by week', sql: weeklyRequestsSql(), params: weeklyParams(true) },
+    { name: 'Requests received by week (VLEID copy)', sql: weeklyRequestsCopySql(), params: weeklyParams(false) },
   ];
 }

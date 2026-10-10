@@ -4001,4 +4001,527 @@ insert into diagnostic_reports (id, based_on_id, effective, issued, performer, p
   return { name: 't29b', suites: suites29, probe: { labRowsOf, provRowsOf, modelRows } };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b()];
+// Group t30: Requests received by week (v1 views vWeeklyRequestTrend <= vReceivedRequestsSummary). Fixture ids start with "t30-"; request
+// numbers with "T30-". One world: every request has a report whose performer is the lab (the lab is the performer, cdr's OPENLDR_LAB_CODE).
+// "W line N" and "V line N" mean a line of View__dbo_vWeeklyRequestTrend.sql and View__dbo_vReceivedRequestsSummary.sql.
+// The two views differ in their columns (V adds labFacility), so they are two queries:
+//   w  Requests received by week                  (W: reads every request; panels PCR = HIVPC, VL = HIVVL, Other = not HIVPC/HIVST/HIVVL/VIRAL;
+//                                                  bucket coalesce(collection, received, registered); floor `>` 2018-05-31 (W line 47))
+//   v  Requests received by week (VLEID copy)     (V: reads the copy of four panels; PCR = HIVPC+HIVWB, VL = HIVVL+VIRAL, Other = not those four;
+//                                                  bucket coalesce(collection, registered); no floor)
+// Expected rows come from a model of the v1 text (modelRows below) and from rows worked out by hand ("by hand"). The week numbers of the hand
+// rows were read from SQL Server (datepart(wk, ...)) in task-30-oracle.mjs.
+
+const Q30 = { w: 'Requests received by week', v: 'Requests received by week (VLEID copy)' };
+const t30query = (kind) => queries().find((x) => x.name === Q30[kind]);
+const T30_TAIL = ['Year', 'Quarter', 'Month', 'Week', 'TotalRequests', 'PCRRequests', 'VLRequests', 'OtherRequests'];
+const T30_COLUMNS = {
+  w: ['Labprefix', 'LabName', ...T30_TAIL],                  // W lines 12-40
+  v: ['LabPrefix', 'labFacility', 'LabName', ...T30_TAIL],   // V lines 23-53
+};
+const T30_FORM = 'hiv_vl_documentation';
+// The three panel groups of each view (W lines 22, 29, 36; V lines 33, 41, 49), folded.
+const T30_PANELS = {
+  w: { pcr: ['hivpc'], vl: ['hivvl'], other: ['hivpc', 'hivst', 'hivvl', 'viral'] },
+  v: { pcr: ['hivpc', 'hivwb'], vl: ['hivvl', 'viral'], other: ['hivpc', 'hivwb', 'hivvl', 'viral'] },
+};
+// The panels the copy table holds (sp_UpdateVLEIDRequests line 23).
+const T30_COPY = ['hivpc', 'hivst', 'hivvl', 'viral'];
+// A v1 datetime from a stamp's own local text (the offset is dropped): 'YYYY-MM-DDTHH:MM:SS', a date alone is midnight, anything else NULL.
+function t30ts(x) {
+  if (typeof x !== 'string') return null;
+  const m = x.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})(:\d{2})?/);
+  if (m) return `${m[1]}T${m[2]}${m[3] ?? ':00'}`;
+  return /^\d{4}-\d{2}-\d{2}/.test(x) ? `${x.slice(0, 10)}T00:00:00` : null;
+}
+const t30min = (xs) => xs.map(t30ts).filter((x) => x !== null).sort()[0] ?? null;
+
+function group30() {
+  const P = 't30-';
+  let n = 0;
+  const fm = [];
+  const reqRows = [];
+  const repRows = [];
+  const specRows = [];
+  const formRows = [];
+  const recs = [];
+  const mapped = [];
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+  // 'MM-DD' becomes a 2026 stamp in a form of its own (s: offset, v: Z, r: date only); null stays NULL; any other text goes in as it is.
+  const FORMS = { s: (d) => `${d}T09:30:00+02:00`, v: (d) => `${d}T10:00:00Z`, r: (d) => d };
+  const stamp = (kind, v) => {
+    if (v === null || v === undefined) return null;
+    return /^\d\d-\d\d$/.test(v) ? FORMS[kind](`2026-${v}`) : v;
+  };
+  // One request row. s, v: the report's collection (effective) and the specimen's received time. r: registered (authored_at). `reports`:
+  // several reports as { s, v, code, display }; `report: false`: none. `form`: a VIRAL questionnaire answer on the request.
+  function add(o) {
+    const r = { panel: 'HIVPC', rid: undefined, obr: null, s: null, v: null, r: null, code: null, display: null, report: true, reports: null, form: false, ...o };
+    n += 1;
+    r.id = `${P}q${n}`;
+    if (r.rid === undefined) r.rid = `T30-${n}`;
+    r.reg = stamp('r', r.r);
+    const source = r.reports ?? (r.report === false ? [] : [{ s: r.s, v: r.v, code: r.code, display: r.display }]);
+    r.reps = source.map((x) => ({ spec: stamp('s', x.s), recv: stamp('v', x.v), code: x.code ?? null, display: x.display ?? null }));
+    reqRows.push(`(${lit(r.id)}, ${lit(r.rid)}, ${lit(r.panel)}, ${lit(r.reg)}, ${num(r.obr)})`);
+    r.reps.forEach((rep, i) => {
+      let specimenId = null;
+      if (rep.recv !== null) {
+        specimenId = `${r.id}-s${i + 1}`;
+        specRows.push(`(${lit(specimenId)}, ${lit(rep.recv)})`);
+      }
+      repRows.push(`(${lit(`${r.id}-d${i + 1}`)}, ${lit(r.id)}, ${lit(rep.spec)}, ${lit(rep.code)}, ${lit(rep.display)}, ${lit(specimenId)})`);
+    });
+    if (r.form) formRows.push(`(${lit(`${r.id}-f`)}, ${lit(T30_FORM)}, ${lit(r.id)}, '[]', '2026-05-02T08:00:00Z')`);
+    recs.push(r);
+    return r;
+  }
+  // A lab: its reports have the code and the display "<name> Lab" unless a row says otherwise (null stays null).
+  function lab(name, code, rows) {
+    const own = (x) => ({ ...x, code: x.code === undefined ? code : x.code, display: x.display === undefined ? `${name} Lab` : x.display });
+    for (const row of rows) add({ ...own(row), reports: row.reports ? row.reports.map(own) : undefined });
+  }
+  const one = (panel, r, o = {}) => ({ panel, r, ...o });
+
+  // ===========================================================================================================================
+  // Scenarios. May 2026: the 1st is a Friday, so 3 May is a Sunday (week 19 starts) and 10 May a Sunday (week 20 starts).
+  // ===========================================================================================================================
+  // Panel: one request per panel word, each in a week of its own, so a panel shows as a single count and a wrong list shows at once.
+  // W: HIVPC is PCR, HIVVL is VL, Other is everything else except HIVST and VIRAL (HIVWB, TB, '' are Other; HIVST, VIRAL and NULL count in
+  // Total only). V reads the copy: only HIVPC, HIVST, HIVVL and VIRAL are in it, so HIVWB, TB, '' and NULL are not requests there at all.
+  lab('Panel', 'ZPN', [
+    one('HIVPC', '05-04'), one('HIVVL', '05-11'), one('HIVST', '05-18'), one('VIRAL', '05-25'), one('HIVWB', '06-01'), one('TB', '06-08'),
+    one('hivpc ', '06-15'), one(null, '06-22'), one('', '06-29'), one('hivvl', '07-06'), one('hivwb', '07-13'),
+  ]);
+  // Mix: seven requests in one week. Total counts every panel of the lab, so Total is not PCR + VL + Other.
+  lab('Mix', 'ZMX', [
+    one('HIVPC', '05-04'), one('HIVPC', '05-04'), one('HIVVL', '05-04'), one('HIVST', '05-04'), one('VIRAL', '05-04'), one('TB', '05-04'), one(null, '05-04'),
+  ]);
+  // Dist: the counts are of distinct request numbers. D1 is on two panels (two OBR sets), D2 on three rows in three spellings, and two rows
+  // have no request number (a week with only those is a row with zeros).
+  lab('Dist', 'ZDS', [
+    one('HIVPC', '05-04', { rid: 'D1', obr: 1 }), one('HIVVL', '05-04', { rid: 'D1', obr: 2 }),
+    one('HIVPC', '05-04', { rid: 'D2', obr: 1 }), one('HIVPC', '05-04', { rid: 'd2', obr: 2 }), one('HIVPC', '05-04', { rid: 'D2  ', obr: 3 }),
+    one('HIVPC', '05-18', { rid: null, obr: 1 }), one('HIVPC', '05-18', { rid: null, obr: 2 }),
+  ]);
+  // Rep: a request with two reports from one lab (the code in two spellings) is one request row. Its dates are the earliest of each column.
+  // RP1: collection 4 and 12 May (the earlier, week 19). RP2: no collection date; received 13 May on one report (W: week 20; V has no
+  // received date, so registered, 27 May, week 22).
+  lab('Rep', 'ZRP', [
+    one('HIVPC', '05-20', { rid: 'RP1', reports: [{ s: '05-04', v: '05-06' }, { code: 'zrp ', s: '05-12', v: '05-13' }] }),
+    one('HIVVL', '05-27', { rid: 'RP2', reports: [{ v: '05-13' }, { v: null }] }),
+  ]);
+  // Two: one request with reports from two labs counts for each lab.
+  lab('Two', 'ZTA', [
+    one('HIVPC', '05-20', { rid: 'RT1', reports: [{ code: 'ZTA', display: 'Twoa Lab', s: '05-04' }, { code: 'ZTB', display: 'Twob Lab', s: '05-04' }] }),
+  ]);
+  // Bucket: the date of the week. B1 has all three dates (collection wins). B2 has no collection date: W takes the received date (12 May),
+  // V has none and takes registered (20 May). B3 has '' as collection: registered. B4 has a month as collection and '' as received:
+  // registered. B5 has no date at all: W drops it (a NULL date fails the floor), V keeps it as a group with NULL year, quarter, month and week.
+  lab('Bucket', 'ZBK', [
+    one('HIVPC', '05-20', { rid: 'B1', s: '05-04', v: '05-12' }),
+    one('HIVVL', '05-20', { rid: 'B2', v: '05-12' }),
+    one('HIVPC', '05-27', { rid: 'B3', s: '' }),
+    one('HIVVL', '06-03', { rid: 'B4', s: '2026-07', v: '' }),
+    one('HIVST', null, { rid: 'B5' }),
+  ]);
+  // Week: only a registered date, one request each, around 1 January and a Sunday (local dates: a +02:00 stamp stays on its local day), the
+  // quarter change, a leap day, and two months in one week (30 April and 1 May, week 18) and two years in one month and week (1 January 2026
+  // and 2027, week 1).
+  const wk = (r, panel) => one(panel, r);
+  lab('Week', 'ZWK', [
+    wk('2025-12-31T23:30:00+02:00', 'HIVPC'), wk('2026-01-01T00:30:00+02:00', 'HIVVL'), wk('2026-01-03T23:30:00+02:00', 'HIVPC'),
+    wk('2026-01-04T00:30:00+02:00', 'HIVVL'), wk('2026-12-31', 'HIVPC'), wk('2027-01-01T08:00:00Z', 'HIVVL'), wk('2027-01-02', 'HIVPC'),
+    wk('2027-01-03T00:20:00+02:00', 'HIVVL'), wk('2026-03-31T23:50:00+02:00', 'HIVPC'), wk('2026-04-01T00:20:00+02:00', 'HIVVL'),
+    wk('2024-02-29', 'HIVPC'), wk('2026-04-30', 'HIVPC'), wk('2026-05-01', 'HIVVL'), wk('2023-01-01', 'HIVPC'), wk('2023-01-07', 'HIVVL'),
+    wk('2023-01-08', 'HIVPC'),
+  ]);
+  // Off: collection and received stamps with +02:00 just after local midnight. OF1: collection Sunday 3 May 00:30 (week 19; in UTC it is
+  // Saturday, week 18). OF2: received Sunday 10 May 00:10 (W: week 20; V: registered, 20 May, week 21).
+  lab('Off', 'ZOF', [
+    one('HIVPC', '05-20', { rid: 'OF1', s: '2026-05-03T00:30:00+02:00' }),
+    one('HIVVL', '05-20', { rid: 'OF2', v: '2026-05-10T00:10:00+02:00' }),
+  ]);
+  // Floor: seven requests in week 24 (7 to 13 June) with registered stamps around the edge 10 June. W compares a datetime with the date
+  // (`> floor`): a stamp at exactly 00:00:00 of that day is out, one second later is in. HIVPC: F1 F2 F4 F6 F7; HIVVL: F3 F5.
+  lab('Floor', 'ZFL', [
+    one('HIVPC', '2026-06-10', { rid: 'F1' }),                       // a date alone is midnight
+    one('HIVPC', '2026-06-10T00:00:00+02:00', { rid: 'F2' }),
+    one('HIVVL', '2026-06-10T00:00:01+02:00', { rid: 'F3' }),
+    one('HIVPC', '2026-06-09T23:59:59+02:00', { rid: 'F4' }),
+    one('HIVVL', '2026-06-10T08:00:00Z', { rid: 'F5' }),
+    one('HIVPC', '2026-06-09T22:30:00Z', { rid: 'F6' }),             // its local date is 9 June
+    one('HIVPC', '2026-06-11T00:30:00+02:00', { rid: 'F7' }),        // its local date is 11 June (in UTC it is 10 June)
+  ]);
+  // Old: the real v1 floor, 2018-05-31. Weeks 22 (27 May to 2 June 2018). The 31 May request at 08:00 is after the floor; at 00:00 it is not.
+  lab('Old', 'ZOL', [
+    one('HIVPC', '2018-05-31T00:00:00+02:00', { rid: 'O1' }), one('HIVPC', '2018-05-31T08:00:00+02:00', { rid: 'O2' }),
+    one('HIVPC', '2018-05-30', { rid: 'O3' }), one('HIVVL', '2018-06-01', { rid: 'O4' }),
+  ]);
+  // Virf: VIRAL reaches CE as a form answer on the host request. The copy (V) holds one more row, panel VIRAL, for each host with an answer
+  // (whatever the host panel is, also HIVWB or TB, which are not in the copy themselves). W reads the requests only: the form changes nothing.
+  lab('Virf', 'ZVF', [
+    one('HIVPC', '05-04', { rid: 'VF1', form: true }), one('HIVWB', '05-11', { rid: 'VF2', form: true }), one('TB', '05-18', { rid: 'VF3', form: true }),
+    one('HIVST', '05-25', { rid: 'VF5', form: true }), one('HIVPC', '06-01', { rid: 'VF6', report: false, form: true }),
+  ]);
+  // Wb: a lab whose only requests are on panels the copy does not hold. W lists it; V has no row for it.
+  lab('Wb', 'ZWB', [one('HIVWB', '05-04'), one('TB', '05-04')]);
+  // Names: the lab name is one per code: a name that is not just the code first, then the smallest in byte order.
+  lab('Names', 'ZNC', [one('HIVPC', '05-04', { display: 'Name B' }), one('HIVPC', '05-04', { display: 'Name A' }), one('HIVPC', '05-04', { display: null })]);
+  lab('Zulu', 'AAB', [one('HIVPC', '05-04', { display: 'Zulu Lab' }), one('HIVPC', '05-04', { display: null })]);
+  mapped.push({ code: 'ZMP', name: 'Mapped Lab Name' });
+  fm.push(`(${lit(`${P}fm1`)}, '', '', 'ZMP', ${lit(`reg-${P}1`)}, 'Mapped Lab Name')`);
+  lab('Mapped', 'ZMP', [one('HIVPC', '05-04', { display: null })]);
+  // Case: one lab, three spellings of its code (the group shows the smallest in byte order).
+  lab('Case', 'ZCS', [one('HIVPC', '05-04'), one('HIVPC', '05-04', { code: 'Zcs' }), one('HIVPC', '05-04', { code: 'zcs ' })]);
+  // Shared: two lab codes with one name are two rows.
+  lab('Shared', 'ZEF', [one('HIVPC', '05-04', { display: 'Shared Lab' })]);
+  lab('Shared2', 'ZGH', [one('HIVPC', '05-04', { display: 'Shared Lab' })]);
+  // NoLab: a request with no report, a blank code and no code have no lab: in no row.
+  lab('NoLab', 'ZNL', [
+    one('HIVPC', '05-04', { report: false }), one('HIVPC', '05-04', { code: '   ', display: 'Blank Lab' }), one('HIVPC', '05-04', { code: null, display: 'No Code Lab' }),
+  ]);
+  // apple: a name that starts with a small letter sorts among the others (case ignored).
+  lab('apple', 'ZAP', [one('HIVPC', '05-04')]);
+  // zab: a lab code in small letters sorts between ZAP and ZBK in SQL Server (case ignored); in byte order it would come last.
+  lab('Lower', 'zab', [one('HIVPC', '05-04')]);
+
+  const setup = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name) values
+  ${fm.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, obr_set_id) values
+  ${reqRows.join(',\n  ')};
+insert into specimens (id, received_time) values
+  ${specRows.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, effective, performer, performer_display, specimen_id) values
+  ${repRows.join(',\n  ')};
+insert into questionnaire_responses (id, form_code, based_on_id, items, authored) values
+  ${formRows.join(',\n  ')};`;
+
+  // ---- The model: the result v1 gives for these rows ----
+  const blank = (x) => x === null || x === undefined || x.replace(/ +$/, '') === '';
+  // One name per lab code from every report of the lab: the display, else the register name, else the code; a name that is not just the code
+  // first, then the smallest in byte order.
+  function nameMap() {
+    const byCode = new Map();
+    for (const r of recs) {
+      for (const x of r.reps) {
+        if (blank(x.code)) continue;
+        const k = t29fold(x.code);
+        const m = mapped.find((y) => y.code === x.code);
+        const display = x.display !== null && x.display.trim() !== '' ? x.display : null;
+        if (!byCode.has(k)) byCode.set(k, []);
+        byCode.get(k).push(display ?? m?.name ?? x.code);
+      }
+    }
+    return new Map([...byCode].map(([k, list]) => [k, list.sort((a, b) => ((t29fold(a) === k) - (t29fold(b) === k)) || t29byteCmp(a, b))[0]]));
+  }
+  // The v1 rows. W: one per request row and folded lab code, with the earliest valid date of each column among that lab's reports.
+  // V: the rows of the copy (the four panels, plus a VIRAL row for each host with a form answer unless the lab number has a VIRAL request),
+  // one per v1 key (request number, OBR set, panel) and folded lab code.
+  function baseRows(kind) {
+    const out = [];
+    if (kind === 'w') {
+      for (const r of recs) {
+        const byLab = new Map();
+        for (const x of r.reps) {
+          if (blank(x.code)) continue;
+          const k = t29fold(x.code);
+          if (!byLab.has(k)) byLab.set(k, []);
+          byLab.get(k).push(x);
+        }
+        for (const list of byLab.values()) {
+          out.push({ rid: r.rid, panel: r.panel, code: list.map((x) => x.code).sort(t29byteCmp)[0], spec: t30min(list.map((x) => x.spec)), recv: t30min(list.map((x) => x.recv)), reg: t30ts(r.reg) });
+        }
+      }
+      return out;
+    }
+    const copy = [];
+    for (const r of recs) {
+      const hasViral = r.rid !== null && recs.some((o) => o.rid === r.rid && t29fold(o.panel) === 'viral');
+      for (const x of r.reps) {
+        if (blank(x.code)) continue;
+        const row = { rid: r.rid, obr: r.obr, code: x.code, spec: t30ts(x.spec), reg: t30ts(r.reg) };
+        if (r.panel !== null && T30_COPY.includes(t29fold(r.panel))) copy.push({ ...row, panel: r.panel });
+        if (r.form && !hasViral) copy.push({ ...row, panel: 'VIRAL' });
+      }
+    }
+    const byKey = new Map();
+    for (const c of copy) {
+      const key = JSON.stringify([c.rid === null ? null : t29fold(c.rid), c.obr, t29fold(c.panel), t29fold(c.code)]);
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(c);
+    }
+    for (const list of byKey.values()) {
+      const pick = (f) => list.map(f).filter((x) => x !== null).sort(t29byteCmp)[0] ?? null;
+      out.push({ rid: pick((x) => x.rid), panel: pick((x) => x.panel), code: pick((x) => x.code), spec: pick((x) => x.spec), recv: null, reg: pick((x) => x.reg) });
+    }
+    return out;
+  }
+  // The result of a view for a window: floor and end (W: `from` is the v1 floor, a datetime compare; V: an inclusive date window), groups,
+  // distinct counts, and the panel sub-selects, which see every row of the lab, year, month and week (no window, no quarter).
+  function modelRows(kind, { from = '', to = '' } = {}) {
+    const names = nameMap();
+    const P3 = T30_PANELS[kind];
+    const rows = baseRows(kind).map((r) => {
+      const b = kind === 'w' ? (r.spec ?? r.recv ?? r.reg) : (r.spec ?? r.reg);
+      const day = b === null ? null : b.slice(0, 10);
+      const mo = b === null ? null : Number(b.slice(5, 7));
+      return { ...r, b, y: b === null ? null : Number(b.slice(0, 4)), qt: b === null ? null : Math.ceil(mo / 3), mo, wk: b === null ? null : t29bWeek(day), k: t29fold(r.code) };
+    });
+    const listed = rows.filter((r) => {
+      if (kind === 'w') return r.b !== null && (from === '' || r.b > `${from}T00:00:00`) && (to === '' || r.b.slice(0, 10) <= to);
+      if (from === '' && to === '') return true;
+      return r.b !== null && (from === '' || r.b.slice(0, 10) >= from) && (to === '' || r.b.slice(0, 10) <= to);
+    });
+    const inList = (list, p) => p !== null && p !== undefined && list.includes(t29fold(p));
+    const distinct = (list) => new Set(list.filter((r) => r.rid !== null).map((r) => t29fold(r.rid))).size;
+    const groups = new Map();
+    for (const r of listed) {
+      const gk = JSON.stringify([r.k, r.y, r.qt, r.mo, r.wk]);
+      if (!groups.has(gk)) groups.set(gk, []);
+      groups.get(gk).push(r);
+    }
+    const out = [];
+    for (const list of groups.values()) {
+      const g = list[0];
+      const same = g.b === null ? [] : rows.filter((r) => r.b !== null && r.k === g.k && r.y === g.y && r.mo === g.mo && r.wk === g.wk);
+      const code = list.map((r) => r.code).sort(t29byteCmp)[0];
+      const name = names.get(g.k);
+      const tail = {
+        Year: g.y, Quarter: g.qt, Month: g.mo, Week: g.wk, TotalRequests: distinct(list),
+        PCRRequests: distinct(same.filter((r) => inList(P3.pcr, r.panel))),
+        VLRequests: distinct(same.filter((r) => inList(P3.vl, r.panel))),
+        OtherRequests: distinct(same.filter((r) => r.panel !== null && !P3.other.includes(t29fold(r.panel)))),
+      };
+      out.push(kind === 'w' ? { Labprefix: code, LabName: name, ...tail } : { LabPrefix: code, labFacility: name, LabName: name, ...tail });
+    }
+    const cols = T30_COLUMNS[kind];
+    return out.sort((a, b) => t29textCmp(a[cols[0]], b[cols[0]]) || t29textCmp(a.LabName, b.LabName)
+      || T30_TAIL.reduce((d, c) => d || t29bNum(a[c], b[c]), 0));
+  }
+
+  // ---- Suites ----
+  const NONE = { from: '', to: '' };
+  function listSuite(name, kind, params, wanted, where) {
+    const q = t30query(kind);
+    const text = q && where ? `select z.* from (${q.sql}) z where ${where}` : (q?.sql ?? 'select null::text as "x"');
+    const s = orderedSuite(name, text, { ...NONE, ...params }, T30_COLUMNS[kind], wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${Q30[kind]}" is missing`, ...check(got)];
+    }
+    return s;
+  }
+  const modelSuite = (name, kind, params = {}) => listSuite(name, kind, params, modelRows(kind, params));
+  function valueSuite(name, kind, selectExpr, want) {
+    const q = t30query(kind);
+    if (!q) return { name, count: 1, check: () => [`query "${Q30[kind]}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `select ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  const BANNED = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
+  const shape = (name, kind) => ({
+    name,
+    count: 5,
+    check() {
+      const q = t30query(kind);
+      if (!q) return [`query "${Q30[kind]}" is missing`];
+      const bad = [];
+      const ids = q.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: expected from, to; got ${ids}`);
+      q.params.forEach((p) => {
+        if (p.required !== false) bad.push(`${p.id}: v1 has no required input, so it must be optional`);
+        if (p.type !== 'text') bad.push(`${p.id}: expected type text, got ${p.type}`);
+      });
+      if (BANNED.test(q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(q.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  });
+  const orderHas = (name, kind, needles) => ({
+    name,
+    count: needles.length,
+    check() {
+      const q = t30query(kind);
+      if (!q) return [`query "${Q30[kind]}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      return needles.filter((x) => !tail.includes(x)).map((x) => `ORDER BY must list ${x}`);
+    },
+  });
+
+  // ---- Hand rows ----
+  const nm = (lower) => `lower(rtrim(z."LabName")) = ${lit(lower)}`;
+  const wr = (prefix, name, y, q, m, w, t, pcr, vl, oth) => ({ Labprefix: prefix, LabName: name, Year: y, Quarter: q, Month: m, Week: w, TotalRequests: t, PCRRequests: pcr, VLRequests: vl, OtherRequests: oth });
+  const vr = (prefix, name, y, q, m, w, t, pcr, vl, oth) => ({ LabPrefix: prefix, labFacility: name, LabName: name, Year: y, Quarter: q, Month: m, Week: w, TotalRequests: t, PCRRequests: pcr, VLRequests: vl, OtherRequests: oth });
+  const W = (id, params, wanted, name) => listSuite(`t30-hand-w-${id}`, 'w', params, wanted, nm(name));
+  const V = (id, params, wanted, name) => listSuite(`t30-hand-v-${id}`, 'v', params, wanted, nm(name));
+  // The Week lab: the same 13 groups in both views (every request is HIVPC or HIVVL). (prefix, name) = ZWK, Week Lab.
+  const weekRows = (make) => [
+    make(2023, 1, 1, 1, 2, 1, 1, 0), make(2023, 1, 1, 2, 1, 1, 0, 0), make(2024, 1, 2, 9, 1, 1, 0, 0), make(2025, 4, 12, 53, 1, 1, 0, 0),
+    make(2026, 1, 1, 1, 2, 1, 1, 0), make(2026, 1, 1, 2, 1, 0, 1, 0), make(2026, 1, 3, 14, 1, 1, 0, 0), make(2026, 2, 4, 14, 1, 0, 1, 0),
+    make(2026, 2, 4, 18, 1, 1, 0, 0), make(2026, 2, 5, 18, 1, 0, 1, 0), make(2026, 4, 12, 53, 1, 1, 0, 0), make(2027, 1, 1, 1, 2, 1, 1, 0),
+    make(2027, 1, 1, 2, 1, 0, 1, 0),
+  ];
+  const wW = (...a) => wr('ZWK', 'Week Lab', ...a);
+  const vW = (...a) => vr('ZWK', 'Week Lab', ...a);
+  const W10 = { from: '2026-06-10' };
+  const W1010 = { from: '2026-06-10', to: '2026-06-10' };
+
+  const suites30 = [
+    { name: 't30-setup', setup, count: 0, check: () => [] },
+    // -- Declared shape --
+    shape('t30-shape-w', 'w'),
+    shape('t30-shape-v', 'v'),
+    orderHas('t30-order-w', 'w', ['g.code', 'g.nm', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.tot', 'g.pcr', 'g.vl', 'g.oth']),
+    orderHas('t30-order-v', 'v', ['g.code', 'g.nm', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.tot', 'g.pcr', 'g.vl', 'g.oth']),
+    // -- Types: the year, quarter, month, week and the four counts are integers (v1: datepart and count) --
+    valueSuite('t30-types-w', 'w', (s) => `select json_build_object(${T30_COLUMNS.w.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+      Object.fromEntries(T30_COLUMNS.w.map((c, i) => [c, i < 2 ? 'text' : 'integer']))),
+    valueSuite('t30-types-v', 'v', (s) => `select json_build_object(${T30_COLUMNS.v.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+      Object.fromEntries(T30_COLUMNS.v.map((c, i) => [c, i < 3 ? 'text' : 'integer']))),
+
+    // ===== By hand: W (vWeeklyRequestTrend) =====
+    // W lines 22 and 29: PCR is HIVPC only, VL is HIVVL only; line 36: Other is not HIVPC, HIVST, HIVVL, VIRAL. HIVST and VIRAL are in Total only;
+    // HIVWB, TB and '' are Other; a NULL panel is in Total only (a NULL fails `not in`). The words compare ignoring case and trailing spaces.
+    W('panel', {}, [
+      wr('ZPN', 'Panel Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 5, 20, 1, 0, 1, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 5, 21, 1, 0, 0, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 5, 22, 1, 0, 0, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 6, 23, 1, 0, 0, 1),
+      wr('ZPN', 'Panel Lab', 2026, 2, 6, 24, 1, 0, 0, 1),
+      wr('ZPN', 'Panel Lab', 2026, 2, 6, 25, 1, 1, 0, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 6, 26, 1, 0, 0, 0),
+      wr('ZPN', 'Panel Lab', 2026, 2, 6, 27, 1, 0, 0, 1),
+      wr('ZPN', 'Panel Lab', 2026, 3, 7, 28, 1, 0, 1, 0),
+      wr('ZPN', 'Panel Lab', 2026, 3, 7, 29, 1, 0, 0, 1),
+    ], 'panel lab'),
+    // Total counts every panel at the lab (7), the parts do not add up to it (2 + 1 + 1).
+    W('mix', {}, [wr('ZMX', 'Mix Lab', 2026, 2, 5, 19, 7, 2, 1, 1)], 'mix lab'),
+    // Distinct request numbers: D1 on two panels is one request in Total and in both parts; D2 on three rows in three spellings is one. A week
+    // with only NULL request numbers is a row of zeros.
+    W('dist', {}, [wr('ZDS', 'Dist Lab', 2026, 2, 5, 19, 2, 2, 1, 0), wr('ZDS', 'Dist Lab', 2026, 2, 5, 21, 0, 0, 0, 0)], 'dist lab'),
+    // Two reports of one lab are one request row: the earliest collection date (4 May, week 19) and, for RP2, the earliest received date.
+    W('rep', {}, [wr('ZRP', 'Rep Lab', 2026, 2, 5, 19, 1, 1, 0, 0), wr('ZRP', 'Rep Lab', 2026, 2, 5, 20, 1, 0, 1, 0)], 'rep lab'),
+    W('two-a', {}, [wr('ZTA', 'Twoa Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'twoa lab'),
+    W('two-b', {}, [wr('ZTB', 'Twob Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'twob lab'),
+    // W bucket: coalesce(collection, received, registered) (W lines 15-18). B5 has no date: out. B2 uses the received date (week 20).
+    W('bucket', {}, [
+      wr('ZBK', 'Bucket Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      wr('ZBK', 'Bucket Lab', 2026, 2, 5, 20, 1, 0, 1, 0),
+      wr('ZBK', 'Bucket Lab', 2026, 2, 5, 22, 1, 1, 0, 0),
+      wr('ZBK', 'Bucket Lab', 2026, 2, 6, 23, 1, 0, 1, 0),
+    ], 'bucket lab'),
+    // Weeks and years. Sub-selects match year, month and week: 30 April (HIVPC) and 1 May (HIVVL) share week 18 and a quarter but are two groups with
+    // their own counts; 31 December 2025 and 2026 share month and week 53 but not the year.
+    W('week', {}, weekRows(wW), 'week lab'),
+    W('off', {}, [wr('ZOF', 'Off Lab', 2026, 2, 5, 19, 1, 1, 0, 0), wr('ZOF', 'Off Lab', 2026, 2, 5, 20, 1, 0, 1, 0)], 'off lab'),
+    // The floor edge (W line 47: `> '2018-05-31'`): a datetime compared with a date. Exactly 00:00:00 of the day is out, one second later in.
+    // The sub-selects have no floor: PCR counts all five HIVPC requests of the week, more than Total (the three that pass).
+    W('floor-none', {}, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 7, 5, 2, 0)], 'floor lab'),
+    W('floor-10', W10, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 3, 5, 2, 0)], 'floor lab'),
+    W('floor-09', { from: '2026-06-09' }, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 7, 5, 2, 0)], 'floor lab'),
+    W('floor-11', { from: '2026-06-11' }, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 1, 5, 2, 0)], 'floor lab'),
+    // `to` (not in v1) is a whole local day, inclusive: 10 June ends at 23:59:59, F7 (11 June 00:30 +02:00) is out. The end is outside the sub-selects too.
+    W('floor-10-10', W1010, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 2, 5, 2, 0)], 'floor lab'),
+    W('floor-to-09', { to: '2026-06-09' }, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 2, 5, 2, 0)], 'floor lab'),
+    // 2018-05-31 08:00 is after the v1 floor; 00:00 is not. O3 (30 May) and O1 are before the floor but in the sub-select of week 22 of May.
+    W('old-floor', { from: '2018-05-31' }, [wr('ZOL', 'Old Lab', 2018, 2, 5, 22, 1, 3, 0, 0), wr('ZOL', 'Old Lab', 2018, 2, 6, 22, 1, 0, 1, 0)], 'old lab'),
+    W('old-none', {}, [wr('ZOL', 'Old Lab', 2018, 2, 5, 22, 3, 3, 0, 0), wr('ZOL', 'Old Lab', 2018, 2, 6, 22, 1, 0, 1, 0)], 'old lab'),
+    // W reads requests, not the copy and not the forms: HIVWB and TB are Other, the form answers add nothing.
+    W('virf', {}, [
+      wr('ZVF', 'Virf Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      wr('ZVF', 'Virf Lab', 2026, 2, 5, 20, 1, 0, 0, 1),
+      wr('ZVF', 'Virf Lab', 2026, 2, 5, 21, 1, 0, 0, 1),
+      wr('ZVF', 'Virf Lab', 2026, 2, 5, 22, 1, 0, 0, 0),
+    ], 'virf lab'),
+    W('wb', {}, [wr('ZWB', 'Wb Lab', 2026, 2, 5, 19, 2, 0, 0, 2)], 'wb lab'),
+    W('names', {}, [wr('ZNC', 'Name A', 2026, 2, 5, 19, 3, 3, 0, 0)], 'name a'),
+    W('names-b', {}, [], 'name b'),
+    W('zulu', {}, [wr('AAB', 'Zulu Lab', 2026, 2, 5, 19, 2, 2, 0, 0)], 'zulu lab'),
+    W('mapped', {}, [wr('ZMP', 'Mapped Lab Name', 2026, 2, 5, 19, 1, 1, 0, 0)], 'mapped lab name'),
+    W('case', {}, [wr('ZCS', 'Case Lab', 2026, 2, 5, 19, 3, 3, 0, 0)], 'case lab'),
+    W('shared', {}, [wr('ZEF', 'Shared Lab', 2026, 2, 5, 19, 1, 1, 0, 0), wr('ZGH', 'Shared Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'shared lab'),
+    W('nolab-blank', {}, [], 'blank lab'),
+    W('nolab-none', {}, [], 'no code lab'),
+    W('apple', {}, [wr('ZAP', 'apple Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'apple lab'),
+    W('lower', {}, [wr('zab', 'Lower Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'lower lab'),
+
+    // ===== By hand: V (vReceivedRequestsSummary, the VLEID copy) =====
+    // V lines 33, 41, 49: PCR is HIVPC and HIVWB, VL is HIVVL and VIRAL, Other is not those four (in the copy that is HIVST only).
+    // HIVWB, TB, '' and NULL are not in the copy, so those requests are not there at all.
+    V('panel', {}, [
+      vr('ZPN', 'Panel Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      vr('ZPN', 'Panel Lab', 2026, 2, 5, 20, 1, 0, 1, 0),
+      vr('ZPN', 'Panel Lab', 2026, 2, 5, 21, 1, 0, 0, 1),
+      vr('ZPN', 'Panel Lab', 2026, 2, 5, 22, 1, 0, 1, 0),
+      vr('ZPN', 'Panel Lab', 2026, 2, 6, 25, 1, 1, 0, 0),
+      vr('ZPN', 'Panel Lab', 2026, 3, 7, 28, 1, 0, 1, 0),
+    ], 'panel lab'),
+    // Five rows are in the copy; each is in Total, and here the parts add up to it (2 + 2 + 1).
+    V('mix', {}, [vr('ZMX', 'Mix Lab', 2026, 2, 5, 19, 5, 2, 2, 1)], 'mix lab'),
+    V('dist', {}, [vr('ZDS', 'Dist Lab', 2026, 2, 5, 19, 2, 2, 1, 0), vr('ZDS', 'Dist Lab', 2026, 2, 5, 21, 0, 0, 0, 0)], 'dist lab'),
+    // Rep: V has no received date, so RP2 is bucketed on registered (27 May, week 22).
+    V('rep', {}, [vr('ZRP', 'Rep Lab', 2026, 2, 5, 19, 1, 1, 0, 0), vr('ZRP', 'Rep Lab', 2026, 2, 5, 22, 1, 0, 1, 0)], 'rep lab'),
+    V('two-a', {}, [vr('ZTA', 'Twoa Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'twoa lab'),
+    V('two-b', {}, [vr('ZTB', 'Twob Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'twob lab'),
+    // V bucket: coalesce(collection, registered) (V lines 25-28). B2 is registered 20 May (week 21). B5 (no date) is a group with NULL
+    // year, quarter, month and week, and its parts are 0 (a NULL year matches nothing).
+    V('bucket', {}, [
+      vr('ZBK', 'Bucket Lab', null, null, null, null, 1, 0, 0, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 21, 1, 0, 1, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 22, 1, 1, 0, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 6, 23, 1, 0, 1, 0),
+    ], 'bucket lab'),
+    V('bucket-window', { from: '2026-05-01', to: '2026-06-30' }, [
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 19, 1, 1, 0, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 21, 1, 0, 1, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 5, 22, 1, 1, 0, 0),
+      vr('ZBK', 'Bucket Lab', 2026, 2, 6, 23, 1, 0, 1, 0),
+    ], 'bucket lab'),
+    V('week', {}, weekRows(vW), 'week lab'),
+    V('off', {}, [vr('ZOF', 'Off Lab', 2026, 2, 5, 19, 1, 1, 0, 0), vr('ZOF', 'Off Lab', 2026, 2, 5, 21, 1, 0, 1, 0)], 'off lab'),
+    // V has no floor. A window is inclusive on the local date: F1 and F2 (10 June at 00:00) are in. The sub-selects have no window.
+    V('floor-none', {}, [vr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 7, 5, 2, 0)], 'floor lab'),
+    V('floor-10-10', W1010, [vr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 4, 5, 2, 0)], 'floor lab'),
+    V('floor-10', W10, [vr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 5, 5, 2, 0)], 'floor lab'),
+    V('floor-to-09', { to: '2026-06-09' }, [vr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 2, 5, 2, 0)], 'floor lab'),
+    V('old-none', {}, [vr('ZOL', 'Old Lab', 2018, 2, 5, 22, 3, 3, 0, 0), vr('ZOL', 'Old Lab', 2018, 2, 6, 22, 1, 0, 1, 0)], 'old lab'),
+    V('old-window', { from: '2018-05-31' }, [vr('ZOL', 'Old Lab', 2018, 2, 5, 22, 2, 3, 0, 0), vr('ZOL', 'Old Lab', 2018, 2, 6, 22, 1, 0, 1, 0)], 'old lab'),
+    // VIRAL by form: the host with an answer gives a VIRAL row. VF1 is PCR and VL; VF2 (host HIVWB, not in the copy) and VF3 (host TB) are VL only;
+    // VF5 (host HIVST) is Other and VL, so the parts (1 + 1) pass the Total (1). VF6 has no report: no lab, no row.
+    V('virf', {}, [
+      vr('ZVF', 'Virf Lab', 2026, 2, 5, 19, 1, 1, 1, 0),
+      vr('ZVF', 'Virf Lab', 2026, 2, 5, 20, 1, 0, 1, 0),
+      vr('ZVF', 'Virf Lab', 2026, 2, 5, 21, 1, 0, 1, 0),
+      vr('ZVF', 'Virf Lab', 2026, 2, 5, 22, 1, 0, 1, 1),
+    ], 'virf lab'),
+    // A lab whose requests are all on panels outside the copy has no row in V (v1 would list it from LabList with NULL columns; CE has no lab list).
+    V('wb', {}, [], 'wb lab'),
+    V('names', {}, [vr('ZNC', 'Name A', 2026, 2, 5, 19, 3, 3, 0, 0)], 'name a'),
+    V('zulu', {}, [vr('AAB', 'Zulu Lab', 2026, 2, 5, 19, 2, 2, 0, 0)], 'zulu lab'),
+    V('mapped', {}, [vr('ZMP', 'Mapped Lab Name', 2026, 2, 5, 19, 1, 1, 0, 0)], 'mapped lab name'),
+    V('case', {}, [vr('ZCS', 'Case Lab', 2026, 2, 5, 19, 3, 3, 0, 0)], 'case lab'),
+    V('shared', {}, [vr('ZEF', 'Shared Lab', 2026, 2, 5, 19, 1, 1, 0, 0), vr('ZGH', 'Shared Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'shared lab'),
+    V('nolab-blank', {}, [], 'blank lab'),
+    V('nolab-none', {}, [], 'no code lab'),
+    V('apple', {}, [vr('ZAP', 'apple Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'apple lab'),
+    V('lower', {}, [vr('zab', 'Lower Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'lower lab'),
+
+    // ===== Whole results against the model =====
+    ...[
+      ['none', {}], ['f0501', { from: '2026-05-01' }], ['f0610', W10], ['f1810', { from: '2018-05-31' }], ['f0611', { from: '2026-06-11' }],
+      ['f1231', { from: '2026-12-31' }], ['t0610', { to: '2026-06-10' }], ['t0531', { to: '2026-05-31' }], ['f0610t0610', W1010],
+      ['f0501t0531', { from: '2026-05-01', to: '2026-05-31' }], ['t2018', { to: '2018-12-31' }],
+    ].flatMap(([label, p]) => [modelSuite(`t30-w-${label}`, 'w', p), modelSuite(`t30-v-${label}`, 'v', p)]),
+  ];
+  return { name: 't30', suites: suites30, probe: { baseRows, nameMap, modelRows } };
+}
+
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b(), group30()];
