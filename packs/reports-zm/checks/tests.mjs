@@ -1459,12 +1459,12 @@ insert into lab_results (id, request_id, observation_code, text_value, numeric_v
 const f19 = makeFixture19('t19');
 
 // ---------------------------------------------------------------- CD4 ----
-// A CD4 request: panel CD4 (v1 line 38), no report needed (v1 reads Requests and LabResults only).
+// A CD4 request: panel CD4 (v1 line 39), no report needed (v1 reads Requests and LabResults only).
 const cd4 = (labId, results, o = {}) => f19.add(`T19-${labId}`, { panel: 'CD4', results, ...o });
 const abs = (text, extra = {}) => ({ obs: 'CD4', text, ...extra });
 const pct = (text, extra = {}) => ({ obs: 'CD4L', text, ...extra });
 
-// Cell A: Southern / Choma / Choma General Hospital, age 30, F, May 2026. The absolute-count ranges (v1 lines 21-24) and what counts as a number.
+// Cell A: Southern / Choma / Choma General Hospital, age 30, F, May 2026. The absolute-count ranges (v1 lines 28-32) and what counts as a number.
 // v1 casts to numeric with no scale, which ROUNDS to a whole number (measured on SQL Server: '199.5' becomes 200, '409.5' 410, '1590.5' 1591).
 [
   ['A01', '199'], ['A02', '199.4'], ['A03', '199.5'], ['A04', '200'], ['A05', '409'],
@@ -1485,7 +1485,7 @@ cd4('A28', [abs('150'), abs('300')]);                          // two ranges: th
 cd4('A36', [abs('100')]);
 cd4('a36 ', [abs('100')]);                                     // the same request number (case, trailing space) on a second request row: counts once
 
-// Cell B: Lusaka / Kafue / Kafue District Hospital, age 20, M, May 2026. The percentage ranges (v1 lines 87-90) join to the absolute rows.
+// Cell B: Lusaka / Kafue / Kafue District Hospital, age 20, M, May 2026. The percentage ranges (v1 lines 94-97) join to the absolute rows.
 const bb = { years: 20, req: 'ZKAFU', sex: 'M' };
 cd4('B00', [abs('300')], bb);
 cd4('B16', [abs('120'), pct('25')], bb);                       // one request with both results: it counts in both CTEs
@@ -1501,7 +1501,7 @@ cd4('T01', [abs('100')], { years: 33, sex: 'F', req: 'ZTWE' });
 cd4('T02', [pct('40')], { years: 33, sex: 'M', req: 'ZTWE' });   // another sex: no join
 cd4('T03', [pct('40')], { years: 33, sex: 'F', req: 'ZTWW' });   // another province: no join, and no absolute row of its own
 
-// Cell C: Lusaka / Lusaka / Chilenje Clinic, age 40, M, May 2026. Which panels and observations count (lines 38-39 and 103-104). Text compares ignore case and spaces.
+// Cell C: Lusaka / Lusaka / Chilenje Clinic, age 40, M, May 2026. Which panels and observations count (lines 39-40 and 104-105). Text compares ignore case and spaces.
 const cc = { years: 40, req: 'ZLUSA', sex: 'M' };
 cd4('C01', [{ obs: 'cd4 ', text: '100' }], { ...cc, panel: 'cd4 ' });
 cd4('C02', [abs('100')], cc);
@@ -1514,7 +1514,7 @@ cd4('C08', [abs('100')], { ...cc, panel: null });
 cd4('C09', [{ obs: null, text: '100' }], cc);
 cd4('C10', [{ obs: 'CD4L ', text: '45' }], cc);
 
-// Cell D: the requesting facility (lines 15-17, 140). Age 25, F unless said. An unmapped facility, a register row with no province, a code
+// Cell D: the requesting facility (lines 36-38, 140). Age 25, F unless said. An unmapped facility, a register row with no province, a code
 // the map does not hold and a request with no facility drop out (v1: Province is null).
 const dd = { years: 25, sex: 'F' };
 cd4('D01', [abs('100')], { ...dd, req: 'ZLUSA' });
@@ -1532,11 +1532,11 @@ cd4('D08', [pct('40')], { ...dd, req: 'ZNONM' });
 cd4('D13', [abs('100')], { years: 17, sex: 'F', req: 'ZLUS2' });  // spelled one way here and the other way in the percentage row: the join still matches
 cd4('D14', [pct('40')], { years: 17, sex: 'F', req: 'ZLUSA' });
 
-// Cell E: the age bands (lines 8-20), ZSOUT, M, May 2026. Age 0 is '<01'; a missing or negative age is 'Missing'; 50 and over is '50+'.
+// Cell E: the age bands (lines 10-23), ZSOUT, M, May 2026. Age 0 is '<01'; a missing or negative age is 'Missing'; 50 and over is '50+'.
 [0, 1, 4, 5, 9, 10, 14, 15, 19, 20, 24, 25, 29, 30, 34, 35, 39, 40, 44, 45, 49, 50, 99, null, -1]
   .forEach((age, i) => cd4(`E${pad(i)}`, [abs('100')], { years: age, sex: 'M' }));
 
-// Cell F: the sex column (lines 21-24), ZKAFU, age 60, May 2026. '' is 'Missing'; other letters come through; groups ignore case and trailing spaces.
+// Cell F: the sex column (lines 24-27), ZKAFU, age 60, May 2026. '' is 'Missing'; other letters come through; groups ignore case and trailing spaces.
 [
   ['F', 'F'], ['F2', 'f '], ['M', 'M'], ['U', 'U'], ['X', 'X'], ['Blank', ''], ['Spaces', '   '], ['Null', null], ['Word', 'Missing'], ['Word2', 'missing'],
 ].forEach(([id, sex]) => cd4(`F-${id}`, [abs('100')], { years: 60, req: 'ZKAFU', sex }));
@@ -1597,7 +1597,7 @@ const CHILENJE_MERGED = ['LUSAKA', 'Lusaka', 'CHILENJE CLINIC '];
 const CHILENJE_ZLUS2 = ['LUSAKA', 'lusaka ', 'CHILENJE CLINIC '];
 
 const want19 = [
-  // Cell A: no percentage rows, so the percentage columns are null (the left join, line 139).
+  // Cell A: no percentage rows, so the percentage columns are null (the left join, line 138).
   MAY(CHOMA, '30-34', 'F', ADV, 10, null, null),
   MAY(CHOMA, '30-34', 'F', BELOW, 9, null, null),
   MAY(CHOMA, '30-34', 'F', WITHIN, 6, null, null),
@@ -1644,7 +1644,7 @@ const want19Order = [
 ];
 
 // ---------------------------------------------------------------- HPV ----
-// An HPV request: panel HPV (line 29), with a report whose issued date is the authorised date (line 37). Tested at LUS by default.
+// An HPV request: panel HPV (line 35), with a report whose issued date is the authorised date (line 37). Tested at LUS by default.
 const hpv = (labId, results, o = {}) => f19.add(`T19-${labId}`, {
   panel: 'HPV', report: true, req: 'ZSOUT', authored: '2026-05-01T08:00:00Z', issued: '2026-05-10T10:00:00Z', performer: 'LUS', display: 'Lusaka Lab',
   results: results.map(([obs, text, extra]) => ({ obs, text, ...extra })), ...o,
@@ -1662,7 +1662,7 @@ hpv('HA08', [['HPV16', 'Positive**']]);
 hpv('HA09', [['HPVOT', 'Pos']]);
 hpv('HA10', [['HPV18', null]]);
 hpv('HA11', [['HPVHR', 'Reactive']]);
-hpv('HA12', [['STXT', 'Positive']]);                           // comment results do not count (line 31)
+hpv('HA12', [['STXT', 'Positive']]);                           // comment results do not count (line 36)
 hpv('HA13', [['SCOM', 'Positive']]);
 hpv('HA14', [['HPVX', 'Positive']]);                           // another observation: a test and a positive, but no type
 hpv('HA15', [['HPV16', 'Positive'], ['HPV18', 'Positive']]);   // two types: one positive request, counted in both types
@@ -1684,7 +1684,7 @@ hpv('HA21', [['HPVHR', 'Negative']]);
 hpv('ha21 ', [['HPVHR', 'Negative']]);                         // the same request number as HA21 (case and a trailing space): counts once
 hpv('HA22', [['HPV16', null, { coded: 'Positive' }]]);         // only a coded value: LIMSRptResult shows it
 
-// Cell HB: the join does not carry the lab type (line 218 area), so rows multiply. ZLUSA, lab KIT, May 2026.
+// Cell HB: the join does not carry the lab type (lines 215-219), so rows multiply. ZLUSA, lab KIT, May 2026.
 const kit = { req: 'ZLUSA', performer: 'KIT', display: 'Kitwe Lab' };
 hpv('HB-g1', [['HPV16', 'Positive']], { ...kit, analyzer: 'GEN123' });
 hpv('HB-g2', [['HPV16', 'Negative']], { ...kit, analyzer: 'GEN9' });
@@ -1693,7 +1693,7 @@ hpv('HB-c2', [['HPV18', 'Positive']], { ...kit, analyzer: 'ABC' });
 hpv('HB-c3', [['HPVHR', 'Negative']], { ...kit, analyzer: 'ABC' });
 hpv('HB-u1', [['HPVHR', 'Positive']], { ...kit, analyzer: '' });
 
-// Cell HC: the lab type (lines 11-14). ZKAFU, lab NDO, May 2026; every result negative so no row multiplies.
+// Cell HC: the lab type (lines 12-14). ZKAFU, lab NDO, May 2026; every result negative so no row multiplies.
 [['gx1', 'GEN123'], ['gx2', 'gen'], ['cv1', ' GEN1'], ['cv2', 'XGEN'], ['cv3', null], ['cv4', 'ABC'], ['un1', ''], ['un2', '   ']]
   .forEach(([id, analyzer]) => hpv(`HC-${id}`, [['HPVHR', 'Negative']], { req: 'ZKAFU', performer: 'NDO', display: 'Ndola Lab', analyzer }));
 
@@ -1708,7 +1708,7 @@ hpv('HB-u1', [['HPVHR', 'Positive']], { ...kit, analyzer: '' });
 hpv('HD-d18', [['HPVHR', 'Negative']], { performer: 'WIN', display: 'Window Lab', status: 'cancelled', issued: '2026-05-12T10:00:00Z' }); // no status filter
 hpv('HD-d19', [['HPVHR', 'Negative']], { performer: 'WIN', display: 'Window Lab', report: false });                                           // no report: no authorised date
 
-// Cell HE: the requesting facility and the testing lab (lines 21-26, 215-216, 220). Lab LUS unless said; May 2026.
+// Cell HE: the requesting facility and the testing lab (lines 27-34, 220). Lab LUS unless said; May 2026.
 hpv('HE-1', [['HPV16', 'Positive']], { req: 'ZNODS' });         // no district: the join to the positives fails (null never equals null)
 hpv('HE-2', [['HPVHR', 'Negative']], { req: 'ZNODS' });
 hpv('HE-3', [['HPVHR', 'Positive']], { req: 'ZNONM' });         // no facility name: the same

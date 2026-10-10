@@ -381,10 +381,10 @@ export const dbsMonitoringParams = () => [
 // Replaces sp_get_CDC_CD4_data_month (no parameters in v1). One row per month, province, district, facility, age band and sex, with the
 // number of CD4 absolute-count tests in each count range and the number of CD4% tests in each percentage range.
 //
-// Columns (v1 names and order, lines 6-72 and 139): Year, Month, MonthName, Province, District, Facility, AgeGroup, Sex,
+// Columns (v1 names and order, lines 6-72 and 137): Year, Month, MonthName, Province, District, Facility, AgeGroup, Sex,
 // CD4 Absolute Count Range, CD4 Absolute Count Tests, CD4 Percent Range, CD4 Percent Tests.
 //
-// How v1 builds it. Two groups of rows, joined at the end (lines 138-140):
+// How v1 builds it. Two groups of rows, joined at the end (lines 137-140):
 //   - the absolute rows (CTE a, lines 6-72): panel CD4, observation CD4, grouped by month, area, age band, sex and count range;
 //   - the percent rows (CTE b, lines 73-136): panel CD4, observation CD4L, grouped the same way with the percentage range;
 //   - a left join of a to b on year, month, province, district, facility, age band and sex, and `Province is not null` (line 140).
@@ -392,15 +392,15 @@ export const dbsMonitoringParams = () => [
 // report: v1 has no status or authorised-date test, so a request with no report, or a cancelled one, counts.
 //
 // Rules, with v1 lines:
-//   Count range (lines 21-24)   the result text as a number, ROUNDED to a whole number (v1 casts to numeric with no scale; measured on the
+//   Count range (lines 28-32)   the result text as a number, ROUNDED to a whole number (v1 casts to numeric with no scale; measured on the
 //                               local SQL Server: '199.5' gives 200, '409.5' 410, '1590.5' 1591). Under 200 'Advanced HIV', 200 to 409
 //                               'CD4 count below normal range', 410 to 1590 'CD4 count Within normal range', over 1590 'CD4 count Above normal
 //                               range'; anything that is not a number 'Missing Absolute CD4 Count Result'.
-//   Percent range (lines 89-91) the same number: under 31 'CD4 percentage below normal range', 31 to 60 'CD4 percentage Within normal range',
+//   Percent range (lines 94-97) the same number: under 31 'CD4 percentage below normal range', 31 to 60 'CD4 percentage Within normal range',
 //                               over 60 'CD4 percentage above normal range', else 'Missing CD4% Result'.
-//   Age band (lines 8-20)       0 '<01', 1-4 '01-04', 5-9 '05-09', ... 45-49, 50 and over '50+', anything else (no age, a negative age) 'Missing'.
+//   Age band (lines 10-23)      0 '<01', 1-4 '01-04', 5-9 '05-09', ... 45-49, 50 and over '50+', anything else (no age, a negative age) 'Missing'.
 //                               Not the dbo.Agegroup of the other reports: here 50 to 54 is '50+'.
-//   Sex (lines 21-24)           the HL7 sex letter as stored; '' is 'Missing'.
+//   Sex (lines 24-27)           the HL7 sex letter as stored; '' is 'Missing'.
 //   Tests                       count(distinct RequestID), so a request with two results in one range counts once there, and a request with
 //                               results in two ranges counts in each.
 //   Province, District, Facility the mapped register row of the requesting facility (v1: the Facilities and HealthcareAreas dictionaries).
@@ -514,19 +514,19 @@ order by ${orderItems(columns)}`;
 // and once in each type. The commented-out `sum(...)` lines in v1 (lines 14-20 and repeats) do nothing and are not ported.
 //
 // Rules, with v1 lines:
-//   LabType (lines 11-14)  analyser code like 'GEN%' is 'GeneXpert'; empty (or spaces) is 'Unrecorded'; everything else, a missing code too,
+//   LabType (lines 12-14)  analyser code like 'GEN%' is 'GeneXpert'; empty (or spaces) is 'Unrecorded'; everything else, a missing code too,
 //                          'Conventional'. The `like` ignores case; a leading space is not 'GEN'.
 //   Year, Month            of AuthorisedDateTime (diagnostic_reports.issued), taken from the stamp's own text, which is the LOCAL date:
 //                          '2026-05-01T00:30:00+02:00' is in May, where its UTC date says April.
 //   Window (line 37)       AuthorisedDateTime between '20200101 00:00:01' and the end of last month at 23:59:59. A stamp at exactly midnight on
 //                          the first day is OUT; the last day runs to 23:59:59. v1's fixed window becomes `from` (00:00:01) to `to` (23:59:59)
 //                          on the local wall time of the stamp (the same method as the facility report of Tasks 7 and 8).
-//   Province, District, Description   the mapped register row of the requesting facility; `Province is not null` (line 217): a facility
+//   Province, District, Description   the mapped register row of the requesting facility; `Province is not null` (line 220): a facility
 //                          that is not in the register, or has no province, is dropped.
-//   LabName (line 22)      see CE gaps.
+//   LabName (line 11)      see CE gaps.
 //
 // Kept v1 quirks (spec ruling 1):
-//   - THE ROWS MULTIPLY. The final joins (lines 214-217) match on province, district, facility, lab name, year and month, but NOT on lab type.
+//   - THE ROWS MULTIPLY. The final joins (lines 215-219) match on province, district, facility, lab name, year and month, but NOT on lab type.
 //     A test row of one lab type therefore meets the Positives, HPV16, HPV18, HPVOT and HPVHR rows of EVERY lab type of the same facility, lab
 //     and month, and the output holds one row per combination. Where a facility's lab has both GeneXpert and Conventional tests in a month,
 //     each Tests row appears several times, with the positive counts of the other lab type. Where no lab type has positives, there is no
@@ -556,6 +556,8 @@ order by ${orderItems(columns)}`;
 //     Two codes that share a name in Zambia's dictionary are two groups here (v1 groups on the name).
 //   - A report with no testing code (or spaces only) has a NULL LabName, as v1's join finds no lab for a NULL code, whatever the report's
 //     display says. Such rows form their own group and meet no positives.
+//   - In v1 a testing code that is missing from the Laboratories dictionary also has a NULL LabName, so its rows never join their positives and
+//     all five measures are 0. CE names every code (ruling 8), so those rows get their positives.
 const HPV_PANELS = ['HPV', 'POHPV', 'HPVGT'];
 const HPV_POSITIVE = ['POSITIVE', 'Positive', 'Positive*', 'REACTIVE'];
 
