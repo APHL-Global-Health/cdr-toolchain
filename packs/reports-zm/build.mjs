@@ -131,7 +131,7 @@ function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'reports-zm',
-    version: '0.1.0',
+    version: '0.1.1',
     description: "Zambia's v1 reports in OpenLDR CE, for data exported from DISA*Lab.",
     readme,
     license: 'UNLICENSED',

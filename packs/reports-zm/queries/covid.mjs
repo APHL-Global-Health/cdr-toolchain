@@ -239,8 +239,8 @@ export const sourceStatsParams = () => [
 //     name both show, each with its own spelling.
 //   - A request with no Patients row is kept (left join), with empty names.
 //   - v1's @TestingLab is varchar(30) and @Facility varchar(50): a longer text is cut in v1. The port compares the whole text.
-//   - No lab filter on a blank code (the CASE would give a blank description that matches nothing but a blank parameter): a blank testing
-//     code is dropped, as the counts do.
+//   - No lab filter on a blank code (the CASE would give a blank description that matches nothing but a blank parameter): a blank performer
+//     (data cdr did not push) is dropped, as the counts do. A blank DISA testing code is credited to the pushing lab and is not blank here.
 //
 // `laboratory` is a Lab Description, as in COVID-19 by source facility. `facility` is the register name (fmr.name), a text box, required.
 //
@@ -342,8 +342,9 @@ export const positiveListParams = () => [
 //   Instrument            the CASE of lines 127-135 on LIMSAnalyzerCode (lr.analyzer_code); others NULL.
 //   Testing Laboratory    the CASE of lines 136-189 on `case TestingFacilityCode when '' then ReceivingFacilityCode else TestingFacilityCode`.
 //                         CE's testing code is the report's performer (see Task 22's cross-cutting note on OPENLDR_LAB_CODE). It has no
-//                         ReceivingFacilityCode (ruling 7). A blank code matches no WHEN, so it gives NULL here, where v1 would try the receiving
-//                         code. A request with no report has no performer and shows NULL. `like 'ZU_'` and `like 'ZL_'` are varchar LIKE (likeVarcharSql).
+//                         ReceivingFacilityCode (ruling 7). A blank performer (data cdr did not push) matches no WHEN, so it gives NULL here, where
+//                         v1 would try the receiving code. A blank DISA testing code is credited to the pushing lab. A request with no report has
+//                         no performer and shows NULL. `like 'ZU_'` and `like 'ZL_'` are varchar LIKE (likeVarcharSql).
 //                         This CASE is NOT the one of the counts: it has no ZCH, and the names are long ('University Teaching Hospital').
 //   TestType              'Rapid' for panels COVAB, COVAG, COVRP, else 'PCR Based' (lines 190-193).
 //   Authorization Status  'Reviewed' when AuthorisedDateTime is not null, else 'Pending Review' (lines 194-196). In the standard version the
@@ -603,7 +604,9 @@ order by a.test_date`;
 // Shared CE facts and gaps (spec ruling 7):
 //   - The testing lab is the report's performer (diagnostic_reports.performer). cdr writes it from OPENLDR_LAB_CODE, the lab code configured for
 //     each push (v2-transform.ts:401, see Task 22), so each lab's push must set it to its v1 TestingFacilityCode (ZUA, ZCX and so on).
-//   - CE does not carry ReceivingFacilityCode, so v1's fallback to it (a blank TestingFacilityCode) does not exist: a blank code is no lab.
+//   - CE does not carry ReceivingFacilityCode, so v1's fallback to it (a blank TestingFacilityCode) does not exist. A blank DISA testing code
+//     is not lost: cdr writes the configured lab code as the performer of every push (OPENLDR_LAB_CODE, v2-transform.ts:401), so CE credits
+//     such a request to the pushing lab. Only a report with a blank performer (data cdr did not push) or a request with no report has no lab.
 //   - The window (spec ruling 3, the Task 20/21 rule). None of the five views has a window. `from` and `to` are optional (YYYY-MM-DD, local
 //     date of the stamp; blank means no window; a side given limits that side, optionalWindowSql). The extracts and the VRDSS feeds window on
 //     the AUTHORISED date: they list final results only, so the date a result became final is the one a reader of a results list asks about, and
@@ -776,8 +779,9 @@ export const extractParams = () => optionalDateParams();
 //                           other code as it is (lr.analyzer_code), so an unlisted code shows as stored and NULL stays NULL.
 //   Testing Laboratory      lb.LabName from the dictionary of laboratories, by TestingFacilityCode, else ReceivingFacilityCode when the testing code
 //                           is blank (lines 79, 101-103). CE has no dictionary: the name is the report's (labNameSql), ONE per testing code, as the
-//                           Task 16 rule says (labNamesCte): rows never split on per-report names. A blank testing code has no lab (CE does not
-//                           carry ReceivingFacilityCode), so its name is NULL.
+//                           Task 16 rule says (labNamesCte): rows never split on per-report names. CE does not carry ReceivingFacilityCode, but a
+//                           blank DISA testing code is credited to the pushing lab (OPENLDR_LAB_CODE, v2-transform.ts:401), so it still has a
+//                           name. Only a blank performer (data cdr did not push) or a request with no report gives NULL.
 //   TestType, LOINC, Authorization Status   as the line list (lines 80-91): Rapid for COVAB, COVAG, COVRP else PCR Based; the LOINC by panel;
 //                           Reviewed when the report has an issued stamp, else Pending Review (a windowed run needs the stamp, so it shows Reviewed
 //                           only).
