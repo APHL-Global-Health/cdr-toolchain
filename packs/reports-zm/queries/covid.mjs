@@ -1,7 +1,10 @@
 // Custom queries for the covid reports. Each task adds { name, sql, params } entries to the list.
 
 import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
-import { dateParams, genderFmiuSql, inRange, likeVarcharSql, localDate, localTs, requestAttrSql, requesterJoin, ssTextKey } from '../zm-sql.mjs';
+import {
+  ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
+  requesterJoin, sqlLit, ssTextKey, testingCodeSql,
+} from '../zm-sql.mjs';
 
 // ---- The COVID-19 counts (Task 22) -----------------------------------------------------------------------------------------------
 //
@@ -378,10 +381,10 @@ const SYMPTOMS = [
   ['sx_sore_throat', 'CSORT', 'sore_throat'], ['sx_fever', 'CFERV', 'fever'], ['sx_breath', 'CSHBR', 'breath'], ['sx_body', 'CMYBO', 'body_pains'],
   ['sx_other', 'COTHE', 'other'], ['sx_hosp', 'CPTHO', 'hospitalised'], ['sx_outcome', 'COUT', 'outcome'],
 ];
-// [output name, key in the src and res CTEs, 'text' (grouped on the folded text) or 'plain' (grouped on the value)].
+// [output name, key in the src and res CTEs, 'text' (grouped on the folded text), 'plain' (grouped on the value) or 'number' (as plain, ordered as a number)].
 const LINE_OUT = [
   ['Epid', 'epid', 'text'], ['Lab Number', 'lab_number', 'text'], ['Disalab Number', 'disalab', 'text'], ['Patient Name', 'patient_name', 'text'],
-  ['Contact Number', 'contact', 'text'], ['Gender', 'gender', 'plain'], ['AgeinYears', 'age', 'plain'], ['Collected Date', 'collected', 'plain'],
+  ['Contact Number', 'contact', 'text'], ['Gender', 'gender', 'plain'], ['AgeinYears', 'age', 'number'], ['Collected Date', 'collected', 'plain'],
   ['Registered Date', 'registered', 'plain'], ['Province', 'province', 'text'], ['District', 'district', 'text'], ['Location', 'location', 'text'],
   ['Tested Date', 'tested', 'plain'], ['Date Result Reported', 'reported', 'plain'], ['Result', 'result', 'plain'], ['Instrument', 'instrument', 'plain'],
   ['Testing Laboratory', 'test_lab', 'plain'], ['TestType', 'test_type', 'plain'], ['Authorization Status', 'auth_status', 'plain'],
@@ -397,19 +400,27 @@ const symptomCte = (name, code) => `${name} as (
   where ${inListSql('s.panel_code', ['ADCOE'])} and ${inListSql('x.observation_code', [code])}
 )`;
 
-// The Result CASE on the result text `r`. The standard version adds the four texts that Levy's map lacks.
-const lineResultSql = (r) => `case
-      when ${inListSql(r, RESULT_NEGATIVE)} or (not w.is_levy and ${inListSql(r, RESULT_NEGATIVE_STANDARD)}) then 'Negative'
+// The Result CASE on the result text `r`. The standard version adds the four texts that Levy's map lacks. `standard` is the SQL that says
+// whether those four count (the line list: not the Levy version); null means they always count (the VRDSS feeds, whose map is the standard one).
+const withStandard = (r, base, extra, standard) => (standard === null
+  ? inListSql(r, [...base, ...extra])
+  : `${inListSql(r, base)} or (${standard} and ${inListSql(r, extra)})`);
+const resultCaseSql = (r, standard = null) => `case
+      when ${withStandard(r, RESULT_NEGATIVE, RESULT_NEGATIVE_STANDARD, standard)} then 'Negative'
       when ${inListSql(r, RESULT_POSITIVE)} then 'Positive'
-      when ${inListSql(r, RESULT_RETEST)} or (not w.is_levy and ${inListSql(r, RESULT_RETEST_STANDARD)}) then 'To be retested'
+      when ${withStandard(r, RESULT_RETEST, RESULT_RETEST_STANDARD, standard)} then 'To be retested'
     end`;
+const lineResultSql = (r) => resultCaseSql(r, 'not w.is_levy');
 
-// The Instrument CASE (target lines 127-135) on the analyser code `a`.
-const instrumentSql = (a) => `case
+// The Instrument CASE (target lines 127-135) on the analyser code `a`. The VRDSS feeds (v_vrdss_Covid lines 68-78) add QS3 as QuantStudio and
+// keep any other code as it is (`quantStudio`); the line list gives NULL for a code that is not listed.
+const instrumentSql = (a, { quantStudio = false } = {}) => `case
       when ${inListSql(a, ['FRTP', 'FRTB'])} then 'AB7500'
       when ${inListSql(a, ['C6800'])} then 'C6800'
       when ${inListSql(a, ['GENEX', 'GENEB'])} then 'GeneXpert'
-      when ${inListSql(a, ['PNTHR', 'PNTHB'])} then 'Hologic Panther'
+      when ${inListSql(a, ['PNTHR', 'PNTHB'])} then 'Hologic Panther'${quantStudio ? `
+      when ${inListSql(a, ['QS3'])} then 'QuantStudio'
+      else ${a}` : ''}
     end`;
 
 // The Testing Laboratory CASE (target lines 136-189) on the testing code `c` (NULL when blank). The WHENs keep v1's order.
@@ -426,6 +437,20 @@ const longLabSql = (c) => `case
       when ${inListSql(c, ['ZTT'])} then 'TDRC'
     end`;
 
+// TestType and Authorization Status, the same in the line list and the VRDSS feeds.
+const testTypeSql = (panel) => `case when ${inListSql(panel, RAPID_PANELS)} then 'Rapid' else 'PCR Based' end`;
+const authStatusSql = (issued) => `case when ${issued} is not null then 'Reviewed' else 'Pending Review' end`;
+
+// The grouping of a SELECT DISTINCT over the rows `s` (see the line list): the GROUP BY items, the select items that pick one spelling of each
+// column, and the ORDER BY items over the result `r`. `columns`: [output name, key, kind] as LINE_OUT.
+function distinctParts(columns) {
+  return {
+    groupBy: columns.map(([, key, kind]) => (kind === 'text' ? foldSql(`s.${key}`) : `s.${key}`)).join(', '),
+    picks: columns.map(([, key, kind]) => (kind === 'text' ? `min(s.${key} collate "C") as ${key}` : `min(s.${key}) as ${key}`)).join(',\n    '),
+    orders: columns.map(([, key, kind]) => (kind === 'number' ? `r.${key} nulls first` : `r.${key} collate "C" nulls first`)),
+  };
+}
+
 // A date-time parameter as a timestamp, or an error that names the parameter. The pattern is YYYY-MM-DD with an optional T or space and
 // HH:MM, and optional :SS. The cast sits outside the CASE: a bad value turns into the message text, and casting the message fails with the
 // message inside Postgres' error text. (A cast of the value inside the THEN branch would be folded at plan time and raise Postgres' own error first.)
@@ -438,9 +463,7 @@ const dateTimeParamSql = (id) => {
 export function lineListSql() {
   const symptomJoins = SYMPTOMS.map(([name, , key]) => `left join ${name} ${key} on ${key}.req_key = ${foldSql('lr.request_id')}`).join('\n  ');
   const symptomColumns = SYMPTOMS.map(([, , key]) => `${key}.answer as ${key}`).join(',\n    ');
-  const groupBy = LINE_OUT.map(([, key, kind]) => (kind === 'text' ? foldSql(`s.${key}`) : `s.${key}`)).join(', ');
-  const picks = LINE_OUT.map(([, key, kind]) => (kind === 'text' ? `min(s.${key} collate "C") as ${key}` : `min(s.${key}) as ${key}`)).join(',\n    ');
-  const orders = LINE_OUT.map(([, key]) => (key === 'age' ? 'r.age nulls first' : `r.${key} collate "C" nulls first`));
+  const { groupBy, picks, orders } = distinctParts(LINE_OUT);
   return `with win as (
   select ${dateTimeParamSql('from')} as w_from, ${dateTimeParamSql('to')} as w_to, ${foldSql('{{param.version}}')} = 'levy' as is_levy
 ),
@@ -461,8 +484,8 @@ src as (
     ${lineResultSql('rr.val')} as result,
     ${instrumentSql('lr.analyzer_code')} as instrument,
     ${longLabSql('dr.performer')} as test_lab,
-    case when ${inListSql('lr.panel_code', RAPID_PANELS)} then 'Rapid' else 'PCR Based' end as test_type,
-    case when dr.issued is not null then 'Reviewed' else 'Pending Review' end as auth_status,
+    ${testTypeSql('lr.panel_code')} as test_type,
+    ${authStatusSql('dr.issued')} as auth_status,
     ${symptomColumns}
   from win w
   cross join lab_requests lr
@@ -563,6 +586,397 @@ from averaged a
 order by a.test_date`;
 }
 
+// ---- The COVID-19 result extracts and the wastewater results (Task 24) ------------------------------------------------------------
+//
+// Six v1 views become five queries. The rule that decides the count: one SQL statement cannot change its columns by a parameter, so
+// views with different columns are different queries, and a parameter only switches views that have the same columns.
+//   COVID-19 results with location            View vw_Covid19_PD
+//   COVID-19 results with facility location   View vw_Covid19 (the same rows; FacilityLocation in place of Province, District, Facility)
+//   COVID-19 results (VRDSS)                  View v_vrdss_Covid
+//   COVID-19 results (VRDSS V2)               View v_vrdss_Covid_V2 (another column set and a shorter panel list)
+//   Wastewater results                        Views WasteWaterData and WastewaterDataCHAZ (the same columns; the `laboratory` parameter)
+// "PD" and "Covid19" below mean View__dbo_vw_Covid19_PD.sql and View__dbo_vw_Covid19.sql (the same text on lines 14-28 and 13-21), "VRDSS" and
+// "V2" mean View__dbo_v_vrdss_Covid.sql and View__dbo_v_vrdss_Covid_V2.sql, "WW" and "CHAZ" mean View__dbo_WasteWaterData.sql and
+// View__dbo_WastewaterDataCHAZ.sql (lines 12-91 are the same text in both).
+//
+// Shared CE facts and gaps (spec ruling 7):
+//   - The testing lab is the report's performer (diagnostic_reports.performer). cdr writes it from OPENLDR_LAB_CODE, the lab code configured for
+//     each push (v2-transform.ts:401, see Task 22), so each lab's push must set it to its v1 TestingFacilityCode (ZUA, ZCX and so on).
+//   - CE does not carry ReceivingFacilityCode, so v1's fallback to it (a blank TestingFacilityCode) does not exist: a blank code is no lab.
+//   - The window (spec ruling 3, the Task 20/21 rule). None of the five views has a window. `from` and `to` are optional (YYYY-MM-DD, local
+//     date of the stamp; blank means no window; a side given limits that side, optionalWindowSql). The extracts and the VRDSS feeds window on
+//     the AUTHORISED date: they list final results only, so the date a result became final is the one a reader of a results list asks about, and
+//     v1's own (commented-out) window of the VRDSS views is on AuthorisedDateTime (VRDSS line 107, V2 line 87). Wastewater windows on the
+//     COLLECTION date (SpecimenDateTime): a surveillance reader asks which samples were taken in a period, and a sample in progress has no
+//     authorised date yet. A row without that stamp shows only when no window is given.
+//   - Status. v1 keeps HL7ResultStatusCode 'F' (PD line 28). CE keeps diagnostic_reports.status = 'final'. A request with two final reports
+//     (two labs) shows once per report, where v1 has one Requests row. A request with no final report is not listed.
+//   - One v1 Requests row is one OBR set; CE's lab_requests row is the same grain (obr_set_id). v1 holds '' for an absent text; CE has NULL.
+
+// The request attributes (urn:openldr:cs:request-attribute) that the views carry as columns. The typed read takes the first column that holds
+// a value, as text, because the sender decides the type of most of these codes (a number or a boolean or a date-time or text).
+const attr = (code, typed = true) => requestAttrSql('lr.id', code, { typed });
+
+// The columns of vw_Covid19_PD / vw_Covid19 after the location columns (PD lines 14-19): [v1 name, key, expression]. The aliases are lr
+// (request), dr (final report), s (the report's specimen), p (patient), l (result row, left joined) and fmr (mapped facility).
+const EXTRACT_COLUMNS = [
+  ['RequestID', 'request_id', 'lr.request_id'],
+  ['OBRSetID', 'obr_set_id', 'lr.obr_set_id'],
+  ['LOINCPanelCode', 'loinc_panel', attr('loinc-panel-code', false)],
+  ['LIMSPanelCode', 'panel', 'lr.panel_code'],
+  ['LIMSPanelDesc', 'panel_desc', 'lr.panel_desc'],
+  ['HL7PriorityCode', 'priority', priorityCodeSql('lr.priority')],
+  ['SpecimenDateTime', 'specimen', 'dr.effective'],
+  ['RegisteredDateTime', 'registered', 'lr.authored_at'],
+  ['ReceivedDateTime', 'received', 's.received_time'],
+  ['AnalysisDateTime', 'analysis', 'lr.analysis_at'],
+  ['AuthorisedDateTime', 'authorised', 'dr.issued'],
+  ['AdmitAttendDateTime', 'admit_attend', attr('admit-attend-time')],
+  ['RequestingFacilityCode', 'requester', 'lr.requester_code'],
+  ['ReceivingFacilityCode', 'receiver', 'null::text'],
+  ['LIMSPointOfCareDesc', 'point_of_care', 'lr.point_of_care'],
+  ['HL7ResultStatusCode', 'status', "'F'::text"],
+  ['RegisteredBy', 'registered_by', 'lr.registered_by'],
+  ['TestedBy', 'tested_by', 'lr.tested_by'],
+  ['AuthorisedBy', 'authorised_by', 'dr.authorised_by'],
+  ['AgeGroup', 'age_group', ageGroupSql('lr.age_years')],
+  ['AgeInYears', 'age_years', 'lr.age_years'],
+  ['AgeInDays', 'age_days', 'lr.age_days'],
+  ['HL7SexCode', 'sex', 'p.sex'],
+  ['Deceased', 'deceased', attr('deceased')],
+  ['Newborn', 'newborn', attr('newborn')],
+  ['AttendingDoctor', 'doctor', 'lr.requester_practitioner'],
+  ['TestingFacilityCode', 'performer', 'dr.performer'],
+  ['ReferringRequestID', 'referring', attr('referring-request-id', false)],
+  ['LIMSAnalyzerCode', 'analyzer', 'lr.analyzer_code'],
+  ['TargetTimeDays', 'target_days', attr('target-time-days')],
+  ['TargetTimeMins', 'target_mins', attr('target-time-mins')],
+  ['LIMSRejectionCode', 'rejection_code', 'lr.rejection_code'],
+  ['LIMSRejectionDesc', 'rejection_desc', 'lr.rejection_reason'],
+  ['LIMSFacilityCode', 'lims_facility', 'lr.requester_code'],
+  ['Repeated', 'repeated', attr('repeated')],
+  ['LIMSSpecimenID', 'specimen_id', 'null::text'],
+  ['LIMSPreReg_RegistrationDateTime', 'prereg_time', attr('prereg-registration-time')],
+  ['LIMSPreReg_ReceivedDateTime', 'prereg_received', attr('prereg-received-time')],
+  ['LIMSPreReg_RegistrationFacilityCode', 'prereg_facility', attr('prereg-registration-facility', false)],
+  ['LIMSVendorCode', 'vendor', attr('vendor-code', false)],
+  ['RequestingFacilityNationalCode', 'national_code', 'null::text'],
+  ['HL7ResultTypeCode', 'result_type', 'l.result_type'],
+  ['SIValue', 'si_value', 'l.numeric_value'],
+  ['SIUnits', 'si_units', 'l.numeric_units'],
+  ['SILoRange', 'si_lo', 'null::float8'],
+  ['SIHiRange', 'si_hi', 'null::float8'],
+  ['HL7AbnormalFlagCodes', 'abnormal', 'l.abnormal_flag'],
+  ['DateTimeValue', 'date_value', 'null::text'],
+  ['CodedValue', 'si_coded', 'null::text'],
+  ['ResultSemiquantitive', 'semi', 'null::int'],
+  ['Note', 'note', 'null::int'],
+  ['LIMSObservationCode', 'observation', 'l.observation_code'],
+  ['LIMSObservationDesc', 'observation_desc', 'l.observation_desc'],
+  ['LIMSRptResult', 'rpt_result', rpt('l')],
+  ['LIMSRptUnits', 'rpt_units', 'null::text'],
+  ['LIMSRptFlag', 'rpt_flag', 'null::text'],
+  ['LIMSRptRange', 'rpt_range', 'null::text'],
+  ['LIMSCodedValue', 'coded', 'l.coded_value'],
+];
+
+// The location columns. PD (lines 14, 22-27): the province, district and description of the requesting facility, three left joins to the
+// dictionary. Covid19 (line 13): GetFacilityDetails(LIMSFacilityCode), a function of Zambia's OpenLDRDict that was not sent (the pack's
+// question 1), so its text is not known. FacilityLocation here is the evident intent, the facility, district and province as one text,
+// 'Choma General Hospital, Choma, Southern'; NULL when the facility is not in the register. HONEST NON-PROOF: v1's real text may differ.
+const EXTRACT_LOCATION = {
+  pd: [['Province', 'province', 'fmr.region'], ['District', 'district', 'fmr.district'], ['Facility', 'facility', 'fmr.name']],
+  facility: [['FacilityLocation', 'location', "nullif(concat_ws(', ', fmr.name, fmr.district, fmr.region), '')"]],
+};
+const EXTRACT_PANELS = ['COVID', 'COVII', 'COVRP', 'COVAG', 'COVAB'];
+
+// The text order of a display column: SQL Server's word order first, then byte order; a missing value first.
+const sortText = (e) => `${ssTextKey(e)} collate "C" nulls first, ${e} collate "C" nulls first`;
+
+// The two extracts (one builder, as they are one view with two location columns). `location`: 'pd' or 'facility'.
+//
+// Rows (PD lines 20-28): requests of the panels COVID, COVII, COVRP, COVAG and COVAB, final, each LEFT joined to its result rows (no
+// observation filter), so a request with no result shows once with empty result columns, and a request with several results shows once per
+// result. Panels compare ignoring case and trailing blanks. v1 reads no Patients table here and these views have no name or contact columns (no PII columns); only the sex comes from the patient in CE.
+//
+// Mapping: Province, District and Facility are the mapped register row of the requesting facility (region, district, name; empty when it is not
+// in the register, v1's left joins). RequestID is the lab number; OBRSetID, LIMSPanelCode, LIMSPanelDesc, the stamps (specimen date = the
+// report's effective, registered = authored, received = the report's specimen, analysis, authorised = issued), RegisteredBy, TestedBy, the
+// age, AttendingDoctor (requester_practitioner), LIMSAnalyzerCode, LIMSRejectionCode and Desc (rejection_reason) and LIMSPointOfCareDesc are
+// the lab_requests columns of the same meaning; AuthorisedBy is the report's authorised_by. LIMSFacilityCode and RequestingFacilityCode are one
+// code in CE (requester_code). HL7PriorityCode turns CE's word back to R, U or S. HL7SexCode is the patient's sex as stored. The result
+// columns: HL7ResultTypeCode result_type, SIValue numeric_value, SIUnits numeric_units, HL7AbnormalFlagCodes abnormal_flag, LIMSObservationCode
+// and Desc, LIMSRptResult the text, else the number with its comparator, else the coded value (rpt), LIMSCodedValue coded_value.
+// AgeGroup is v1's dbo.Agegroup (ageGroupSql), kept as it is: its 45 to 54 branch is labelled '45-49', so 50 to 54 never reach '50+'.
+//
+// CE gaps (spec ruling 7):
+//   - Read from the request attributes when the sender gives them: LOINCPanelCode, AdmitAttendDateTime, Deceased, Newborn, Repeated,
+//     ReferringRequestID, TargetTimeDays, TargetTimeMins, the three LIMSPreReg_ columns and LIMSVendorCode. cdr-toolchain does not send them
+//     for Zambia today (v1 measured TargetTime and LOINCPanelCode empty on Tanzania's v1), so they are NULL until it does. A number, a
+//     boolean or a date-time comes as text ('2', 'true').
+//   - NULL because CE has no column or code: ReceivingFacilityCode, LIMSSpecimenID, RequestingFacilityNationalCode, SILoRange, SIHiRange,
+//     DateTimeValue (the same text is in LIMSRptResult for most rows), CodedValue (the SI coded value; LIMSCodedValue is coded_value),
+//     ResultSemiquantitive, Note (a bit in v1 of unknown meaning), LIMSRptUnits, LIMSRptFlag and LIMSRptRange (CE keeps one unit, in SIUnits).
+//   - HL7ResultStatusCode is 'F' on every row, as the view only lists 'F'.
+//
+// Kept v1 quirks (spec ruling 1): the left join to the results; no filter on the observation; AgeGroup's mislabel.
+// Order: v1 has no ORDER BY, so by lab number, OBR set, the row ids and the observation code; the ids make the order total (CE pages with
+// LIMIT and OFFSET). The ids are not output columns.
+function extractSql(location) {
+  const all = [...EXTRACT_LOCATION[location], ...EXTRACT_COLUMNS];
+  return `with src as (
+  select ${all.map(([, key, e]) => `${e} as ${key}`).join(',\n    ')},
+    lr.id as lr_id, dr.id as dr_id, l.id as l_id
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  left join patients p on p.id = lr.patient_id
+  left join lab_results l on l.request_id = lr.id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', EXTRACT_PANELS)}
+    and ${foldSql('dr.status')} = 'final'
+    and ${optionalWindowSql('dr.issued')}
+)
+select ${all.map(([name, key]) => `s.${key} as "${name}"`).join(',\n  ')}
+from src s
+order by ${sortText('s.request_id')}, s.obr_set_id nulls first, s.lr_id collate "C", s.dr_id collate "C", ${sortText('s.observation')}, s.l_id collate "C" nulls first`;
+}
+
+// Both date parameters optional (blank is all). See the notes above for the date.
+const optionalDateParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label}; blank for no limit` }));
+export const extractParams = () => optionalDateParams();
+
+// ---- The VRDSS feeds (v_vrdss_Covid and v_vrdss_Covid_V2) ----
+//
+// One row per final COVID-19 test result as a feed for an external surveillance system: demographics, specimen, location, result, instrument,
+// lab and LOINC. The two views share every rule and differ in their columns and panel list, so one builder makes both.
+//   VRDSS   panels COVID, COVII, COVIS, COVAB, COVAG, COVRP (VRDSS line 105)
+//   V2      panels COVID, COVAB, COVAG, COVRP (V2 line 85); no COVII (wastewater) and no COVIS
+// Both: observation code in COV2, COV68, CVGXN, CO751, CO752, COVRP (VRDSS line 106, V2 line 86), the same six codes as the line list; final
+// reports only (line 108); INNER join to Patients (line 94): a request with no patient row is not listed; INNER join to the results (line 96).
+// All text compares ignore case and trailing blanks.
+//
+// Columns (VRDSS lines 21-91, V2 lines 8-71):
+//   Sample_ID               the lab number (Patients.RequestID = Requests.RequestID, which are one lab number).
+//   Gender                  F, M, U, I only (genderFmiuSql): Female, Male, Unknown, Indeterminate; N, O and anything else give NULL (lines 29-34).
+//                           v1 reads Requests.HL7SexCode; CE holds the sex on the patient.
+//   AgeinYears              lab_requests.age_years. DOB / dob is the patient's date_of_birth (CE's text).
+//   Collected, Received, Registered, Tested, Date Result Reported   the report's effective, the specimen's received_time, authored_at,
+//                           analysis_at and the report's issued (CE's text, with the offset DISA wrote).
+//   Province, District, Facility / Location   the mapped register row of the requesting facility; NULL when it is not in the register.
+//   HMISCode (VRDSS line 47)   v1 reads the dictionary column MOHFacilityCode and calls it HMISCode. CE's register keeps the MFL's "Hims code" in
+//                           facility_registry.extras under the key hims_code (build.mjs), so it is read from there: the mapped register row's
+//                           extras. NULL when the facility has no register row, no extras or no hims_code. The extras are JSON text and the key
+//                           is read with a pattern, so odd JSON never fails the query (a code with an escaped quote is cut). HONEST NON-PROOF:
+//                           the Task 17 queries read v1's MOHFacilityCode as the register's national_code (the MFL code). If Zambia's dictionary
+//                           holds that code here, the column should be the national_code and not the Hims code; the question is not settled.
+//   Result (lines 51-67)    CASE on LIMSRptResult (rpt): the 13 texts of the line list's standard map, no ELSE, so an unlisted text gives NULL.
+//                           'Inconclusive' keeps the acute accent on the I (U+00CD) of v1's typo; the plain 'Inconclusive' is NULL. Same map as the line list.
+//   Instrument (lines 68-78) FRTP/FRTB -> AB7500, C6800 -> C6800, GENEX/GENEB -> GeneXpert, PNTHR/PNTHB -> Hologic Panther, QS3 -> QuantStudio, any
+//                           other code as it is (lr.analyzer_code), so an unlisted code shows as stored and NULL stays NULL.
+//   Testing Laboratory      lb.LabName from the dictionary of laboratories, by TestingFacilityCode, else ReceivingFacilityCode when the testing code
+//                           is blank (lines 79, 101-103). CE has no dictionary: the name is the report's (labNameSql), ONE per testing code, as the
+//                           Task 16 rule says (labNamesCte): rows never split on per-report names. A blank testing code has no lab (CE does not
+//                           carry ReceivingFacilityCode), so its name is NULL.
+//   TestType, LOINC, Authorization Status   as the line list (lines 80-91): Rapid for COVAB, COVAG, COVRP else PCR Based; the LOINC by panel;
+//                           Reviewed when the report has an issued stamp, else Pending Review (a windowed run needs the stamp, so it shows Reviewed
+//                           only).
+//   V2 only: ct_case_id     REFNO, else HOSPID when REFNO is blank (V2 lines 8-9). REFNO is the request attribute reference-numbers. HOSPID is not
+//                           sent for Zambia (the pack's question 3), so Other Ref Number is NULL and ct_case_id is NULL when REFNO is blank. A
+//                           REFNO of spaces only is blank (len ignores trailing spaces).
+//                           requestingfacilitycode (lr.requester_code), LIMSSpecimenSourceDesc (the specimen's type_text), location1 (v1
+//                           Patients.Location; CE has no patient location, so NULL).
+//   CE gaps: DOBType and LIMSDateTimeStamp are NULL (not carried).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - SELECT DISTINCT. Identical rows collapse: two result rows that map to the same Result, or two OBR sets of one lab number with equal
+//     columns, give one row. SQL Server's DISTINCT ignores case and trailing blanks in text, so the port groups on the folded text and shows the
+//     smallest spelling in byte order, as the line list does.
+//   - The Result CASE has no ELSE, so an unlisted text is NULL and the row still shows.
+//   - A request with no patient row is dropped. With two final reports at two labs the request shows once per lab.
+// PII: DOB and ClinicalInfo (V2: the patient reference number and dob).
+// Row order: v1 has no ORDER BY, so every output column in byte order, a missing value first (distinctParts).
+
+// [output name, key, kind] of each version (kinds as LINE_OUT); VRDSS_EXPRESSIONS holds the select expression of each key.
+const VRDSS_OUT = [
+  ['Sample_ID', 'sample_id', 'text'], ['Gender', 'gender', 'plain'], ['AgeinYears', 'age', 'number'], ['DOB', 'dob', 'plain'], ['DOBType', 'dob_type', 'plain'],
+  ['ClinicalInfo', 'clinical', 'text'], ['LIMSDateTimeStamp', 'lims_stamp', 'plain'], ['Collected Date', 'collected', 'plain'],
+  ['SpecimenCode', 'spec_code', 'text'], ['SpecimenDescription', 'spec_desc', 'text'], ['Received Date', 'received', 'plain'],
+  ['Registered Date', 'registered', 'plain'], ['Province', 'province', 'text'], ['District', 'district', 'text'], ['HMISCode', 'hmis', 'text'],
+  ['Facility', 'facility', 'text'], ['Tested Date', 'tested', 'plain'], ['Date Result Reported', 'reported', 'plain'], ['Result', 'result', 'plain'],
+  ['Instrument', 'instrument', 'text'], ['Testing Laboratory', 'lab_name', 'text'], ['TestType', 'test_type', 'plain'], ['LOINC', 'loinc', 'plain'],
+  ['Authorization Status', 'auth_status', 'plain'],
+];
+const VRDSS_V2_OUT = [
+  ['ct_case_id', 'case_id', 'text'], ['Other Ref Number', 'other_ref', 'plain'], ['Sample_ID', 'sample_id', 'text'],
+  ['requestingfacilitycode', 'requester', 'text'], ['LIMSSpecimenSourceDesc', 'spec_desc', 'text'], ['Gender', 'gender', 'plain'], ['dob', 'dob', 'plain'],
+  ['location1', 'location1', 'plain'], ['AgeinYears', 'age', 'number'], ['LIMSDateTimeStamp', 'lims_stamp', 'plain'], ['Collected Date', 'collected', 'plain'],
+  ['Received Date', 'received', 'plain'], ['Registered Date', 'registered', 'plain'], ['Province', 'province', 'text'], ['District', 'district', 'text'],
+  ['Location', 'facility', 'text'], ['Tested Date', 'tested', 'plain'], ['Date Result Reported', 'reported', 'plain'], ['Result', 'result', 'plain'],
+  ['Instrument', 'instrument', 'text'], ['Testing Laboratory', 'lab_name', 'text'], ['TestType', 'test_type', 'plain'], ['LOINC', 'loinc', 'plain'],
+  ['Authorization Status', 'auth_status', 'plain'],
+];
+const VRDSS_REFNO = attr('reference-numbers', false);
+const VRDSS_EXPRESSIONS = {
+  sample_id: 'lr.request_id',
+  gender: genderFmiuSql('p.sex'),
+  age: 'lr.age_years',
+  dob: 'p.date_of_birth',
+  dob_type: 'null::text',
+  clinical: 'lr.clinical_info',
+  lims_stamp: 'null::text',
+  collected: 'dr.effective',
+  spec_code: 's.type_code',
+  spec_desc: 's.type_text',
+  received: 's.received_time',
+  registered: 'lr.authored_at',
+  province: 'fmr.region',
+  district: 'fmr.district',
+  hmis: `substring(fre.extras from ${sqlLit(String.raw`"hims_code"\s*:\s*"([^"]*)"`)})`,
+  facility: 'fmr.name',
+  tested: 'lr.analysis_at',
+  reported: 'dr.issued',
+  result: resultCaseSql(rpt('l')),
+  instrument: instrumentSql('lr.analyzer_code', { quantStudio: true }),
+  test_type: testTypeSql('lr.panel_code'),
+  loinc: `case
+      when ${inListSql('lr.panel_code', ['COVAB'])} then '94503-0'
+      when ${inListSql('lr.panel_code', ['COVAG', 'COVRP'])} then '94558-4'
+      else '94500-6'
+    end`,
+  auth_status: authStatusSql('dr.issued'),
+  case_id: `case when length(rtrim(coalesce(${VRDSS_REFNO}, ''))) = 0 then null::text else ${VRDSS_REFNO} end`,
+  other_ref: 'null::text',
+  requester: 'lr.requester_code',
+  location1: 'null::text',
+};
+const VRDSS_PANELS = ['COVID', 'COVII', 'COVIS', 'COVAB', 'COVAG', 'COVRP'];
+const VRDSS_V2_PANELS = ['COVID', 'COVAB', 'COVAG', 'COVRP'];
+
+function vrdssSql(out, panels) {
+  const columns = out.filter(([, key]) => key !== 'lab_name');
+  const { groupBy, picks, orders } = distinctParts(out);
+  return `with src as (
+  select ${columns.map(([, key]) => `${VRDSS_EXPRESSIONS[key]} as ${key}`).join(',\n    ')},
+    ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name
+  from lab_requests lr
+  join patients p on p.id = lr.patient_id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  left join facility_registry fre on fre.id = fmr.registry_id
+  where ${inListSql('lr.panel_code', panels)}
+    and ${inListSql('l.observation_code', LINE_OBSERVATIONS)}
+    and ${foldSql('dr.status')} = 'final'
+    and ${optionalWindowSql('dr.issued')}
+),
+${labNamesCte()},
+named as (
+  select s.*, n.lab_name as lab_name
+  from src s
+  left join names n on n.code_key = ${foldSql('s.code')}
+),
+res as (
+  select ${picks}
+  from named s
+  group by ${groupBy}
+)
+select ${out.map(([name, key]) => `r.${key} as "${name}"`).join(',\n  ')}
+from res r
+order by ${orders.join(',\n  ')}`;
+}
+
+// ---- Wastewater results (WasteWaterData and WastewaterDataCHAZ) ----
+//
+// SARS-CoV-2 CT values and result of wastewater samples (panel COVII) tested by the two wastewater labs, one row per sample. Columns (WW line
+// 85): requestid, SpecimenDateTime, RegisteredDateTime, ReceivedDatetime, AnalysisDateTime, AuthorisedDatetime, Laboratory, Site, NgeneCT,
+// ORF1abCT, QSCT, MS2CT, Result. The two views are the same text up to the last WHERE:
+//   WW (line 92)    Site in the six Lusaka sites, any lab
+//   CHAZ (line 92)  Laboratory = 'CHAZ Laboratory', any site
+// so one query has a `laboratory` select. Blank (or 'Six Lusaka sites') is WasteWaterData; 'CHAZ Laboratory' is WastewaterDataCHAZ. The text
+// compares ignore case and trailing blanks, so 'chaz laboratory ' is CHAZ.
+//
+// What v1 does (lines 12-91):
+//   reg      requests of the panel COVII whose status is not X (cancelled) and whose receiving OR testing lab code is ZCX or ZLX (lines 73-84).
+//            One row per Requests row (one OBR set). Laboratory is 'CHAZ Laboratory' for ZCX and 'ZNPHRL' for ZLX, a CASE on the RECEIVING code
+//            (lines 74-77), and is NULL for any other receiving code. Site is the text after the first '~' of LIMSPointOfCareDesc (the whole text
+//            when there is none), cut to LEN of the text (trailing blanks dropped when the text has no '~'): `substring(x, charindex('~', x) + 1,
+//            len(x))`. The six sites are stored truncated and padded ('Chunga Treatment Pl', 'Manchinchi Treatmen', 'Mass Media Pumping ').
+//   five CTEs  the same filter joined to LabResults, one observation each: QNGCT (NgeneCT), QORCT (ORF1abCT), QSCT (QSCT), QS2CT (MS2CT) and
+//            CVGXN (Result), the value being LIMSRptResult, the CT as TEXT (rpt). They are LEFT joined to reg on RequestID ALONE (lines 87-91).
+// Kept v1 quirks (spec ruling 1):
+//   - The joins on RequestID alone multiply rows. Two OBR sets of one lab number, both COVII and not cancelled, give two reg rows, and each joins
+//     every value of every CTE: two values of one observation make two rows, and a request with 2 reg rows and 2 values each of NgeneCT and
+//     Result has 2 x 2 x 2 = 8 rows. A CT with no result row is NULL, and a request with none of the five results still shows once. An OBR set
+//     that is cancelled, or not at the two labs, is in neither reg nor a CTE, so its results are not read. The lab number joins ignoring case and
+//     trailing blanks.
+//   - Laboratory is NULL for a receiving code other than ZCX or ZLX; the six-site run would keep such a row (any lab), the CHAZ run drops it.
+//   - Status X only: a final, preliminary or unknown report is listed. A report with no status is dropped, as v1's `!=` is unknown on NULL.
+//   - The sites are matched ignoring case and trailing blanks ('Mass Media Pumping ' and 'mass media pumping' are one site), and the Site
+//     column shows the text as stored.
+// CE gaps and deviations (spec ruling 7):
+//   - ReceivingFacilityCode is not carried. The lab code is the report's performer, which is cdr's configured OPENLDR_LAB_CODE for the push
+//     (see the notes above). So a request is in when it was TESTED at ZCX or ZLX, and v1's receiving-only requests (received at one of the two,
+//     tested elsewhere) are missing. Laboratory is v1's CASE applied to the testing code, not the receiving code: it differs from v1 where a sample
+//     is received at one lab and tested at the other. Because only ZCX and ZLX get in, Laboratory is never NULL here.
+//   - Laboratory is the two constants of v1's CASE and not a name from labNameSql: v1 does not read its dictionary here (lines 13-16 are a CASE),
+//     and labNameSql would show the report's display text, not 'CHAZ Laboratory', so the CHAZ filter would not find it.
+//   - A request with two reports at the labs shows once per report.
+// The window: SpecimenDateTime (the collection date), see above. It limits the rows (reg), not the CTEs. Row order: every output column.
+const WASTE_SITES = ['Chelstone Ponds', 'Chunga Treatment Pl', 'Kaunda Square Ponds', 'Manchinchi Treatmen', 'Mass Media Pumping', 'Matero Ponds'];
+const WASTE_LABS = ['ZCX', 'ZLX'];
+const CHAZ = 'CHAZ Laboratory';
+// [output name, observation code] of the five CT slots.
+const WASTE_SLOTS = [['NgeneCT', 'QNGCT'], ['ORF1abCT', 'QORCT'], ['QSCT', 'QSCT'], ['MS2CT', 'QS2CT'], ['Result', 'CVGXN']];
+
+export function wastewaterSql() {
+  const slotCase = WASTE_SLOTS.map(([, code], i) => `when ${inListSql('l.observation_code', [code])} then ${i + 1}`).join(' ');
+  const joins = WASTE_SLOTS.map((_, i) => `left join obs o${i + 1} on o${i + 1}.req_key = ${foldSql('q.request_id')} and o${i + 1}.slot = ${i + 1}`).join('\n  ');
+  const stamps = ['q.specimen', 'q.registered', 'q.received', 'q.analysis', 'q.authorised'];
+  const orders = [
+    sortText('q.request_id'), ...stamps.map((e) => `${e} collate "C" nulls first`), sortText('q.laboratory'), sortText('q.site'),
+    ...WASTE_SLOTS.map((_, i) => sortText(`o${i + 1}.val`)),
+  ];
+  return `with q as (
+  select lr.id as row_id, lr.request_id, dr.effective as specimen, lr.authored_at as registered, s.received_time as received, lr.analysis_at as analysis,
+    dr.issued as authorised,
+    case when ${inListSql('dr.performer', ['ZCX'])} then ${sqlLit(CHAZ)} when ${inListSql('dr.performer', ['ZLX'])} then 'ZNPHRL' end as laboratory,
+    substr(lr.point_of_care, strpos(lr.point_of_care, '~') + 1, length(rtrim(lr.point_of_care))) as site
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${inListSql('lr.panel_code', ['COVII'])}
+    and ${foldSql('dr.status')} <> 'cancelled'
+    and ${inListSql('dr.performer', WASTE_LABS)}
+),
+obs as (
+  select ${foldSql('lr.request_id')} as req_key, case ${slotCase} end as slot, ${rpt('l')} as val
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  where lr.id in (select q.row_id from q)
+    and ${inListSql('l.observation_code', WASTE_SLOTS.map(([, code]) => code))}
+)
+select q.request_id as "requestid", q.specimen as "SpecimenDateTime", q.registered as "RegisteredDateTime", q.received as "ReceivedDatetime",
+  q.analysis as "AnalysisDateTime", q.authorised as "AuthorisedDatetime", q.laboratory as "Laboratory", q.site as "Site",
+  ${WASTE_SLOTS.map(([name], i) => `o${i + 1}.val as "${name}"`).join(',\n  ')}
+from q
+  ${joins}
+where ${optionalWindowSql('q.specimen')}
+  and case when ${foldSql('{{param.laboratory}}')} = ${sqlLit(CHAZ.toLowerCase())} then ${foldSql('q.laboratory')} = ${sqlLit(CHAZ.toLowerCase())}
+    else ${inListSql('q.site', WASTE_SITES)} end
+order by ${orders.join(',\n  ')}`;
+}
+
+export const wastewaterParams = () => [
+  ...optionalDateParams(),
+  {
+    id: 'laboratory', type: 'select', required: false,
+    label: 'Laboratory (blank or Six Lusaka sites: the six sites of v1 WasteWaterData, any lab; CHAZ Laboratory: every site of that lab, v1 WastewaterDataCHAZ)',
+    optionsSql: `select 'Six Lusaka sites' as laboratory union all select ${sqlLit(CHAZ)}`,
+  },
+];
+
 export function queries() {
   return [
     { name: 'COVID-19 by testing lab', sql: labStatsSql(), params: dateParams(true) },
@@ -570,5 +984,15 @@ export function queries() {
     { name: 'COVID-19 by source facility', sql: sourceStatsSql(), params: sourceStatsParams() },
     { name: 'COVID-19 daily line list', sql: lineListSql(), params: lineListParams() },
     { name: 'COVID-19 daily positivity', sql: positivitySql(), params: positivityParams() },
+    // Task 24. View vw_Covid19_PD; the notes on extractSql above.
+    { name: 'COVID-19 results with location', sql: extractSql('pd'), params: extractParams() },
+    // View vw_Covid19: the same rows, FacilityLocation in place of Province, District and Facility.
+    { name: 'COVID-19 results with facility location', sql: extractSql('facility'), params: extractParams() },
+    // View v_vrdss_Covid; the notes above VRDSS_OUT.
+    { name: 'COVID-19 results (VRDSS)', sql: vrdssSql(VRDSS_OUT, VRDSS_PANELS), params: extractParams() },
+    // View v_vrdss_Covid_V2: another column set and a shorter panel list.
+    { name: 'COVID-19 results (VRDSS V2)', sql: vrdssSql(VRDSS_V2_OUT, VRDSS_V2_PANELS), params: extractParams() },
+    // Views WasteWaterData and WastewaterDataCHAZ; the notes above wastewaterSql.
+    { name: 'Wastewater results', sql: wastewaterSql(), params: wastewaterParams() },
   ];
 }

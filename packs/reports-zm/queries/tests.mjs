@@ -2,8 +2,8 @@
 
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  dateParams, eidCte, hivvlCte, inRange, labNameSql, likeVarcharSql, localDate, localTs, numberOfTextSql, provinceParam, recencyCte, recencySurveillanceCte,
-  requesterJoin, requestAttrSql, sqlLit, ssTextKey, tndCte,
+  dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, optionalWindowSql, provinceParam, recencyCte,
+  recencySurveillanceCte, requesterJoin, requestAttrSql, sqlLit, ssTextKey, testingCodeSql, tndCte,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -1014,24 +1014,6 @@ export const hivdrParams = () => dateParams(false).map((p) => ({ ...p, label: `$
 // Shared CE facts (CE mapping in global-constraints.md): dates are CE's ISO text with the offset DISA wrote; the facility is the mapped
 // register row (province = region, district, facility = name); sex comes from the patient; the specimen is the report's specimen;
 // the result text is rpt() (LIMSRptResult: the text, else the number with its comparator, else the coded value).
-
-// Both feeds window on the authorised date; a side left blank is open.
-const optionalWindowSql = (stamp) => `(({{param.from}} = '' and {{param.to}} = '')
-      or (${stamp} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-        and ({{param.from}} = '' or left(${stamp}, 10) >= {{param.from}})
-        and ({{param.to}} = '' or left(${stamp}, 10) <= {{param.to}})))`;
-
-// A testing code that is blank (empty or spaces) is no code: no lab, no name.
-const testingCodeSql = (dr) => `case when rtrim(${dr}.performer) = '' then null else ${dr}.performer end`;
-
-// One name per testing code from the rows of `src` (columns code and report_name).
-const labNamesCte = () => `names as (
-  select ${foldSql('p.code')} as code_key,
-    (array_agg(p.report_name order by ${foldSql('p.report_name')} = ${foldSql('p.code')}, p.report_name collate "C"))[1] as lab_name
-  from src p
-  where p.code is not null
-  group by ${foldSql('p.code')}
-)`;
 
 // The final select and ORDER BY over `res`, whose columns are c01, c02, ... in output order. `kinds`: 'text', 'stamp' or 'number'.
 function finalSelect21(labels, kinds) {

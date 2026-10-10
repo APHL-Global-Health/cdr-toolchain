@@ -621,7 +621,33 @@ export const rankedSql = (srcName) => `select s.*, row_number() over (partition 
 export const genderFmiuSql = (sexExpr) => `case upper(rtrim(${sexExpr})) when 'F' then 'Female' when 'M' then 'Male' when 'I' then 'Indeterminate' when 'U' then 'Unknown' end`;
 
 // The text value of one request attribute (spec section 3) of the request row `rowIdExpr`; NULL when absent.
-export const requestAttrSql = (rowIdExpr, code) => `(select max(a.value_text) from lab_request_attributes a where a.lab_request_id = ${rowIdExpr} and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = ${sqlLit(code)})`;
+// CE keeps an attribute in the column of its type (value_text, value_number, value_datetime or value_boolean). By default only value_text is
+// read, which is right for the codes that are text (reference-numbers, unique-id, referring-request-id, ...). `typed: true` reads the first
+// column that holds a value, as text: a number as its text ('2'), a boolean as 'true' or 'false', a date-time as it is stored. Use it for a
+// code whose type the sender decides (deceased, newborn, repeated, admit-attend-time, target-time-days and so on).
+export const requestAttrSql = (rowIdExpr, code, { typed = false } = {}) => `(select max(${typed ? 'coalesce(a.value_text, a.value_number::text, a.value_datetime, a.value_boolean::text)' : 'a.value_text'}) from lab_request_attributes a where a.lab_request_id = ${rowIdExpr} and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = ${sqlLit(code)})`;
+
+// A window with both sides optional, on the LOCAL date of `stamp` (the first ten characters of its own text, as inRange). Both parameters
+// blank: no window, every row, also a row whose stamp is missing or partial. One side given: that side only, and a stamp that does not start
+// with a full date (missing, or a partial FHIR dateTime such as '2026-07') is outside. The parameters are `from` and `to`, YYYY-MM-DD.
+export const optionalWindowSql = (stamp) => `(({{param.from}} = '' and {{param.to}} = '')
+      or (${stamp} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+        and ({{param.from}} = '' or left(${stamp}, 10) >= {{param.from}})
+        and ({{param.to}} = '' or left(${stamp}, 10) <= {{param.to}})))`;
+
+// A testing code that is blank (empty or spaces) is no code: no lab, no name.
+export const testingCodeSql = (dr) => `case when rtrim(${dr}.performer) = '' then null else ${dr}.performer end`;
+
+// One name per testing code from the rows of `src` (columns code and report_name): the CTE `names` (code_key, lab_name). The Task 16 rule
+// (see the lab-name note in queries/tests.mjs): rows never split on per-report names; the name is chosen from the names of the code's rows in
+// `src`: a name that is not just the code first, then the smallest in byte order. Join it on ${foldSql('<code>')} = names.code_key.
+export const labNamesCte = () => `names as (
+  select ${foldSql('p.code')} as code_key,
+    (array_agg(p.report_name order by ${foldSql('p.report_name')} = ${foldSql('p.code')}, p.report_name collate "C"))[1] as lab_name
+  from src p
+  where p.code is not null
+  group by ${foldSql('p.code')}
+)`;
 
 // SQL Server `x like '<prefix><n underscores>'` on a varchar value, case-insensitive. Trailing blanks are
 // special: one blank can fill an underscore, and further trailing blanks are ignored. So the text starts
@@ -1620,6 +1646,9 @@ export function recencySurveillanceCte(name, { from, to } = {}) {
 // sp_UpdateVLEIDRequests line 23.
 const VLEID_PANELS = ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'];
 
+// v1's HL7PriorityCode from CE's priority word: cdr made routine, urgent and stat from R, U and S, so they turn back. Anything else is NULL.
+export const priorityCodeSql = (priorityExpr) => `case ${foldSql(priorityExpr)} when 'routine' then 'R' when 'urgent' then 'U' when 'stat' then 'S' end`;
+
 // The window columns of vleidRequestsCte, `on`: [on a request row, on a VIRAL row]. A VIRAL row has no analysis or
 // authorised date, so it is out of a window on either.
 const VLEID_WINDOWS = {
@@ -1642,7 +1671,7 @@ const VLEID_COLUMNS = [
   ['loinc_panel_code', 'null::text'],
   ['lims_panel_code', 'lr.panel_code', "'VIRAL'::text"],
   ['lims_panel_desc', 'lr.panel_desc', 'null::text'],
-  ['hl7_priority_code', `case ${foldSql('lr.priority')} when 'routine' then 'R' when 'urgent' then 'U' when 'stat' then 'S' end`],
+  ['hl7_priority_code', priorityCodeSql('lr.priority')],
   ['specimen_date_time', 'dr.effective'],
   ['registered_date_time', 'lr.authored_at'],
   ['received_date_time', 's.received_time'],
