@@ -4,7 +4,7 @@ import { lit, caseSuite } from '../../shared/pg-check.mjs';
 import {
   sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
   dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, formAnswersCte, labNameSql,
-  districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql, numberOfTextSql,
+  districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql, numberOfTextSql, isNumericZmSql,
 } from '../zm-sql.mjs';
 import { dateErrorSuites } from './epi-fixture.mjs';
 import { zmQueryFile } from '../zm-queries.mjs';
@@ -513,6 +513,22 @@ const numberCases = [
 ];
 suites30c.push(evalSuite('number-of-text', numberCases.map(([expr, want]) => ({
   expr: `(${numberOfTextSql(expr)})::text`, params: {}, want: want === null ? 'ok (null)' : `ok ${want}`, label: expr,
+}))));
+// Final review minor 6: isNumericZmSql is SQL Server's ISNUMERIC (true or false, not the number), on the same measured cases. It differs from
+// numberOfTextSql where ISNUMERIC says 1 and the cast fails: a trailing vertical tab, form feed or no-break space. A trailing tab, CR or LF
+// ('5' + CR + LF) is 0; vl-reports-mz's isNumericSql said 1 there. Left out, as unmeasured or as known gaps the helper keeps from isNumericSql:
+// a sign then a space ('- 5', ISNUMERIC 1), a lone dot ('.', ISNUMERIC 1), and the other spaces inside a number.
+const ISNUMERIC_ONE_CAST_FAILS = [`'5' || ${VT}`, `'5' || ${FF}`, `'5' || ${NBSP}`];
+const NOT_PINNED = ['null::text', q('$5'), q('- 5'), q('+ 5'), q('.'), q('5e 3'), q('5 5'), `'-' || ${TAB} || '5'`];
+const isNumericCases = [
+  ...numberCases.filter(([expr]) => !ISNUMERIC_ONE_CAST_FAILS.includes(expr) && !NOT_PINNED.includes(expr))
+    .map(([expr, want]) => [expr, want !== null]),
+  ...ISNUMERIC_ONE_CAST_FAILS.map((expr) => [expr, true]),
+  [`'5 ' || ${VT}`, true], [q('$5'), true], [q(' $1,000 '), true], [`${TAB} || '$5'`, true], ['null::text', false],
+  [`'540' || ${CR} || ${LF}`, false], [`'1E5' || ${TAB}`, false], [`${CR} || ${LF} || '1E5'`, true],
+];
+suites30c.push(evalSuite('isnumeric-zm', isNumericCases.map(([expr, want]) => ({
+  expr: `(${isNumericZmSql(expr)})::text`, params: {}, want: `ok ${want}`, label: expr,
 }))));
 // Item H: every select parameter's optionsSql ends with a total ORDER BY, and the fixed lists come out in the order written (the first value is
 // the one a picker shows first). A UNION ALL has no defined row order, so a list in it can come out in any order; a plain test cannot see

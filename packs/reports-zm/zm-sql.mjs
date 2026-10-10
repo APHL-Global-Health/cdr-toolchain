@@ -5,7 +5,7 @@
 // Query parameters appear in SQL as {{param.<id>}}. CE puts the value in as a quoted literal, and a
 // blank optional parameter arrives as ''.
 
-import { lit as sqlLit, rpt, inListSql, foldSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
+import { lit as sqlLit, rpt, inListSql, foldSql } from '../vl-reports-mz/vl-queries.mjs';
 
 export { sqlLit };
 
@@ -767,8 +767,8 @@ export const referralSql = (receivingExpr, testingExpr) => `case
 export const disalinkSql = (preregExpr, referringExpr, { digitPrefix = false } = {}) => `case
       when length(rtrim(${preregExpr})) > 0 then 1
       when exists (select 1 from facility_map fd where fd.registry_id is not null and ${foldSql('fd.source_code')} = ${foldSql(`left(${referringExpr}, 5)`)})
-        and not ${isNumericSql(`left(${referringExpr}, 5)`)} then 1${digitPrefix ? `
-      when ${isNumericSql(`left(${referringExpr}, 3)`)} then 1` : ''}
+        and not ${isNumericZmSql(`left(${referringExpr}, 5)`)} then 1${digitPrefix ? `
+      when ${isNumericZmSql(`left(${referringExpr}, 3)`)} then 1` : ''}
       else 0
     end`;
 
@@ -785,7 +785,7 @@ export const hoursBetweenSql = (fromExpr, toExpr) => `extract(epoch from date_tr
 //   prereg_facility, referring_id   the two request attributes behind disalink
 export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_date`)} - ${localDate(`${r}.collected_date`)} as tat,
     ${hoursBetweenSql(`${r}.collected_date`, `${r}.tested_date`)} as hours_taken,
-    ${pocExtra} or ${isNumericSql(`${r}.testing_code`)} or ${isNumericSql(`left(${r}.lab_id, 3)`)} as is_poc,
+    ${pocExtra} or ${isNumericZmSql(`${r}.testing_code`)} or ${isNumericZmSql(`left(${r}.lab_id, 3)`)} as is_poc,
     case when length(rtrim(${r}.testing_code)) = 0 then ${r}.receiving_code else ${r}.testing_code end as base_code,
     ${requestAttrSql(`${r}.request_row_id`, 'prereg-registration-facility')} as prereg_facility,
     ${requestAttrSql(`${r}.request_row_id`, 'referring-request-id')} as referring_id`;
@@ -869,7 +869,7 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false, 
       where: `${inListSql('lr.panel_code', ['HIVVL', 'POCVR', 'POHVL'])}
       and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVTM', 'HIVVD', 'POCVR', 'POCVC'])}
       and dr.status = 'final'
-      and (${inListSql(result, HIVVL_VALID)} or ${isNumericSql(result)})`,
+      and (${inListSql(result, HIVVL_VALID)} or ${isNumericZmSql(result)})`,
       prefilter,
     })}
   ),
@@ -1379,7 +1379,7 @@ export function tbgnxCte(name, { from, to, extraDays = 0 } = {}) {
     ${classSql('r.mtb', MTB_CLASSES)} as mtb,
     ${classSql('r.rif', RIF_CLASSES)} as rif,
     r.tbhiv, r.tbage, r.dist_tb_number,
-    case when ${inListSql('r.lims_panel_code', ['POCGT'])} or ${isNumericSql('r.tested_at')} then 1 else 0 end as poc,
+    case when ${inListSql('r.lims_panel_code', ['POCGT'])} or ${isNumericZmSql('r.tested_at')} then 1 else 0 end as poc,
     c.tat,
     case when c.tat < 24 then 1 else 0 end as w24h,
     case when c.tat < 48 then 1 else 0 end as w48h,
@@ -1419,6 +1419,14 @@ export const dateWeekSql = (dateExpr) => `((extract(doy from ${dateExpr})::int -
 // and the exponent letter 'd' or 'D' ('1d2' is ISNUMERIC 1 and reads as 100); the helper gives NULL for those where v1 reads the number.
 const NUMBER_TEXT = String.raw`^( *[-+]?\d[\d,]*(\.\d*)?|[ \t\r\n]*[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?) *$`;
 export const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
+
+// SQL Server's ISNUMERIC as true or false (never NULL), for a test such as v1's `ISNUMERIC(x) = 1`. It follows the whitespace and comma table
+// above (measured): spaces, tabs, LF and CR in front; behind, spaces, and also a vertical tab, form feed or no-break space (ISNUMERIC says 1
+// there, although the cast fails), but never a tab, CR or LF ('540' + CR + LF is 0); a comma only with spaces in front and no exponent. Like
+// vl-reports-mz's isNumericSql (which accepts a trailing tab, CR or LF, and is not changed), it takes a currency sign after the sign, and it
+// rejects a lone '+', '$' or '.', and a sign followed by a space ('- 5'), which ISNUMERIC accepts; none is a plausible result or code.
+const ISNUMERIC_ZM = String.raw`^( *[-+]?[$£€¥]?\d[\d,]*(\.\d*)?|[ \t\r\n]*[-+]?[$£€¥]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?)[ \v\f\xa0]*$`;
+export const isNumericZmSql = (x) => `coalesce(${x} ~ ${sqlLit(ISNUMERIC_ZM)}, false)`;
 
 // A date text as 'YYYY-MM-DD', or NULL. Two forms are read: dd/mm/yyyy (the form cdr measured in LIMSRptResult for the
 // date results, apps/cli/src/compare/v1-coverage.ts) and yyyy-mm-dd, each with optional surrounding spaces. A date that
@@ -1475,7 +1483,7 @@ const recencyScopeSql = (ids, finalRange) => `${foldSql('lr.request_id')} in (se
 const suppressionSql = (vl, words, unsuppressedText) => {
   const n = numberOfTextSql(vl);
   return `case
-      when (${vl} is not null and not ${isNumericSql(vl)} and ${inListSql(vl, words)}) or ${n} < 1000 then 'Suppressed'
+      when (${vl} is not null and not ${isNumericZmSql(vl)} and ${inListSql(vl, words)}) or ${n} < 1000 then 'Suppressed'
       when ${n} >= 1000 or ${unsuppressedText} then 'UnSuppressed'
     end`;
 };

@@ -3138,6 +3138,25 @@ const suitesFx4 = [
 ];
 suitesFx4[0].setup = SETUP_FX4;
 
+// ============================================================================================
+// Group fx6 (final review, minor 6): v1's ISNUMERIC on a result text with a trailing tab or CR LF. The hivvl table keeps a result that is on
+// the valid list or ISNUMERIC (v1 sp_update_HIVVLTable lines 120-133). ISNUMERIC says 0 for '540' + CR + LF and '540' + TAB (measured,
+// task-30c-report.md item F), so those requests have no hivvl row; '540 ' (a trailing space) is a number. Fixture ids start with "fx6-".
+// ============================================================================================
+
+const FX6 = [['FX6-CRLF', "'540' || chr(13) || chr(10)"], ['FX6-TAB', "'540' || chr(9)"], ['FX6-SPACE', "'540 '"], ['FX6-LEAD', "chr(13) || chr(10) || '540'"]];
+const SETUP_FX6 = `${facilityRows('fx6', [['ZFX6', 'Six Clinic', 'Western', 'Mongu']])}
+insert into lab_requests (id, request_id, panel_code, authored_at, requester_code) values
+  ${FX6.map(([lab], i) => `('fx6-q${i + 1}', ${lit(lab)}, 'HIVVL', '2026-05-02T08:00:00Z', 'ZFX6')`).join(', ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values
+  ${FX6.map((_, i) => `('fx6-d${i + 1}', 'fx6-q${i + 1}', 'final', '2026-05-01T07:00:00Z', '2026-05-10T10:00:00Z', 'LUS')`).join(', ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values
+  ${FX6.map(([, text], i) => `('fx6-r${i + 1}', 'fx6-q${i + 1}', 'HIVVL', ${text}, null, null)`).join(', ')};`;
+const suitesFx6 = [
+  // A leading CR LF is a number to ISNUMERIC; a trailing one is not.
+  pickSuite('fx6-hivvl-isnumeric', SETUP_FX6, `with ${hivvlCte('hv')} select * from hv`, ['lab_id'], [{ lab_id: 'FX6-LEAD' }, { lab_id: 'FX6-SPACE' }], 'q.lab_id'),
+];
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
@@ -3146,4 +3165,5 @@ export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, 
   { name: 'c1', suites: suitesC1 },
   { name: 'fx', suites: suitesFx },
   { name: 'fx4', suites: suitesFx4 },
+  { name: 'fx6', suites: suitesFx6 },
 ];

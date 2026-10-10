@@ -31,7 +31,7 @@ Read `QUESTIONS-FOR-ZM.md` for what we still need from the Zambia team.
 | `.gitignore` | Keeps `dist/` out of git. |
 | `../shared/pg-check.mjs` | The runner `check-reports-zm.mjs` shares with the Mozambique pack. It runs suite groups, one transaction per group. |
 | `../shared/pack-build.mjs` | The CSV writer and step summary `build.mjs` shares with the Mozambique pack. |
-| `../vl-reports-mz/vl-queries.mjs` | Helpers this pack imports: `rpt`, `isNumericSql`, `inListSql`, `foldSql`. |
+| `../vl-reports-mz/vl-queries.mjs` | Helpers this pack imports: `rpt`, `inListSql`, `foldSql`. |
 
 `build.mjs` writes these to `dist/`:
 
@@ -218,8 +218,13 @@ each, if wrong, is in the spec.
   casts such a text and stops with an error (`999.5` cast to bigint, `1,500`, `1E3`), the port
   reads the number. Those expected rows are intent, not v1 output. The helper does not read a comma
   in front of the digits (`,5`), a comma after the decimal point (`1.5,0`) or the exponent letter `d`
-  (`1d2`), which ISNUMERIC accepts. `isNumericSql` in `vl-reports-mz` shares these gaps and is not
-  changed.
+  (`1d2`), which ISNUMERIC accepts.
+- **ISNUMERIC tests.** Where v1 tests `ISNUMERIC(x) = 1` (a valid result, a POC code, a lab number
+  prefix), the queries call `isNumericZmSql`. It follows the same measured table: a trailing tab, CR
+  or LF (`'540'` + CR + LF) is not a number, while a trailing vertical tab, form feed or no-break
+  space is (ISNUMERIC says 1 there). `isNumericSql` in `vl-reports-mz` has the opposite gap: it
+  accepts a trailing tab, CR or LF. This pack no longer calls it. It is not changed. Both still
+  reject a lone `+`, `$` or `.` and a sign followed by a space (`- 5`), which ISNUMERIC accepts.
 - **Rates.** SQL Server cuts a division in `decimal` at its scale, so rates are cut, not rounded
   (`rateCutSql`: 1 of 3 is 33.333333333333). Averages of integers cut toward zero (-1.5 gives -1).
   Where a fixture could not tell float from decimal, a check pins the type.
@@ -435,7 +440,7 @@ Three parts, joined with `UNION`, which removes duplicate rows as v1's does:
 2. `zm_rejected`. Panel `HIVVL`. Report status `cancelled` (v1 `X`) and `RegisteredDate` in range.
    The request is not in part 1. `Result` is `REJECTED` and `Suppressed` is NULL.
 3. `zm_unclear`. Panel `HIVVL`. Observation `HIVVL`, `HIVVC` or `HIVVD`. Report status final and
-   `ResultDate` in range. The result is not a number (`isNumericSql`, shared with `vl-reports-mz`)
+   `ResultDate` in range. The result is not a number (`isNumericZmSql`, v1's ISNUMERIC)
    and is not in `BELOW_LIMIT_RESULTS` (9 texts). The request is not in part 1. `Suppressed` is
    NULL.
 

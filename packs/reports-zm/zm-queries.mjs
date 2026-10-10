@@ -2,9 +2,9 @@
 // (corlix/fixtures/Zambia_views/script.sql, UTF-16). build.mjs puts them in the custom-queries step
 // of dist/pack.json. The SQL may differ from v1's; the output must match.
 
-import { rpt, inListSql, isNumericSql, foldSql } from '../vl-reports-mz/vl-queries.mjs';
+import { rpt, inListSql, foldSql } from '../vl-reports-mz/vl-queries.mjs';
 import {
-  inRange, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
+  inRange, isNumericZmSql, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
   areaFilter, tndCte, TND_PANELS, TND_OBSERVATIONS, TND_INVALID_RESULTS, TND_SUPPRESSED_RESULTS,
 } from './zm-sql.mjs';
 
@@ -72,7 +72,7 @@ zm_unclear as (
     and q.report_status = 'final'
     and ${inRange('q.result_date')}
     and ${result} is not null
-    and not ${isNumericSql(result)}
+    and not ${isNumericZmSql(result)}
     and not ${inListSql(result, BELOW_LIMIT_RESULTS)}
     and not exists (select 1 from zm_valid v where ${foldSql('v.lab_id')} = ${foldSql('q.request_id')})
 )

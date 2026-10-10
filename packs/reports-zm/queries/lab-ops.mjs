@@ -1,10 +1,11 @@
 // Custom queries for the lab-ops reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
   optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql, vleidRequestsCte,
   dateParamSql, optionsListSql,
+  isNumericZmSql,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -155,7 +156,7 @@ const VL_NAMES = [
 ];
 
 export function vlLabPerformanceSql() {
-  const listed = (code) => `(${inListSql(code, VL_LABS)} or ${isNumericSql(code)})`;
+  const listed = (code) => `(${inListSql(code, VL_LABS)} or ${isNumericZmSql(code)})`;
   const days = (v, n) => count1(`${localDate(`${v}.tested_date`)} - ${localDate(`${v}.registered_date`)} <= ${n}`);
   return `with ${hivvlCte('hv', { from: 'from', to: 'to', extraDays: 1 })},
 vt as (
@@ -822,8 +823,8 @@ export function weeklyStatsSql() {
     coalesce(length(rtrim(lr.rejection_code)) > 0, false) as has_rej,
     ${ex('true')} as has_obs,
     ${ex(valid)} as is_valid,
-    ${ex(`not ${isNumericSql(result)} and ${result} is not null and not (${inListSql(result, WS_KNOWN)})`)} as is_other,
-    ${ex(`not ${isNumericSql(result)} and ${result} ilike 'INV%'`)} as is_inv,
+    ${ex(`not ${isNumericZmSql(result)} and ${result} is not null and not (${inListSql(result, WS_KNOWN)})`)} as is_other,
+    ${ex(`not ${isNumericZmSql(result)} and ${result} ilike 'INV%'`)} as is_inv,
     ${ex(`${valid} and (${inListSql(result, WS_SUPPRESSED)} or coalesce(${numberOfTextSql(result)} < 1000, false) or length(rtrim(y.coded_value)) > 0)`)} as is_supp,
     ${ex(inListSql('y.coded_value', ['P', 'POS', 'DTS']))} as is_pos,
     ${ex(`${foldSql('y.coded_value')} = 'i'`)} as is_ind

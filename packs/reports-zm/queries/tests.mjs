@@ -1,11 +1,12 @@
 // Custom queries for the tests reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, optionalWindowSql, provinceParam, recencyCte,
   recencySurveillanceCte, requesterJoin, requestAttrSql, sqlLit, ssTextKey, testingCodeSql, tndCte,
   dateParamSql, optionsListSql,
   oneRowSql,
+  isNumericZmSql,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -328,7 +329,7 @@ vl_incs as (
     and ${inListSql('lr.panel_code', DBS_VL_PANELS)}
     and ${inRange('dr.issued')}
     and ${inListSql('l.observation_code', DBS_VL_OBSERVATIONS)}
-    and not ${isNumericSql(result)}
+    and not ${isNumericZmSql(result)}
     and not ${inListSql(result, DBS_CLEAR_TEXTS)}
     and ${dbsProvinceSql('fmr.region')}
 ),

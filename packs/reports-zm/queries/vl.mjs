@@ -1,12 +1,13 @@
 // Custom queries for the vl reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
+import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswersCte, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
   dateParamSql, dateTextParamSql, optionsListSql, optionalWindowSql,
   oneRowSql,
+  isNumericZmSql,
 } from '../zm-sql.mjs';
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
@@ -633,7 +634,7 @@ export function cohortSql() {
   const pick = (n) => `(array_agg(x.result_text order by ${ssTextKey('x.result_text')} collate "C" desc, x.result_text collate "C" desc) filter (where x.visit = ${n}))[1] as v${n}`;
   return `with ${zmIdsCte('zm_ids')},
 ${cohortHistoryCtes({ observations: ['HIVVL', 'HIVVC'], days: 366, direction: 'asc' })},
-${cohortRowsCte((result) => `${isNumericSql(result)} and length(btrim(${result})) > 3`)}
+${cohortRowsCte((result) => `${isNumericZmSql(result)} and length(btrim(${result})) > 3`)}
 select g.province as "Province", g.district as "District", g.facility as "Facility", g.art_no as "ARTNumber",
   ${visits.map((n) => `g.v${n} as "${n}"`).join(', ')}
 from (
@@ -969,7 +970,7 @@ w as (
 
 export function uniqueClientsSql() {
   const eq = (column, id) => `${foldSql(column)} = ${foldSql(`{{param.${id}}}`)}`;
-  const ok = (list) => `(${isNumericSql('r.result')} or ${inListSql('r.result', list)})`;
+  const ok = (list) => `(${isNumericZmSql('r.result')} or ${inListSql('r.result', list)})`;
   const sub = `${foldSql('{{param.rows}}')} = 'one row per sub-area'`;
   const age = 'r.age_years';
   const band = `case ${UNIQUE_BANDS.map(([name, test]) => `when ${test(age)} then '${name}'`).join(' ')} end`;
@@ -1175,7 +1176,7 @@ export const rateCutSql = (top, count) =>
 
 export function uniqueClientsRatesSql() {
   const eq = (column, id) => `${foldSql(column)} = ${foldSql(`{{param.${id}}}`)}`;
-  const textOk = `(${isNumericSql('t.result')} or (case when s.branch in (3, 4) then ${inListSql('t.result', RATE_TEXTS_NO_ND)} else ${inListSql('t.result', RATE_TEXTS)} end))`;
+  const textOk = `(${isNumericZmSql('t.result')} or (case when s.branch in (3, 4) then ${inListSql('t.result', RATE_TEXTS_NO_ND)} else ${inListSql('t.result', RATE_TEXTS)} end))`;
   const key = (x) => `lower(rtrim(${x}))`;
   const rate = (top) => rateCutSql(top, 'a.clients');
   return `with ${tndCte('tnd', { rank: true })},
