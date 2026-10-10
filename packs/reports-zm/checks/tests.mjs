@@ -2537,6 +2537,404 @@ const suites20 = [
   setSuite17('dr-to-only', DR_20, { from: '', to: '2026-04-30' }, DR_COLUMNS_20, wantDrApril20),
 ];
 
+// ======================================================================
+// Group t21: Pathogen panel results (View__dbo_v_NMPDP.sql) and Public health surveillance results (View__dbo_v_PHSIMS.sql)
+// ======================================================================
+//
+// Fixture ids start with "t21-". "NM line N" is a line of View__dbo_v_NMPDP.sql, "PH line N" a line of View__dbo_v_PHSIMS.sql.
+// One fixture serves both queries: every request has a report and results, and each cell says which of the two views show it.
+// Neither view has a window in v1; both queries take optional from and to on the authorised date (the report's issued stamp).
+// The expected rows sit in buckets by that date: main (May 2026), before (up to 30 April 2026), after (June 2026 on), undated (no
+// usable date: out whenever a window is given) and order (January 2029, for the row-order suites).
+
+const NM_21 = 'Pathogen panel results (NMPDP)';
+const PH_21 = 'Public health surveillance results (PHSIMS)';
+
+// NM lines 14-62, the final select (lines 59-60) after the CTE's own columns. Copied by hand.
+const NM_COLUMNS_21 = ['Province', 'District', 'Facility', 'LabID', 'Age', 'Sex', 'AccessionedDate', 'AccessionYear', 'AccessionMonth',
+  'ResultsEntryDate', 'ResultsEntryYear', 'ResultsEntryMonth', 'ResultsAuthorizationDate', 'Year', 'Month', 'ClinicalInfo', 'SpecimenType',
+  'TestingStatus', 'Pathogen', 'Isolated', 'FirstPrinted', 'LabName', 'IsolateCount', 'PathogenTestRequests', 'PathogenTests'];
+// PH lines 14-32. Copied by hand.
+const PH_COLUMNS_21 = ['CDRTimeStamp', 'SourceLIMSTimeStamp', 'Province', 'District', 'DisaFacilityCode', 'MFL Code', 'Facility', 'LIMSPanelDesc',
+  'LOINCPanelCode', 'LabID', 'SampleType', 'CollectedDate', 'ReceivedDate', 'RegisteredDate', 'ProcessedDate', 'ResultDate', 'LabCode', 'LabName',
+  'Sex', 'AgeInYears', 'LIMSObservationCode', 'LIMSObservationDesc', 'LOINCCode', 'Result'];
+
+// The constant lists of the views. Copied by hand: NM line 55, NM line 52, NM line 57; PH lines 50-54, 55-56, 57.
+const NM_PANELS_21 = ['FTD33', 'REPCR'];
+const NM_OBS_EXCLUDED_21 = ['REM', 'TXT', 'CCOM'];
+const NM_LABS_EXCLUDED_21 = ['ZLX', 'ZCX'];
+const PH_PANELS_21 = ['REPCR', 'FTD33', 'GIPCR', 'CSFCU', 'LEP', 'GLUCF', 'MAL', 'BPARM', 'MEASL', 'POLIO', 'TBGNX', 'POCGT', 'RPR', 'VDRL', 'TBXDR',
+  'TRYP', 'HIVR', 'HSDUO', 'HEPA', 'HEPB', 'HEPC', 'HBCAB', 'CHOR', 'CULT', 'CULST', 'MPOX', 'OTPOX', 'INFLU', 'COVII', 'COVID', 'COVAB', 'COVAG',
+  'GC', 'NGGE', 'CHLAM', 'ROTA', 'RUB', 'DST1', 'DST2', 'DST3', 'TBSN1', 'TBSN2', 'TBDS1', 'TBDS2'];
+const PH_OBS_EXCLUDED_21 = ['GXBTD', 'TXT', 'STXT', 'LINE0', 'SCOM', 'GXMTD', 'REM', 'CCOM', 'CTXT', 'HTXT'];
+const PH_LABS_EXCLUDED_21 = ['XXX', 'ZZZ', 'ZLX', 'ZCX', '000'];
+
+const MONTHS_21 = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// ---- The fixture ----
+// One lab_requests row per add(): its patient, report, specimen and results.
+//   sex:    the patient's sex, or null for a request with no patient (ghost: true for a patient id that points at nothing)
+//   spec:   { code, text, received } or null for a report with no specimen
+//   report: false for a request with no report
+//   results: { obs, desc, text, coded, num, cmp }; obs defaults to 'PCR' (pass null for a result with no code)
+const DEF_21 = {
+  panel: 'FTD33', desc: 'Fast track PCR', authored: '2026-05-10T08:00:00Z', analysis: '2026-05-11T09:30:00Z', req: 'ZSOUT', years: 30,
+  clinical: 'Fever', sex: 'F', ghost: false, performer: 'LUS', display: 'Lusaka Lab', status: 'final', effective: '2026-05-09T07:00:00Z',
+  issued: '2026-05-12T10:00:00Z', report: true, spec: { code: 'BL', text: 'Blood', received: '2026-05-10T09:00:00Z' }, results: [],
+};
+
+function makeFixture21(p) {
+  const patients = [];
+  const requests = [];
+  const reports = [];
+  const specimens = [];
+  const results = [];
+  let seq = 0;
+  return {
+    add(labId, o = {}) {
+      const r = { ...DEF_21, ...o };
+      const n = ++seq;
+      const qid = `${p}-q${pad(n)}`;
+      let patientId = null;
+      if (r.ghost) patientId = `${p}-ghost`;
+      else if (r.sex !== null) {
+        patientId = `${p}-p${pad(n)}`;
+        patients.push(`(${lit(patientId)}, ${lit(r.sex)})`);
+      }
+      requests.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.desc)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${lit(r.req)}, ${lit(patientId)}, ${num(r.years)}, ${lit(r.clinical)})`);
+      if (r.report) {
+        let specId = null;
+        if (r.spec !== null) {
+          specId = `${p}-s${pad(n)}`;
+          specimens.push(`(${lit(specId)}, ${lit(r.spec.code)}, ${lit(r.spec.text)}, ${lit(r.spec.received)})`);
+        }
+        reports.push(`(${lit(`${p}-d${pad(n)}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.effective)}, ${lit(r.issued)}, ${lit(r.performer)}, ${lit(r.display)}, ${lit(specId)})`);
+      }
+      r.results.forEach((x, j) => {
+        results.push(`(${lit(`${p}-r${pad(n)}-${j + 1}`)}, ${lit(qid)}, ${lit('obs' in x ? x.obs : 'PCR')}, ${lit(x.desc ?? null)}, ${lit(x.text ?? null)}, ${lit(x.coded ?? null)}, ${num(x.num)}, ${lit(x.cmp ?? null)})`);
+      });
+    },
+    setup() {
+      return `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district, national_code) values
+  ('t21-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma', '1001'),
+  ('t21-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka', '2002'),
+  ('t21-fm3', '', '', 'ZUNMP', null, null, null, null, '9999'),
+  ('t21-fm4', '', '', 'ZNORG', 'reg-n', 'No Province Clinic', null, null, null),
+  ('t21-fm5', '', '', 'ZPERF', 'reg-p', 'Perf Lab Register', 'Southern', 'Choma', '4004');
+insert into patients (id, sex) values ${patients.join(',\n  ')};
+insert into specimens (id, type_code, type_text, received_time) values ${specimens.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, panel_desc, authored_at, analysis_at, requester_code, patient_id, age_years, clinical_info) values ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display, specimen_id) values ${reports.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, observation_desc, text_value, coded_value, numeric_value, numeric_comparator) values ${results.join(',\n  ')};`;
+    },
+  };
+}
+const f21 = makeFixture21('t21');
+
+// What a default request shows (NM lines 14-60, PH lines 14-32), worked out by hand: Cryptococcus, positive, at Choma General Hospital.
+const nmRow = (lab, pathogen, isolated, count, tests, o = {}) => ({
+  Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', LabID: lab, Age: 30, Sex: 'F',
+  AccessionedDate: '2026-05-10T08:00:00Z', AccessionYear: 2026, AccessionMonth: 'May',
+  ResultsEntryDate: '2026-05-11T09:30:00Z', ResultsEntryYear: 2026, ResultsEntryMonth: 'May',
+  ResultsAuthorizationDate: '2026-05-12T10:00:00Z', Year: 2026, Month: 'May',
+  ClinicalInfo: 'Fever', SpecimenType: 'Blood', TestingStatus: 'Final', Pathogen: pathogen, Isolated: isolated, FirstPrinted: null,
+  LabName: 'Lusaka Lab', IsolateCount: count, PathogenTestRequests: 1, PathogenTests: tests, ...o,
+});
+const nmYes = (lab, o = {}) => nmRow(lab, 'Cryptococcus', 'Yes', 1, 1, o);
+const nmNo = (lab, pathogen, o = {}) => nmRow(lab, pathogen, 'No', 0, 1, o);
+const phRow = (lab, code, desc, result, o = {}) => ({
+  CDRTimeStamp: null, SourceLIMSTimeStamp: null, Province: 'Southern', District: 'Choma', DisaFacilityCode: 'ZSOUT', 'MFL Code': '1001',
+  Facility: 'Choma General Hospital', LIMSPanelDesc: 'Fast track PCR', LOINCPanelCode: null, LabID: lab, SampleType: 'Blood',
+  CollectedDate: '2026-05-09T07:00:00Z', ReceivedDate: '2026-05-10T09:00:00Z', RegisteredDate: '2026-05-10T08:00:00Z',
+  ProcessedDate: '2026-05-11T09:30:00Z', ResultDate: '2026-05-12T10:00:00Z', LabCode: 'LUS', LabName: 'Lusaka Lab', Sex: 'F', AgeInYears: 30,
+  LIMSObservationCode: code, LIMSObservationDesc: desc, LOINCCode: null, Result: result, ...o,
+});
+const phYes = (lab, o = {}) => phRow(lab, 'PCR', 'Cryptococcus', 'Positive', o);
+const POS_21 = { obs: 'PCR', desc: 'Cryptococcus', text: 'Positive' };
+
+// Expected rows by bucket (see the header). put21 adds the rows of one request to both queries.
+const want21 = Object.fromEntries(['main', 'before', 'after', 'undated', 'order'].map((b) => [b, { nm: [], ph: [] }]));
+const put21 = (bucket, nmRows, phRows) => { want21[bucket].nm.push(...nmRows); want21[bucket].ph.push(...phRows); };
+// A default request with one positive result that both views show.
+const both21 = (lab, o = {}, nmOver = {}, phOver = {}, bucket = 'main') => {
+  f21.add(lab, { results: [POS_21], ...o });
+  put21(bucket, [nmYes(lab, nmOver)], [phYes(lab, phOver)]);
+};
+
+// ---- Cell A: the panel lists. NM line 55 holds two panels, PH lines 50-54 hold 44; every other panel is out. A text compare ignores
+// case and trailing spaces, not a leading space.
+PH_PANELS_21.forEach((p) => {
+  f21.add(`A-${p}`, { panel: p, results: [POS_21] });
+  put21('main', NM_PANELS_21.includes(p) ? [nmYes(`A-${p}`)] : [], [phYes(`A-${p}`)]);
+});
+both21('A-v1', { panel: 'repcr' });
+both21('A-v2', { panel: 'FTD33 ' });
+f21.add('A-v3', { panel: 'mal', results: [POS_21] }); put21('main', [], [phYes('A-v3')]);
+f21.add('A-v4', { panel: 'HEPA  ', results: [POS_21] }); put21('main', [], [phYes('A-v4')]);
+['HIVVL', 'DRUGR', 'MALX', 'TBGN', 'HEPD', 'CHO', 'FTD3', 'XFTD33', ' MAL', '', 'REPC', 'FTD333'].forEach((p, i) => f21.add(`A-x${i}`, { panel: p, results: [POS_21] }));
+f21.add('A-null', { panel: null, results: [POS_21] });
+
+// ---- Cell B: the result status (NM line 56, PH line 58): only final reports. CE keeps final, cancelled and unknown; a request with no
+// report has no status.
+both21('B-v1', { status: 'FINAL ' });
+['cancelled', 'preliminary', 'unknown', '', null].forEach((s, i) => f21.add(`B-x${i}`, { status: s, results: [POS_21] }));
+f21.add('B-noreport', { report: false, results: [POS_21] });
+
+// ---- Cell C: the testing lab lists (NM line 57 holds ZLX and ZCX, PH line 57 holds XXX, ZZZ, ZLX, ZCX, 000). A lab code that is NULL is
+// out of both (NOT IN is unknown for a NULL). The rows of one lab code ignore case and trailing spaces, so a variant shows the
+// same lab name as its base (the smallest spelling, 'XXX' before 'xxx ').
+PH_LABS_EXCLUDED_21.forEach((code) => {
+  f21.add(`C-${code}`, { performer: code, display: null, results: [POS_21] });
+  put21('main', NM_LABS_EXCLUDED_21.includes(code) ? [] : [nmYes(`C-${code}`, { LabName: code })], []);
+});
+[['xxx ', 'XXX', true], ['zzz', 'ZZZ', true], ['000 ', '000', true], ['zlx ', 'ZLX', false], ['ZcX', 'ZCX', false]].forEach(([code, name, inNm], i) => {
+  f21.add(`C-v${i}`, { performer: code, display: null, results: [POS_21] });
+  put21('main', inNm ? [nmYes(`C-v${i}`, { LabName: name })] : [], []);
+});
+['XXXX', 'ZZ', 'ZLXX', '0000', '00', 'ZCXX'].forEach((code, i) => {
+  f21.add(`C-near${i}`, { performer: code, display: null, results: [POS_21] });
+  put21('main', [nmYes(`C-near${i}`, { LabName: code })], [phYes(`C-near${i}`, { LabCode: code, LabName: code })]);
+});
+f21.add('C-null', { performer: null, display: 'Ignored name', results: [POS_21] });
+
+// ---- Cell D: the result filters. NM line 52 drops three observation codes, PH lines 55-56 ten; NM line 62 drops the pathogen 'Remarks'.
+// The observation filter sits in the join of a left join, but the test on the pathogen is unknown for a NULL (a request with no usable
+// result), so those requests are out of NM too: it is an inner join in effect. A NULL code is out of both (NOT IN is unknown).
+PH_OBS_EXCLUDED_21.forEach((code) => {
+  f21.add(`D-${code}`, { results: [{ obs: code, desc: 'Cryptococcus', text: 'Positive' }] });
+  put21('main', NM_OBS_EXCLUDED_21.includes(code) ? [] : [nmYes(`D-${code}`)], []);
+});
+[['REM', 'rem'], ['TXT', 'Txt '], ['CCOM', 'ccom  '], ['STXT', 'stxt'], ['HTXT', 'HTXT '], ['GXBTD', 'gxbtd '], ['LINE0', 'Line0']].forEach(([base, code]) => {
+  f21.add(`D-v-${base}`, { results: [{ obs: code, desc: 'Cryptococcus', text: 'Positive' }] });
+  put21('main', NM_OBS_EXCLUDED_21.includes(base) ? [] : [nmYes(`D-v-${base}`)], []);
+});
+['REMX', 'XTXT', 'CCOM1', ' TXT', 'LINE1', 'GXMTD1', 'LINE0X'].forEach((code, i) => {
+  f21.add(`D-near${i}`, { results: [{ obs: code, desc: 'Cryptococcus', text: 'Positive' }] });
+  put21('main', [nmYes(`D-near${i}`)], [phYes(`D-near${i}`, { LIMSObservationCode: code })]);
+});
+f21.add('D-nullcode', { results: [{ obs: null, desc: 'Cryptococcus', text: 'Positive' }] });
+// 'Remarks' is out of NM only; PH keeps it. A leading space counts; a NULL description is out of NM.
+[['Remarks', false], ['REMARKS ', false], [' Remarks', true], ['Remark', true], [null, false]].forEach(([desc, inNm], i) => {
+  f21.add(`D-rmk${i}`, { results: [{ obs: 'RMK', desc, text: 'Positive' }] });
+  put21('main', inNm ? [nmYes(`D-rmk${i}`, { Pathogen: desc })] : [], [phRow(`D-rmk${i}`, 'RMK', desc, 'Positive')]);
+});
+f21.add('D-noresult', { results: [] });
+f21.add('D-onlyrem', { results: [{ obs: 'REM', desc: 'Remarks', text: 'a note' }] });
+f21.add('D-onlyrmk', { results: [{ obs: 'RMK', desc: 'Remarks', text: 'a note' }] });
+put21('main', [], [phRow('D-onlyrmk', 'RMK', 'Remarks', 'a note')]);
+// One request, three results: one row each in PH; the Remarks one is out of NM.
+f21.add('D-multi', { results: [POS_21, { obs: 'RMK', desc: 'Remarks', text: 'a note' }, { obs: 'PCR2', desc: 'Pneumococcus', text: 'Negative' }] });
+put21('main', [nmYes('D-multi'), nmNo('D-multi', 'Pneumococcus')],
+  [phYes('D-multi'), phRow('D-multi', 'RMK', 'Remarks', 'a note'), phRow('D-multi', 'PCR2', 'Pneumococcus', 'Negative')]);
+// The same result twice is two rows (no dedupe).
+f21.add('D-dup', { results: [POS_21, POS_21] });
+put21('main', [nmYes('D-dup'), nmYes('D-dup')], [phYes('D-dup'), phYes('D-dup')]);
+
+// ---- Cell E: Isolated (NM lines 32-38) and the three counts (lines 59-60). The CASE compares like SQL Server: case and trailing spaces
+// do not count, a leading space does. A mapped text shows 'Yes' or 'No'; any other text shows as it is, and a raw 'yes' keeps its spelling
+// but still counts (IsolateCount 1, PathogenTests 1).
+[
+  ['Negative', 'No', 0, 1], ['Negative*', 'No', 0, 1], ['NEG', 'No', 0, 1], ['Positive*', 'Yes', 1, 1], ['Positive', 'Yes', 1, 1],
+  ['negative', 'No', 0, 1], ['NEG ', 'No', 0, 1], ['neg', 'No', 0, 1], ['POSITIVE*', 'Yes', 1, 1], ['positive ', 'Yes', 1, 1],
+  ['Yes', 'Yes', 1, 1], ['yes', 'yes', 1, 1], ['Yes ', 'Yes ', 1, 1], ['No', 'No', 0, 1], ['NO', 'NO', 0, 1], ['no ', 'no ', 0, 1],
+  ['Negative**', 'Negative**', null, 0], [' Negative', ' Negative', null, 0], ['Pos', 'Pos', null, 0], ['Detected', 'Detected', null, 0],
+  ['N', 'N', null, 0], ['Y', 'Y', null, 0], ['Indeterminate', 'Indeterminate', null, 0], ['', '', null, 0],
+].forEach(([text, isolated, count, tests], i) => {
+  f21.add(`E-${i}`, { results: [{ obs: 'PCR', desc: 'Cryptococcus', text }] });
+  put21('main', [nmRow(`E-${i}`, 'Cryptococcus', isolated, count, tests)], [phYes(`E-${i}`, { Result: text })]);
+});
+// Other kinds of result: LIMSRptResult is the text, else the number (with its comparator), else the code.
+f21.add('E-null', { results: [{ obs: 'PCR', desc: 'Cryptococcus' }] });
+put21('main', [nmRow('E-null', 'Cryptococcus', null, null, 0)], [phYes('E-null', { Result: null })]);
+f21.add('E-num5', { results: [{ obs: 'PCR', desc: 'Cryptococcus', num: 5, cmp: '<' }] });
+put21('main', [nmRow('E-num5', 'Cryptococcus', '< 5', null, 0)], [phYes('E-num5', { Result: '< 5' })]);
+f21.add('E-num125', { results: [{ obs: 'PCR', desc: 'Cryptococcus', num: 12.5 }] });
+put21('main', [nmRow('E-num125', 'Cryptococcus', '12.5', null, 0)], [phYes('E-num125', { Result: '12.5' })]);
+f21.add('E-codedpos', { results: [{ obs: 'PCR', desc: 'Cryptococcus', coded: 'Positive' }] });
+put21('main', [nmYes('E-codedpos')], [phYes('E-codedpos', { Result: 'Positive' })]);
+f21.add('E-codedpos2', { results: [{ obs: 'PCR', desc: 'Cryptococcus', coded: 'POS' }] });
+put21('main', [nmRow('E-codedpos2', 'Cryptococcus', 'POS', null, 0)], [phYes('E-codedpos2', { Result: 'POS' })]);
+f21.add('E-codedneg', { results: [{ obs: 'PCR', desc: 'Cryptococcus', coded: 'NEG' }] });
+put21('main', [nmNo('E-codedneg', 'Cryptococcus')], [phYes('E-codedneg', { Result: 'NEG' })]);
+f21.add('E-texthides', { results: [{ obs: 'PCR', desc: 'Cryptococcus', text: 'Negative', coded: 'POS' }] });
+put21('main', [nmNo('E-texthides', 'Cryptococcus')], [phYes('E-texthides', { Result: 'Negative' })]);
+
+// ---- Cell F: the date columns. Year and month come from the stamp's own text (the local date), month names are English, and a stamp that
+// is missing, partial or not a date gives empty year and month (the date column keeps the text).
+MONTHS_21.forEach((name, i) => {
+  const mm = String(i + 1).padStart(2, '0');
+  const stamps = { authored: `2025-${mm}-15T08:00:00Z`, analysis: `2025-${mm}-16T09:00:00Z`, issued: `2025-${mm}-17T10:00:00Z` };
+  const id = `F-m${mm}`;
+  f21.add(id, { ...stamps, results: [POS_21] });
+  put21('before', [nmYes(id, {
+    AccessionedDate: stamps.authored, AccessionYear: 2025, AccessionMonth: name, ResultsEntryDate: stamps.analysis, ResultsEntryYear: 2025,
+    ResultsEntryMonth: name, ResultsAuthorizationDate: stamps.issued, Year: 2025, Month: name,
+  })], [phYes(id, { RegisteredDate: stamps.authored, ProcessedDate: stamps.analysis, ResultDate: stamps.issued })]);
+});
+// Three different months: each year and month column reads its own date.
+both21('F-mix', { authored: '2026-03-05T08:00:00Z', analysis: '2026-04-06T09:00:00Z', issued: '2026-05-07T10:00:00Z' },
+  { AccessionedDate: '2026-03-05T08:00:00Z', AccessionMonth: 'March', ResultsEntryDate: '2026-04-06T09:00:00Z', ResultsEntryMonth: 'April', ResultsAuthorizationDate: '2026-05-07T10:00:00Z' },
+  { RegisteredDate: '2026-03-05T08:00:00Z', ProcessedDate: '2026-04-06T09:00:00Z', ResultDate: '2026-05-07T10:00:00Z' });
+// The local date, not the UTC date: 00:30 at +02:00 is the day before in UTC; 23:30 at -02:00 is the day after.
+both21('F-local', { authored: '2026-06-01T00:30:00+02:00', analysis: '2025-12-31T23:30:00-02:00', issued: '2026-05-01T00:30:00+02:00' },
+  { AccessionedDate: '2026-06-01T00:30:00+02:00', AccessionMonth: 'June', ResultsEntryDate: '2025-12-31T23:30:00-02:00', ResultsEntryYear: 2025, ResultsEntryMonth: 'December', ResultsAuthorizationDate: '2026-05-01T00:30:00+02:00' },
+  { RegisteredDate: '2026-06-01T00:30:00+02:00', ProcessedDate: '2025-12-31T23:30:00-02:00', ResultDate: '2026-05-01T00:30:00+02:00' });
+both21('F-jan', { authored: '2026-01-01T00:30:00+02:00', analysis: '2026-01-01T00:30:00+02:00', issued: '2026-01-01T00:30:00+02:00' },
+  { AccessionedDate: '2026-01-01T00:30:00+02:00', AccessionMonth: 'January', ResultsEntryDate: '2026-01-01T00:30:00+02:00', ResultsEntryMonth: 'January', ResultsAuthorizationDate: '2026-01-01T00:30:00+02:00', Month: 'January' },
+  { RegisteredDate: '2026-01-01T00:30:00+02:00', ProcessedDate: '2026-01-01T00:30:00+02:00', ResultDate: '2026-01-01T00:30:00+02:00' }, 'before');
+both21('F-odd', { authored: '2026-07', analysis: 'garbage' },
+  { AccessionedDate: '2026-07', AccessionYear: null, AccessionMonth: null, ResultsEntryDate: 'garbage', ResultsEntryYear: null, ResultsEntryMonth: null },
+  { RegisteredDate: '2026-07', ProcessedDate: 'garbage' });
+both21('F-null', { authored: null, analysis: null },
+  { AccessionedDate: null, AccessionYear: null, AccessionMonth: null, ResultsEntryDate: null, ResultsEntryYear: null, ResultsEntryMonth: null },
+  { RegisteredDate: null, ProcessedDate: null });
+both21('F-dateonly', { authored: '2026-05-20', analysis: '2026-05-21', issued: '2026-05-22' },
+  { AccessionedDate: '2026-05-20', ResultsEntryDate: '2026-05-21', ResultsAuthorizationDate: '2026-05-22' },
+  { RegisteredDate: '2026-05-20', ProcessedDate: '2026-05-21', ResultDate: '2026-05-22' });
+
+// ---- Cell W: the window is on the authorised date (the report's issued stamp), its local date; a blank side is open; a stamp that is
+// missing or not a full date is out whenever a side is given. The registered and analysis dates do not decide (W-13, W-14, W-15).
+[
+  ['W-1', '2026-05-01T00:30:00+02:00', 'main', 2026, 'May'], ['W-2', '2026-04-30T23:30:00-02:00', 'before', 2026, 'April'],
+  ['W-3', '2026-05-31T23:30:00+02:00', 'main', 2026, 'May'], ['W-4', '2026-06-01T00:30:00+02:00', 'after', 2026, 'June'],
+  ['W-5', null, 'undated', null, null], ['W-6', '2026-05', 'undated', null, null], ['W-7', '2026-05-31', 'main', 2026, 'May'],
+  ['W-8', '2026-06-01', 'after', 2026, 'June'], ['W-9', '2026-05-31T23:59:59.999Z', 'main', 2026, 'May'], ['W-10', 'garbage', 'undated', null, null],
+  ['W-11', '2026-04-30T23:59:59Z', 'before', 2026, 'April'], ['W-12', '2026-05-01', 'main', 2026, 'May'],
+].forEach(([id, issued, bucket, year, month]) => {
+  both21(id, { issued }, { ResultsAuthorizationDate: issued, Year: year, Month: month }, { ResultDate: issued }, bucket);
+});
+both21('W-13', { authored: '2026-03-01T08:00:00Z' }, { AccessionedDate: '2026-03-01T08:00:00Z', AccessionMonth: 'March' }, { RegisteredDate: '2026-03-01T08:00:00Z' });
+both21('W-14', { issued: '2026-07-01T10:00:00Z' }, { ResultsAuthorizationDate: '2026-07-01T10:00:00Z', Month: 'July' }, { ResultDate: '2026-07-01T10:00:00Z' }, 'after');
+both21('W-15', { analysis: '2026-02-01T09:00:00Z' }, { ResultsEntryDate: '2026-02-01T09:00:00Z', ResultsEntryMonth: 'February' }, { ProcessedDate: '2026-02-01T09:00:00Z' });
+
+// ---- Cell H: the requesting facility is a left join to the dictionary (NM lines 43-48, PH lines 38-43). CE's dictionary is the mapped
+// register row: a code that is not mapped, or not known, or no code, gives empty area, facility, DISA code and MFL code. PH line 49
+// links the DISA code to the MFL code (here the register row's national code).
+const noArea = { Province: null, District: null, Facility: null };
+both21('H-lusa', { req: 'ZLUSA' }, { Province: 'Lusaka', District: 'Lusaka', Facility: 'Chilenje Clinic' },
+  { Province: 'Lusaka', District: 'Lusaka', DisaFacilityCode: 'ZLUSA', 'MFL Code': '2002', Facility: 'Chilenje Clinic' });
+both21('H-unmapped', { req: 'ZUNMP' }, noArea, { ...noArea, DisaFacilityCode: null, 'MFL Code': null });
+both21('H-unknown', { req: 'ZNONE' }, noArea, { ...noArea, DisaFacilityCode: null, 'MFL Code': null });
+both21('H-none', { req: null }, noArea, { ...noArea, DisaFacilityCode: null, 'MFL Code': null });
+both21('H-noprov', { req: 'ZNORG' }, { Province: null, District: null, Facility: 'No Province Clinic' },
+  { Province: null, District: null, DisaFacilityCode: 'ZNORG', 'MFL Code': null, Facility: 'No Province Clinic' });
+both21('H-perf', { req: 'ZPERF' }, { Facility: 'Perf Lab Register' }, { DisaFacilityCode: 'ZPERF', 'MFL Code': '4004', Facility: 'Perf Lab Register' });
+
+// ---- Cell I: specimen, patient and request facts. They come through as stored.
+both21('I-nospec', { spec: null }, { SpecimenType: null }, { SampleType: null, ReceivedDate: null });
+both21('I-spec2', { spec: { code: 'BL', text: null, received: null } }, { SpecimenType: null }, { SampleType: null, ReceivedDate: null });
+both21('I-spec3', { spec: { code: 'PL', text: 'Plasma ', received: '2026-05-10T09:00:00+02:00' } }, { SpecimenType: 'Plasma ' },
+  { SampleType: 'Plasma ', ReceivedDate: '2026-05-10T09:00:00+02:00' });
+both21('I-nosex', { sex: null }, { Sex: null }, { Sex: null });
+both21('I-ghost', { sex: null, ghost: true }, { Sex: null }, { Sex: null });
+both21('I-sexlow', { sex: 'f' }, { Sex: 'f' }, { Sex: 'f' });
+both21('I-sexu', { sex: 'U' }, { Sex: 'U' }, { Sex: 'U' });
+both21('I-agenull', { years: null }, { Age: null }, { AgeInYears: null });
+both21('I-age0', { years: 0 }, { Age: 0 }, { AgeInYears: 0 });
+both21('I-clinnull', { clinical: null }, { ClinicalInfo: null }, {});
+both21('I-clinblank', { clinical: '' }, { ClinicalInfo: '' }, {});
+both21('I-effnull', { effective: null }, {}, { CollectedDate: null });
+both21('I-descnull', { desc: null }, {}, { LIMSPanelDesc: null });
+both21('I-desc', { desc: 'Real-time PCR' }, {}, { LIMSPanelDesc: 'Real-time PCR' });
+
+// ---- Cell J: the laboratory name. v1 reads a lab dictionary by code (NM lines 53-54, PH lines 36-37); CE has no dictionary, so the name
+// is the report's display, else the register name of the mapped code, else the code, and ONE name per code: the rows of a code (case and
+// trailing spaces ignored) all show the same name, a name that is not the bare code first, then the smallest. NM falls back to the
+// receiving lab when the testing code is blank; CE does not carry it, so a blank code gives no name. The names are taken from the rows
+// the query returns (a cancelled report does not name a lab).
+const lab21 = (id, performer, display, nmName, phName = nmName) => {
+  f21.add(id, { performer, display, results: [POS_21] });
+  put21('main', [nmYes(id, { LabName: nmName })], [phYes(id, { LabCode: performer, LabName: phName })]);
+};
+lab21('J-1', 'LAB1', 'Zeta Lab', 'Alpha Lab');
+lab21('J-2', 'lab1 ', 'Alpha Lab', 'Alpha Lab');
+lab21('J-3', 'Lab1', null, 'Alpha Lab');
+lab21('J-4', 'BARE', null, 'BARE');
+lab21('J-5', 'ZPERF', null, 'Perf Lab Register');
+lab21('J-6', 'XYZ', '   ', 'XYZ');
+lab21('J-7', 'AAA', null, 'Zeta Named');
+lab21('J-8', 'aaa ', 'Zeta Named', 'Zeta Named');
+lab21('J-9', '', 'Ignored name', null);
+lab21('J-10', '   ', 'Ignored name', null);
+lab21('J-nex1', 'LNEX', null, 'LNEX');
+f21.add('J-nex2', { performer: 'lnex', display: 'Better Name', status: 'cancelled', results: [POS_21] });
+
+// ---- Cell K: one row per result, not per lab number: two requests with one lab number are two rows each.
+both21('K-same'); both21('K-same');
+
+// ---- Row order. No ORDER BY in v1: both queries order by every column, text in SQL Server's word order, a missing value first.
+const ordDates = { authored: '2029-01-10T08:00:00Z', analysis: '2029-01-10T09:00:00Z', effective: '2029-01-09T07:00:00Z', issued: '2029-01-10T10:00:00Z', spec: { code: 'BL', text: 'Blood', received: '2029-01-10T08:30:00Z' } };
+const ordNm = (lab, o = {}) => nmYes(lab, {
+  AccessionedDate: '2029-01-10T08:00:00Z', AccessionYear: 2029, AccessionMonth: 'January', ResultsEntryDate: '2029-01-10T09:00:00Z', ResultsEntryYear: 2029,
+  ResultsEntryMonth: 'January', ResultsAuthorizationDate: '2029-01-10T10:00:00Z', Year: 2029, Month: 'January', ...o,
+});
+const ordPh = (lab, o = {}, code = 'PCR', desc = 'Cryptococcus') => phRow(lab, code, desc, 'Positive', {
+  CollectedDate: '2029-01-09T07:00:00Z', ReceivedDate: '2029-01-10T08:30:00Z', RegisteredDate: '2029-01-10T08:00:00Z', ProcessedDate: '2029-01-10T09:00:00Z',
+  ResultDate: '2029-01-10T10:00:00Z', ...o,
+});
+const ord21 = (lab, o = {}, results = [POS_21]) => f21.add(lab, { ...ordDates, results, ...o });
+['HOB', 'HOa', 'HO10', 'HO9', 'HOA'].forEach((lab) => ord21(lab));
+ord21('HOz', { req: null });
+ord21('HOL', { req: 'ZLUSA' });
+ord21('HOK', {}, [{ obs: 'ZZ', desc: 'Zeta', text: 'Positive' }, { obs: 'AA', desc: 'Alpha', text: 'Positive' }]);
+ord21('HOC', { years: 10 }); ord21('HOC', { years: null }); ord21('HOC', { years: 9 });
+ord21('HOD', { sex: 'B' }); ord21('HOD', { sex: 'a' });
+ord21('HOE'); ord21('HOE', { authored: '2029-01-09T08:00:00Z' });
+ord21('HOF'); ord21('HOF', { analysis: null });
+const noAreaPh = { Province: null, District: null, DisaFacilityCode: null, 'MFL Code': null, Facility: null };
+want21.order.nm.push(
+  ordNm('HOz', noArea),
+  ordNm('HOL', { Province: 'Lusaka', District: 'Lusaka', Facility: 'Chilenje Clinic' }),
+  ordNm('HO10'), ordNm('HO9'), ordNm('HOA'), ordNm('HOa'), ordNm('HOB'),
+  ordNm('HOC', { Age: null }), ordNm('HOC', { Age: 9 }), ordNm('HOC', { Age: 10 }),
+  ordNm('HOD', { Sex: 'a' }), ordNm('HOD', { Sex: 'B' }),
+  ordNm('HOE', { AccessionedDate: '2029-01-09T08:00:00Z' }), ordNm('HOE'),
+  ordNm('HOF', { ResultsEntryDate: null, ResultsEntryYear: null, ResultsEntryMonth: null }), ordNm('HOF'),
+  ordNm('HOK', { Pathogen: 'Alpha' }), ordNm('HOK', { Pathogen: 'Zeta' }),
+);
+want21.order.ph.push(
+  ordPh('HOz', noAreaPh),
+  ordPh('HOL', { Province: 'Lusaka', District: 'Lusaka', DisaFacilityCode: 'ZLUSA', 'MFL Code': '2002', Facility: 'Chilenje Clinic' }),
+  ordPh('HO10'), ordPh('HO9'), ordPh('HOA'), ordPh('HOa'), ordPh('HOB'),
+  ordPh('HOC', { AgeInYears: null }), ordPh('HOC', { AgeInYears: 9 }), ordPh('HOC', { AgeInYears: 10 }),
+  ordPh('HOD', { Sex: 'a' }), ordPh('HOD', { Sex: 'B' }),
+  ordPh('HOE', { RegisteredDate: '2029-01-09T08:00:00Z' }), ordPh('HOE'),
+  ordPh('HOF', { ProcessedDate: null }), ordPh('HOF'),
+  ordPh('HOK', {}, 'AA', 'Alpha'), ordPh('HOK', {}, 'ZZ', 'Zeta'),
+);
+
+// ---- Suites ----
+const FROM_21 = '2026-05-01';
+const TO_21 = '2026-05-31';
+const ONE_DAY_21 = ['W-3', 'W-7', 'W-9'];
+const runs21 = (name, queryName, columns, key, firstSetup) => {
+  const w = (bucket) => want21[bucket][key];
+  const all = ['main', 'before', 'after', 'undated', 'order'].flatMap(w);
+  const needles = columns.map((_, i) => `res.c${String(i + 1).padStart(2, '0')}`);
+  return [
+    setSuite17(`${name}-main`, queryName, { from: FROM_21, to: TO_21 }, columns, w('main'), firstSetup),
+    setSuite17(`${name}-all`, queryName, { from: '', to: '' }, columns, all),
+    setSuite17(`${name}-from-only`, queryName, { from: '2026-06-01', to: '' }, columns, [...w('after'), ...w('order')]),
+    setSuite17(`${name}-to-only`, queryName, { from: '', to: '2026-04-30' }, columns, w('before')),
+    setSuite17(`${name}-one-day`, queryName, { from: '2026-05-31', to: '2026-05-31' }, columns, w('main').filter((r) => ONE_DAY_21.includes(r.LabID))),
+    setSuite17(`${name}-empty`, queryName, { from: '2030-01-01', to: '2030-12-31' }, columns, []),
+    orderedSuite17(`${name}-order`, queryName, { from: '2029-01-01', to: '2029-01-31' }, columns, w('order')),
+    shapeSuite20(`${name}-shape`, queryName, ['from', 'to'], needles, false),
+  ];
+};
+const jsSuite21 = (name, tests) => ({ name, count: tests.length, check: () => tests.filter(([, bad]) => bad).map(([label, bad]) => `${label}: ${bad}`) });
+
+const suites21 = [
+  // The fixture rows go in the first suite only.
+  ...runs21('nm', NM_21, NM_COLUMNS_21, 'nm', f21.setup()),
+  ...runs21('ph', PH_21, PH_COLUMNS_21, 'ph', ''),
+  jsSuite21('lists', [
+    ['PH panel list has 44 different codes', PH_PANELS_21.length === 44 && new Set(PH_PANELS_21).size === 44 ? null : `${PH_PANELS_21.length} codes`],
+    ['NM has 25 columns', NM_COLUMNS_21.length === 25 ? null : `${NM_COLUMNS_21.length}`],
+    ['PH has 24 columns', PH_COLUMNS_21.length === 24 ? null : `${PH_COLUMNS_21.length}`],
+  ]),
+];
+
 export const groups = [
   { name: 't5-recency', suites: recencySuites },
   { name: 't5-surveillance', suites: survSuites },
@@ -2544,4 +2942,5 @@ export const groups = [
   { name: 't18', suites: suites18 },
   { name: 't19', suites: suites19 },
   { name: 't20', suites: suites20 },
+  { name: 't21', suites: suites21 },
 ];

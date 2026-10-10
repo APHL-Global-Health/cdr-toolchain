@@ -983,6 +983,233 @@ order by ${orderBy}`;
 
 export const hivdrParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
 
+// ---- Pathogen panel results and Public health surveillance results (Task 21) ---------------------------------------------------------
+//
+// Two result-level feeds, replacing the views v_NMPDP and v_PHSIMS. Both read the final reports of a closed list of panels, one row per
+// result, and both are plain row lists (no grouping).
+//
+// Window (spec ruling 3 extended to a view). Neither view has a window (View headers: "None, no date window"), so `from` and `to` are both
+// optional: both blank gives v1's view, every request, and a given side windows on the AUTHORISED date, the report's issued stamp
+// (diagnostic_reports.issued), compared on the local date of the stamp's own text. Why that date: it is the date the views themselves
+// call the result date (PHSIMS ResultDate, line 28) and the one NMPDP's plain Year and Month columns read (lines 25-27), so a period
+// here means "results authorised in the period", the way these feeds are read. HIV drug resistance windows on the registered date
+// instead, because that view has no authorised-date column of its own. A blank side is open; a report with no issued date, or one that
+// is not a full date, is out whenever a side is given.
+//
+// Row order. v1 has no ORDER BY, and CE pages a result with LIMIT and OFFSET, so each query orders by every output column: text in SQL
+// Server's word order (ssTextKey, then the plain text), a stamp in byte order, a number as a number, a missing value first.
+//
+// Lab names (spec ruling 8, the Task 16 rule). v1 reads LabName from its Laboratories dictionary by lab code. CE has no dictionary, so the
+// name is the report's (labNameSql): the display, else the register name of the mapped code, else the code. The rows never split on the
+// name: ONE name per testing code (case and trailing spaces ignored), the same on every row of the code, chosen from the names of the
+// code's rows that the query returns (a name that is not just the code first, then the smallest in byte order). Rows left out by a
+// filter or the window do not name a lab. A blank testing code has no lab name, as v1's join finds no lab for '' (a report with the
+// display filled does not change that).
+//
+// Shared kept quirks (spec ruling 1):
+//   - Text compares ignore case and trailing spaces, not a leading space (panel, status, observation and lab codes, 'Remarks').
+//   - NOT IN with a NULL is unknown: a report with no testing lab code is out of both feeds, and so is a result with no observation code.
+//   - The status filter is final only (HL7 F): cancelled, unknown and preliminary reports are out, and so is a request with no report.
+//   - A request whose facility the register does not map is kept, with empty facility columns (a left join).
+//   - One row per result row: two results of one request are two rows, an identical result twice is two identical rows.
+//
+// Shared CE facts (CE mapping in global-constraints.md): dates are CE's ISO text with the offset DISA wrote; the facility is the mapped
+// register row (province = region, district, facility = name); sex comes from the patient; the specimen is the report's specimen;
+// the result text is rpt() (LIMSRptResult: the text, else the number with its comparator, else the coded value).
+
+// Both feeds window on the authorised date; a side left blank is open.
+const optionalWindowSql = (stamp) => `(({{param.from}} = '' and {{param.to}} = '')
+      or (${stamp} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+        and ({{param.from}} = '' or left(${stamp}, 10) >= {{param.from}})
+        and ({{param.to}} = '' or left(${stamp}, 10) <= {{param.to}})))`;
+
+// A testing code that is blank (empty or spaces) is no code: no lab, no name.
+const testingCodeSql = (dr) => `case when rtrim(${dr}.performer) = '' then null else ${dr}.performer end`;
+
+// One name per testing code from the rows of `src` (columns code and report_name).
+const labNamesCte = () => `names as (
+  select ${foldSql('p.code')} as code_key,
+    (array_agg(p.report_name order by ${foldSql('p.report_name')} = ${foldSql('p.code')}, p.report_name collate "C"))[1] as lab_name
+  from src p
+  where p.code is not null
+  group by ${foldSql('p.code')}
+)`;
+
+// The final select and ORDER BY over `res`, whose columns are c01, c02, ... in output order. `kinds`: 'text', 'stamp' or 'number'.
+function finalSelect21(labels, kinds) {
+  const names = labels.map((_, i) => `c${num2(i)}`);
+  const select = names.map((n, i) => `res.${n} as "${labels[i]}"`).join(',\n  ');
+  const order = names.map((n, i) => {
+    if (kinds[i] === 'number') return `res.${n} nulls first`;
+    if (kinds[i] === 'stamp') return `res.${n} collate "C" nulls first`;
+    return `${ssTextKey(`res.${n}`)} collate "C" nulls first, res.${n} collate "C" nulls first`;
+  }).join(',\n  ');
+  return `select ${select}\nfrom res\norder by ${order}`;
+}
+
+// ---- Pathogen panel results (NMPDP) ----
+//
+// Replaces View v_NMPDP. One row per result of a final report on the panels FTD33 and REPCR, with the pathogen, whether it was isolated, and
+// the registered, entered and authorised dates with their year and month.
+//
+// Columns, v1's 25 (View lines 15-41, 59-60): Province, District, Facility, LabID, Age, Sex, AccessionedDate, AccessionYear, AccessionMonth,
+// ResultsEntryDate, ResultsEntryYear, ResultsEntryMonth, ResultsAuthorizationDate, Year, Month, ClinicalInfo, SpecimenType, TestingStatus,
+// Pathogen, Isolated, FirstPrinted, LabName, IsolateCount, PathogenTestRequests, PathogenTests.
+//
+// What v1 does:
+//   Year/Month    Year() and Datename(Month) of the registered (lines 20-21), analysis (23-24) and authorised (26-27) stamps. CE: the local
+//                 year and the English month name of the stamp's own text; empty when the stamp is missing, partial or not a date.
+//   Isolated      LIMSRptResult read as 'Negative', 'Negative*', 'NEG' -> 'No' and 'Positive*', 'Positive' -> 'Yes'; any other text, or none,
+//                 stays as it is (lines 32-38).
+//   IsolateCount  1 for 'Yes', 0 for 'No', else NULL; PathogenTests is 1 for 'Yes' or 'No', else 0 (lines 59-60). Both read the Isolated text
+//                 the way SQL Server compares it, so a result 'yes' shows 'yes' and still counts.
+//
+// Kept v1 quirks (spec ruling 1), besides the shared ones above:
+//   - The left join to the results (line 51) is an inner join in effect. The last line (62) tests Pathogen != 'Remarks', which is unknown for
+//     a NULL, so a request with no result, a request whose results are all REM, TXT or CCOM (line 52), and a result with no description
+//     are all out. (The inventory note says the left join keeps requests with no results; line 62 drops them.) A pathogen 'Remarks' is out
+//     too, case and trailing spaces ignored; ' Remarks' with a leading space is in.
+//   - PathogenTestRequests is the constant 1 on every row, so it counts results, not requests.
+//   - IsolateCount is 1, 0 or NULL. A result such as 'Pos' or 'Y' is not mapped: Isolated shows it, IsolateCount is NULL, PathogenTests is 0.
+//   - An unmapped result keeps its own spelling in Isolated, including case and trailing spaces ('no ' shows 'no ').
+//   - The testing-lab filter (line 57) drops ZLX and ZCX and, through NOT IN, a report with no lab code. A blank lab code stays.
+//
+// CE gaps and choices (spec rulings 7 and 8):
+//   - FirstPrinted (LabResults.FirstPrinted) is not in CE: the column is NULL.
+//   - LabName falls back to the receiving lab when the testing code is blank (line 54). CE does not carry ReceivingFacilityCode, so a blank
+//     code gives no name.
+//   - TestingStatus is the text v1 reads from its status dictionary (line 30). The filter keeps final reports only, so it is the text of F;
+//     CE holds only the status code, so the column shows 'Final'. v1's own wording for F is not in CE: HONEST NON-PROOF.
+//   - Age is lab_requests.age_years, Sex the patient's sex, ClinicalInfo lab_requests.clinical_info, SpecimenType the specimen's type text.
+export function pathogenPanelSql() {
+  const labels = ['Province', 'District', 'Facility', 'LabID', 'Age', 'Sex', 'AccessionedDate', 'AccessionYear', 'AccessionMonth',
+    'ResultsEntryDate', 'ResultsEntryYear', 'ResultsEntryMonth', 'ResultsAuthorizationDate', 'Year', 'Month', 'ClinicalInfo', 'SpecimenType',
+    'TestingStatus', 'Pathogen', 'Isolated', 'FirstPrinted', 'LabName', 'IsolateCount', 'PathogenTestRequests', 'PathogenTests'];
+  const kinds = ['text', 'text', 'text', 'text', 'number', 'text', 'stamp', 'number', 'text', 'stamp', 'number', 'text', 'stamp', 'number', 'text',
+    'text', 'text', 'text', 'text', 'text', 'text', 'text', 'number', 'number', 'number'];
+  const yearOf = (x) => `extract(year from ${localDate(x)})::int`;
+  const monthOf = (x) => `to_char(${localDate(x)}, 'FMMonth')`;
+  return `with src as (
+  select fmr.region as province, fmr.district as district, fmr.name as facility, lr.request_id as lab_id, lr.age_years as age, p.sex as sex,
+    lr.authored_at as authored, lr.analysis_at as analysis, dr.issued as issued, lr.clinical_info as clinical, s.type_text as specimen,
+    l.observation_desc as pathogen,
+    case when ${inListSql(rpt('l'), ['Negative', 'Negative*', 'NEG'])} then 'No'
+      when ${inListSql(rpt('l'), ['Positive*', 'Positive'])} then 'Yes'
+      else ${rpt('l')} end as isolated,
+    ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  left join patients p on p.id = lr.patient_id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', NMPDP_PANELS)}
+    and ${foldSql('dr.status')} = 'final'
+    and not (${inListSql('dr.performer', NMPDP_LABS_OUT)})
+    and not (${inListSql('l.observation_code', NMPDP_OBSERVATIONS_OUT)})
+    and ${foldSql('l.observation_desc')} <> 'remarks'
+    and ${optionalWindowSql('dr.issued')}
+),
+${labNamesCte()},
+res as (
+  select s.province as c01, s.district as c02, s.facility as c03, s.lab_id as c04, s.age as c05, s.sex as c06,
+    s.authored as c07, ${yearOf('s.authored')} as c08, ${monthOf('s.authored')} as c09,
+    s.analysis as c10, ${yearOf('s.analysis')} as c11, ${monthOf('s.analysis')} as c12,
+    s.issued as c13, ${yearOf('s.issued')} as c14, ${monthOf('s.issued')} as c15,
+    s.clinical as c16, s.specimen as c17, 'Final' as c18, s.pathogen as c19, s.isolated as c20, null::text as c21, n.lab_name as c22,
+    case when ${foldSql('s.isolated')} = 'yes' then 1 when ${foldSql('s.isolated')} = 'no' then 0 end as c23,
+    1 as c24,
+    case when ${inListSql('s.isolated', ['Yes', 'No'])} then 1 else 0 end as c25
+  from src s
+  left join names n on n.code_key = ${foldSql('s.code')}
+)
+${finalSelect21(labels, kinds)}`;
+}
+
+// v1's constant lists, copied from the view text. They are the views' own content (a closed list of surveillance panels), not clinical
+// vocabulary invented here: NMPDP lines 55, 52, 57; PHSIMS lines 50-54, 55-56, 57.
+const NMPDP_PANELS = ['FTD33', 'REPCR'];
+const NMPDP_OBSERVATIONS_OUT = ['REM', 'TXT', 'CCOM'];
+const NMPDP_LABS_OUT = ['ZLX', 'ZCX'];
+const PHSIMS_PANELS = ['REPCR', 'FTD33', 'GIPCR', 'CSFCU', 'LEP', 'GLUCF', 'MAL', 'BPARM', 'MEASL', 'POLIO', 'TBGNX', 'POCGT', 'RPR', 'VDRL',
+  'TBXDR', 'TRYP', 'HIVR', 'HSDUO', 'HEPA', 'HEPB', 'HEPC', 'HBCAB', 'CHOR', 'CULT', 'CULST', 'MPOX', 'OTPOX', 'INFLU', 'COVII', 'COVID', 'COVAB',
+  'COVAG', 'GC', 'NGGE', 'CHLAM', 'ROTA', 'RUB', 'DST1', 'DST2', 'DST3', 'TBSN1', 'TBSN2', 'TBDS1', 'TBDS2'];
+const PHSIMS_OBSERVATIONS_OUT = ['GXBTD', 'TXT', 'STXT', 'LINE0', 'SCOM', 'GXMTD', 'REM', 'CCOM', 'CTXT', 'HTXT'];
+const PHSIMS_LABS_OUT = ['XXX', 'ZZZ', 'ZLX', 'ZCX', '000'];
+
+// ---- Public health surveillance results (PHSIMS) ----
+//
+// Replaces View v_PHSIMS. The result-level feed of 44 surveillance and public health panels for the national public health system: one
+// row per result of a final report, with the facility and its MFL code, the laboratory, the dates, the observation and the result.
+//
+// Columns, v1's 24 (View lines 14-32): CDRTimeStamp, SourceLIMSTimeStamp, Province, District, DisaFacilityCode, MFL Code, Facility,
+// LIMSPanelDesc, LOINCPanelCode, LabID, SampleType, CollectedDate, ReceivedDate, RegisteredDate, ProcessedDate, ResultDate, LabCode, LabName,
+// Sex, AgeInYears, LIMSObservationCode, LIMSObservationDesc, LOINCCode, Result.
+//   CollectedDate = the report's effective stamp, ReceivedDate the specimen's received time, RegisteredDate lab_requests.authored_at,
+//   ProcessedDate lab_requests.analysis_at, ResultDate the report's issued stamp; LabCode the report's testing lab code as stored.
+//
+// Kept v1 quirks (spec ruling 1), besides the shared ones above:
+//   - The join to the results is an inner join (line 34): a request with no result is not in the feed. Unlike NMPDP, a result with no
+//     description or the description 'Remarks' stays (PHSIMS has no such test); only the ten observation codes of lines 55-56 are dropped.
+//   - The panel list (lines 50-54) holds 44 codes; a panel code is compared as SQL Server does (case and trailing spaces ignored).
+//   - The testing-lab filter (line 57) drops XXX, ZZZ, ZLX, ZCX and 000 and, through NOT IN, a report with no lab code. A blank code stays,
+//     with LabCode as stored and no LabName.
+//   - A result with no value is a row with an empty Result.
+//
+// CE gaps and choices (spec rulings 7 and 8):
+//   - CDRTimeStamp (Requests.LIMSDateTimeStamp) and SourceLIMSTimeStamp (LabResults.DateTimeStamp) are v1 load stamps. CE holds no such stamp,
+//     so both columns are NULL. Considered and refused: ingest_events.recorded_at, CE's arrival record. It is a different fact: it holds
+//     one row for every version of a FHIR resource, only for clinical resource types, and moves when a resource is corrected or the
+//     warehouse is rebuilt, so one request or result has several of them and none says what v1's stamp says (when the source LIMS
+//     wrote the row, and when the CDR loaded it). Filling the column with it would put a value of another meaning under v1's name.
+//   - LOINCPanelCode and LOINCCode are stored per row in v1 (Requests.LOINCPanelCode, LabResults.LOINCCode). CE does not store a LOINC
+//     code per row: lab_requests.panel_code and lab_results.observation_code hold the sending system's own codes (the code system next to
+//     each says which), and terminology_codes holds value sets, not a map from a local code to LOINC. So both columns are NULL. They fill
+//     in when a source sends LOINC and a mapping exists; this pack does not invent codes.
+//   - MFL Code (lines 44-49) is v1's own MFL table, which links four DISA codes to each MFL code (union of DisaLCode1 to DisaLCode4). CE has
+//     the link in the register mapping instead: the mapped register row's national code (ZMFAC's MFL Code). DisaFacilityCode is the
+//     mapped row's DISA code. Both are empty for a facility the register does not map. v1 shows a request once per MFL row that lists
+//     its DISA code, so a DISA code on two MFL rows doubles the request there; the mapping is one row per code, so it is one row here.
+//   - LabName has no fallback here (line 37 joins on TestingFacilityCode only); see the lab names note above.
+export function surveillanceResultsSql() {
+  const labels = ['CDRTimeStamp', 'SourceLIMSTimeStamp', 'Province', 'District', 'DisaFacilityCode', 'MFL Code', 'Facility', 'LIMSPanelDesc',
+    'LOINCPanelCode', 'LabID', 'SampleType', 'CollectedDate', 'ReceivedDate', 'RegisteredDate', 'ProcessedDate', 'ResultDate', 'LabCode', 'LabName',
+    'Sex', 'AgeInYears', 'LIMSObservationCode', 'LIMSObservationDesc', 'LOINCCode', 'Result'];
+  const kinds = ['text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'text', 'stamp', 'stamp', 'stamp', 'stamp', 'stamp',
+    'text', 'text', 'text', 'number', 'text', 'text', 'text', 'text'];
+  return `with src as (
+  select fmr.region as province, fmr.district as district, fmr.source_code as disa_code, fmr.national_code as mfl_code, fmr.name as facility,
+    lr.panel_desc as panel_desc, lr.request_id as lab_id, s.type_text as sample_type, dr.effective as collected, s.received_time as received,
+    lr.authored_at as registered, lr.analysis_at as processed, dr.issued as issued, dr.performer as lab_code, p.sex as sex, lr.age_years as age,
+    l.observation_code as obs_code, l.observation_desc as obs_desc, ${rpt('l')} as result,
+    ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  left join patients p on p.id = lr.patient_id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', PHSIMS_PANELS)}
+    and ${foldSql('dr.status')} = 'final'
+    and not (${inListSql('dr.performer', PHSIMS_LABS_OUT)})
+    and not (${inListSql('l.observation_code', PHSIMS_OBSERVATIONS_OUT)})
+    and ${optionalWindowSql('dr.issued')}
+),
+${labNamesCte()},
+res as (
+  select null::text as c01, null::text as c02, s.province as c03, s.district as c04, s.disa_code as c05, s.mfl_code as c06, s.facility as c07,
+    s.panel_desc as c08, null::text as c09, s.lab_id as c10, s.sample_type as c11, s.collected as c12, s.received as c13, s.registered as c14,
+    s.processed as c15, s.issued as c16, s.lab_code as c17, n.lab_name as c18, s.sex as c19, s.age as c20, s.obs_code as c21, s.obs_desc as c22,
+    null::text as c23, s.result as c24
+  from src s
+  left join names n on n.code_key = ${foldSql('s.code')}
+)
+${finalSelect21(labels, kinds)}`;
+}
+
+// Both feeds take the optional window pair, as HIV drug resistance does.
+export const surveillanceParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
+
 export function queries() {
   return [
     { name: 'Recency tests', sql: recencyTestsSql(), params: windowParams() },
@@ -993,5 +1220,7 @@ export function queries() {
     { name: 'HPV results by month', sql: hpvSql(), params: windowParams() },
     { name: 'Culture and susceptibility results', sql: astSql(), params: astParams() },
     { name: 'HIV drug resistance', sql: hivdrSql(), params: hivdrParams() },
+    { name: 'Pathogen panel results (NMPDP)', sql: pathogenPanelSql(), params: surveillanceParams() },
+    { name: 'Public health surveillance results (PHSIMS)', sql: surveillanceResultsSql(), params: surveillanceParams() },
   ];
 }
