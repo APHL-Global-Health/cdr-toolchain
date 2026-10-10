@@ -2113,4 +2113,549 @@ insert into facility_map (id, source_system, performer_system, source_code, regi
   return { name: 't27', suites: suites27 };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27()];
+// ==========================================================================================================================
+// Group t28: Rejections by facility and reason, VL rejections by facility (total), VL rejections by lab (v1 views
+// vAllSampleRejectionsByFacility <= vEIDSampleRejectionsByFacility, vVLSampleRejectionsByFacility; vVLTotalRejectionsByFacility;
+// vVLSpecimenRejections). Fixture ids start with "t28a-" (by reason), "t28t-" (total) and "t28l-" (by lab); request numbers with
+// "T28A-", "T28T-" and "T28L-". The three queries read the same tables, so every suite first deletes the rows of the other two (isolate)
+// and runs inside a savepoint.
+// "A line N", "E line N", "V line N", "T line N" and "L line N" mean a line of View__dbo_vAllSampleRejectionsByFacility.sql,
+// View__dbo_vEIDSampleRejectionsByFacility.sql, View__dbo_vVLSampleRejectionsByFacility.sql, View__dbo_vVLTotalRejectionsByFacility.sql and
+// View__dbo_vVLSpecimenRejections.sql.
+
+const REJ_Q = 'Rejections by facility and reason';
+const TOT_Q = 'VL rejections by facility (total)';
+const LAB_Q = 'VL rejections by lab';
+const t28query = (name) => queries().find((q) => q.name === name);
+
+// A lines 13-264: the 28 reason columns in order: [LIMSRejectionCode, column name]. Two names are cut at 30 characters in v1 and stay cut.
+const T28_REASONS = [
+  ['WRONG', 'Blood received in wrong tube'],
+  ['CLOT', 'Specimen clotted'],
+  ['LEAK', 'Leaked sample'],
+  ['HAEM', 'Specimen haemolysed'],
+  ['AOOO', 'ANALYSER OUT OF ORDER'],
+  ['NOQC', 'Quality Control Failed'],
+  ['TEST', 'No test requested'],
+  ['SPUN', 'Specimen unlabelled'],
+  ['007', 'Specimen more than 7 days old'],
+  ['UNS', 'Unsuitable for testing'],
+  ['INS', 'Insufficient blood received'],
+  ['FORM', 'Request form incomplete.'],
+  ['LOCOU', 'Low Count Error'],
+  ['LAC', 'Limited analyser capacity.'],
+  ['INVOL', 'Volume of Blood Exceeds Limit'],
+  ['ACC', 'Laboratory Accident'],
+  ['NAMES', 'Mismatched names on Form n Spe'],
+  ['SNR', 'SPECIMEN NOT RECEIVED IN LAB'],
+  ['EMPT', 'Empty Specimen containers rece'],
+  ['NOESR', 'ESR Tubes are Out of Stock'],
+  ['NRQF', 'No request form received'],
+  ['WRGCO', 'Wrong Sputum Container Used'],
+  ['SAMFN', 'Sample fibrin - Clot detected'],
+  ['OLD', 'Specimen too old for testing'],
+  ['INSF', 'Sample insufficient to culture'],
+  ['SWC', 'Sample Withdrawn by Client'],
+  ['DAY3', 'Specimen 3 days old on receipt'],
+  ['OS', 'Not done. Reagent out of stock'],
+];
+// A lines 7-12: the nine columns before the reasons.
+const REJ_LEAD = ['ProvinceName', 'DistrictName', 'FacilityName', 'RequestingFacilityCode', 'Year', 'Quarter', 'Month', 'Week', 'TotalSampleRejections'];
+const REJ_COLUMNS = [...REJ_LEAD, ...T28_REASONS.map(([, name]) => name)];
+
+function group28() {
+  const maps = [];
+  const requests = [];
+  const reports = [];
+  let n = 0;
+  const foldKey = (x) => (x === null ? null : x.replace(/ +$/, '').toLowerCase());
+  const nonEmpty = (code) => code !== null && code.replace(/ +$/, '') !== '';
+
+  // A mapped register row. `regId` null: the code is not in the register (the map row has no register row).
+  function fmap(prefix, id, code, regId, name, region, district) {
+    maps.push(`(${lit(`${prefix}fm${id}`)}, '', '', ${lit(code)}, ${lit(regId ? `reg-${prefix}${id}` : null)}, ${lit(name)}, ${lit(region)}, ${lit(district)})`);
+  }
+  // One request row with its reports. `eff`: a list with one entry per report (its collection stamp, null for none); absent: no report.
+  // `reps`: reports as { perf, display, eff } (the lab queries).
+  function add(prefix, o) {
+    n += 1;
+    const qid = `${prefix}q${n}`;
+    requests.push(`(${lit(qid)}, ${lit(o.rid)}, ${lit(o.panel)}, ${lit(o.auth)}, ${lit(o.req)}, ${lit(o.rej)})`);
+    const reps = o.reps ?? (o.eff ?? []).map((eff) => ({ eff }));
+    reps.forEach((r, i) => reports.push(`(${lit(`${prefix}d${n}-${i + 1}`)}, ${lit(qid)}, ${lit(r.eff ?? null)}, ${lit(r.perf ?? null)}, ${lit(r.display ?? null)})`));
+    return qid;
+  }
+
+  // =========================================================================================================================
+  // Rejections by facility and reason (prefix t28a-)
+  // =========================================================================================================================
+  const A = 't28a-';
+  // Facility triples [province, district, facility] by EXACT requester code (the register mapping). ZUNMP has a map row with no register
+  // row, ZNONE has no map row at all: v1's left join gives both NULL names (A line 268).
+  const FAC = {
+    ZSOUT: ['Southern', 'Choma', 'Choma General Hospital'],
+    ZLUSA: ['Lusaka', 'Lusaka', 'Chilenje Clinic'],
+    ZKAFU: ['Lusaka', 'Kafue', 'Kafue District Hospital'],
+    ZEDGE: ['Southern', 'Choma', 'Edge Clinic'],
+    ZWIN: ['Western', 'Mongu', 'Window Clinic'],
+  };
+  Object.entries(FAC).forEach(([code, [region, district, name]], i) => fmap(A, i + 1, code, true, name, region, district));
+  fmap(A, 9, 'ZUNMP', false, null, null, null);
+
+  // A bucket: the local date and its year, quarter, month (from the date) and v1 Datepart(wk) (worked out by hand: week 1 holds 1 January
+  // and each Sunday starts the next week). `null`: no date.
+  const B = (date, week) => ({ d: date.slice(0, 10), y: Number(date.slice(0, 4)), q: Math.ceil(Number(date.slice(5, 7)) / 3), m: Number(date.slice(5, 7)), w: week });
+  const specs = [];
+  // One rejected (or not) request. `all`: the bucket of the all and EID views (RegisteredDateTime); `vl`: the bucket of the VL view
+  // (coalesce(SpecimenDateTime, RegisteredDateTime)), the same as `all` unless given.
+  function req(o) {
+    const s = { panel: 'HIVVL', req: 'ZSOUT', rej: 'CLOT', auth: null, ...o };
+    s.rid = o.rid === undefined ? `T28A-${specs.length + 1}` : o.rid;
+    if (!('vl' in o)) s.vl = s.all;
+    add(A, s);
+    specs.push(s);
+    return s;
+  }
+  const MAY4 = '2026-05-04T08:00:00+02:00';
+  const W19 = (extra = {}) => ({ auth: MAY4, all: B(MAY4, 19), ...extra });
+
+  // -- S1: ZSOUT, 4 May 2026 (Monday; week 19 starts Sunday 3 May). Panels and code spellings (A 269, E 269, V 271 and the sub-selects) --
+  req({ ...W19(), rej: 'WRONG' });                                  // a1  HIVVL
+  req({ ...W19(), rej: 'WRONG' });                                  // a2
+  req({ ...W19(), panel: 'VIRAL', rej: 'WRONG' });                  // a3  VIRAL: in the VL view
+  req({ ...W19(), panel: 'HIVPC', rej: 'CLOT' });                   // a4  EID
+  req({ ...W19(), panel: 'TBGNX', rej: 'LEAK' });                   // a5  other panel: only the all view
+  req({ ...W19(), panel: null, rej: 'HAEM' });                      // a6  no panel: only the all view
+  req({ ...W19(), panel: 'hivpc ', rej: 'CLOT' });                  // a7  panel ignores case and trailing spaces
+  req({ ...W19(), panel: 'hivvl ', rej: 'wrong' });                 // a8  the same, and the code ignores case
+  req({ ...W19(), rej: ' WRONG' });                                 // a9  a leading space is a different code: in the total only
+  req({ ...W19(), rej: 'WRONG  ' });                                // a10 trailing spaces are ignored
+  req({ ...W19(), rej: 'ZZZZ' });                                   // a11 a code with no column: in the total only
+  req({ ...W19({ eff: ['2026-04-20T10:00:00+02:00'] }), panel: 'HIVPC', rej: 'OS' }); // a12 EID: bucket stays the registered date
+  req({ ...W19(), req: 'zsout ', rej: 'WRONG' });                   // a13 the facility code ignores case and trailing spaces (one group)
+  // Not rejected: A line 269 `NOT (code is null or code = '')`; spaces equal ''. None of these is in any count.
+  req({ ...W19(), rej: '', all: null, vl: null });
+  req({ ...W19(), rej: '   ', all: null, vl: null });
+  req({ ...W19(), rej: null, all: null, vl: null });
+
+  // -- S2: ZLUSA, code CLOT: the VL view's bucket date is coalesce(SpecimenDateTime, RegisteredDateTime) (V lines 10-13) --
+  const s2 = (o) => req({ req: 'ZLUSA', rej: 'CLOT', ...o });
+  s2({ ...W19({ eff: ['2026-04-28T10:00:00+02:00'] }), vl: B('2026-04-28', 18) });                                    // b1 collected before it was registered
+  s2({ auth: '2026-01-02T08:00:00+02:00', eff: ['2025-12-31T23:30:00+02:00'], all: B('2026-01-02', 1), vl: B('2025-12-31', 53) }); // b2 across the year
+  s2({ ...W19({ eff: [null] }) });                                                                                     // b3 report without a collection date
+  s2({ ...W19() });                                                                                                    // b4 no report
+  s2({ ...W19({ eff: ['2026-07'] }) });                                                                                // b5 partial stamp: not a date
+  s2({ auth: null, eff: ['2026-02-02T09:00:00+02:00'], all: null, vl: B('2026-02-02', 6) });                           // b6 no registered date
+  s2({ auth: '2026-03-20T09:00:00+02:00', eff: ['2026-03-15T10:00:00+02:00', '2026-03-08T10:00:00+02:00'], all: B('2026-03-20', 12), vl: B('2026-03-08', 11) }); // b7 two reports
+  s2({ ...W19({ eff: ['2026-04-28T10:00:00+02:00'] }), panel: 'VIRAL', vl: B('2026-04-28', 18) });                     // b8 VIRAL
+  s2({ ...W19({ eff: [''] }) });                                                                                       // b9 blank collection stamp
+  s2({ ...W19({ eff: ['2026-04-28T10:00:00+02:00'] }), panel: 'HIVPC', rej: 'CLOT' });                                  // b10 EID: collection date is ignored
+  s2({ auth: '2026-06-05T09:00:00+02:00', eff: ['2026-06-01T00:30:00+02:00'], all: B('2026-06-05', 23), vl: B('2026-06-01', 23) });  // b11 collected local 1 June (UTC 31 May)
+
+  // -- S3: ZKAFU on 10 February 2026 (Tuesday, week 7): code i gets i+1 requests, so a swapped or missing column shows --
+  const FEB10 = '2026-02-10T09:00:00+02:00';
+  T28_REASONS.forEach(([code], i) => {
+    for (let k = 0; k <= i; k += 1) req({ req: 'ZKAFU', rej: code, auth: FEB10, all: B(FEB10, 7), rid: `T28A-LOOP-${i}-${k}` });
+  });
+  req({ req: 'ZKAFU', rej: 'ZZZZ', auth: FEB10, all: B(FEB10, 7), rid: 'T28A-LOOP-X' });
+
+  // -- S4: week, quarter and year edges on local dates (ZEDGE, code SWC). Each week is worked out by hand: a Sunday starts a week --
+  const edge = (auth, all) => req({ req: 'ZEDGE', rej: 'SWC', auth, all });
+  edge('2025-12-31T23:30:00+02:00', B('2025-12-31', 53));  // e1  Wednesday, the 53rd week of 2025
+  edge('2026-01-01T00:30:00+02:00', B('2026-01-01', 1));   // e2  local 1 January (UTC is still 2025-12-31, week 53)
+  edge('2026-01-03T23:30:00+02:00', B('2026-01-03', 1));   // e3  Saturday: still week 1
+  edge('2026-01-04T00:30:00+02:00', B('2026-01-04', 2));   // e4  local Sunday (UTC is Saturday): week 2
+  edge('2026-03-31T23:30:00+02:00', B('2026-03-31', 14));  // e5  last day of quarter 1
+  edge('2026-04-01T00:30:00+02:00', B('2026-04-01', 14));  // e6  local 1 April (UTC is 31 March): quarter 2, month 4
+  edge('2026-06-30T10:00:00Z', B('2026-06-30', 27));       // e7  last day of quarter 2
+  edge('2026-07-01T00:00:00Z', B('2026-07-01', 27));       // e8  first day of quarter 3
+  edge('2026-12-31T22:30:00Z', B('2026-12-31', 53));       // e9  2026 has 53 weeks
+  edge('2027-01-01T01:00:00+02:00', B('2027-01-01', 1));   // e10 local 1 January 2027 (UTC is 2026-12-31)
+  edge('2027-01-02', B('2027-01-02', 1));                  // e11 a date alone
+  edge('2027-01-03', B('2027-01-03', 2));                  // e12 Sunday
+  edge('2023-01-01', B('2023-01-01', 1));                  // e13 a year that starts on a Sunday
+  edge('2023-01-07', B('2023-01-07', 1));                  // e14 its first Saturday
+  edge('2023-01-08', B('2023-01-08', 2));                  // e15
+  edge('2022-12-31', B('2022-12-31', 53));                 // e16 Saturday before it, week 53 of 2022
+  edge('2024-12-31', B('2024-12-31', 53));                 // e17 leap year
+
+  // -- S5: facility code spellings and missing values (A lines 7 and 268-270), and NULL RequestID (A line 12) --
+  req({ ...W19(), req: 'ZUNMP' });                         // c1 map row without a register row: NULL names
+  req({ ...W19(), req: 'ZNONE' });                         // c2 no map row
+  req({ ...W19(), req: null });                            // c3 no facility code
+  req({ ...W19(), req: null });                            // c4 v1: NULL = NULL is unknown, so no reason column counts these two
+  req({ ...W19(), req: '' });                              // c5 an empty code is a code: `'' = ''` is true
+  req({ ...W19(), req: '  ', rej: 'OS' });                 // c6 spaces equal '': the same group as c5
+  const AUG10 = '2026-08-10T09:00:00+02:00';
+  req({ req: 'ZSOUT', auth: AUG10, all: B(AUG10, 33), rid: null });  // d1 NULL RequestID: Count(RequestID) skips it, so does the sub-select
+  req({ req: 'ZSOUT', auth: AUG10, all: B(AUG10, 33) });             // d2
+  const SEP14 = '2026-09-14T09:00:00+02:00';
+  req({ req: 'ZSOUT', auth: SEP14, all: B(SEP14, 38), rid: null });  // d3 a group of NULL RequestIDs only: Total 0
+
+  // -- S6: the optional window, on the bucket date (ZWIN, code LEAK, week 24 holds 7 to 13 June) --
+  const win = (o) => req({ req: 'ZWIN', rej: 'LEAK', ...o });
+  win({ auth: '2026-06-10T00:30:00+02:00', all: B('2026-06-10', 24) });   // w1  local 10 June (UTC is 9 June)
+  win({ auth: '2026-06-10T00:45:00+02:00', all: B('2026-06-10', 24) });   // w1b
+  win({ auth: '2026-06-10T23:30:00+02:00', all: B('2026-06-10', 24) });   // w2
+  win({ auth: '2026-06-09T23:30:00+02:00', all: B('2026-06-09', 24) });   // w3
+  win({ auth: '2026-06-11T00:30:00+02:00', all: B('2026-06-11', 24) });   // w4  local 11 June (UTC is 10 June)
+  win({ auth: '2026-06', all: null });                                    // w5  a partial stamp is no date
+  win({ auth: null, all: null });                                         // w6
+  win({ auth: '2026-06-20T09:00:00+02:00', eff: ['2026-06-10T12:00:00+02:00'], all: B('2026-06-20', 25), vl: B('2026-06-10', 24) }); // w7
+
+  // ---- The model: what v1 returns for the fixture, grouped by facility code (ignoring case and trailing spaces) and bucket ----
+  const panelOk = (mode, panel) => {
+    const p = foldKey(panel);
+    if (mode === 'eid') return p === 'hivpc';
+    if (mode === 'vl') return p === 'hivvl' || p === 'viral';
+    return mode === 'all';
+  };
+  function expectedRows(mode, { from = '', to = '' } = {}, facility = null) {
+    const groups = new Map();
+    for (const s of specs) {
+      if (!nonEmpty(s.rej) || !panelOk(mode, s.panel)) continue;
+      const b = mode === 'vl' ? s.vl : s.all;
+      if ((from !== '' || to !== '') && (b === null || (from !== '' && b.d < from) || (to !== '' && b.d > to))) continue;
+      const key = JSON.stringify([foldKey(s.req), b && [b.y, b.q, b.m, b.w]]);
+      if (!groups.has(key)) groups.set(key, { members: [], b });
+      groups.get(key).members.push(s);
+    }
+    const rows = [];
+    for (const g of groups.values()) {
+      const withName = g.members.find((s) => s.req !== null && FAC[s.req]);
+      const names = withName ? FAC[withName.req] : [null, null, null];
+      const spellings = g.members.map((s) => s.req).filter((r) => r !== null).sort();
+      const row = {
+        ProvinceName: names[0], DistrictName: names[1], FacilityName: names[2], RequestingFacilityCode: spellings.length > 0 ? spellings[0] : null,
+        Year: g.b ? g.b.y : null, Quarter: g.b ? g.b.q : null, Month: g.b ? g.b.m : null, Week: g.b ? g.b.w : null,
+        TotalSampleRejections: g.members.filter((s) => s.rid !== null).length,
+      };
+      T28_REASONS.forEach(([code, name]) => {
+        // A line 15-20: the sub-select needs the same facility code (NULL matches nothing), the same bucket (NULL matches nothing) and a RequestID.
+        row[name] = g.members.filter((s) => s.rid !== null && s.req !== null && g.b !== null && foldKey(s.rej) === code.toLowerCase()).length;
+      });
+      rows.push(row);
+    }
+    const order = byColumns([['ProvinceName', 'text'], ['DistrictName', 'text'], ['FacilityName', 'text'], ['RequestingFacilityCode', 'text'], ['Year', 'number'], ['Quarter', 'number'], ['Month', 'number'], ['Week', 'number']]);
+    return rows.filter((r) => facility === null || r.FacilityName === facility).sort(order);
+  }
+
+  // =========================================================================================================================
+  // VL rejections by facility (total) (prefix t28t-)
+  // =========================================================================================================================
+  const T = 't28t-';
+  fmap(T, 1, 'ZSOUT', true, 'Choma General Hospital', 'Southern', 'Choma');
+  fmap(T, 2, 'ZKAFU', true, 'Kafue District Hospital', 'Lusaka', 'Kafue');
+  fmap(T, 3, 'ZKAF2', true, 'kafue district hospital ', 'Lusaka', 'Kafue');   // the same name in another spelling: one group (T line 13)
+  fmap(T, 4, 'ZLUSA', true, 'Chilenje Clinic', 'Lusaka', 'Lusaka');
+  fmap(T, 5, 'ZUNMP', false, null, null, null);
+  const MAY = '2026-05-04T08:00:00+02:00';
+  const tot = (o) => add(T, { panel: 'HIVVL', auth: MAY, rej: 'CLOT', ...o });
+  tot({ req: 'ZSOUT', rid: 'T28T-1' });
+  tot({ req: 'ZSOUT', rid: 'T28T-2', rej: 'wrong' });
+  tot({ req: 'ZSOUT', rid: 'T28T-2', rej: 'CLOT' });          // t3 the same request in another OBR set: counted once (T line 9, count distinct)
+  tot({ req: 'ZSOUT', rid: 't28t-2 ' });                       // and in another spelling
+  tot({ req: 'ZSOUT', rid: 'T28T-4', panel: 'VIRAL' });        // T line 11: panel HIVVL only, not VIRAL
+  tot({ req: 'ZSOUT', rid: 'T28T-5', panel: 'HIVPC' });
+  tot({ req: 'ZSOUT', rid: 'T28T-6', rej: '' });               // not rejected
+  tot({ req: 'ZSOUT', rid: 'T28T-6B', rej: '   ' });
+  tot({ req: 'ZSOUT', rid: 'T28T-6C', rej: null });
+  tot({ req: 'ZSOUT', rid: 'T28T-7', panel: 'hivvl ', rej: 'LEAK' });  // panel ignores case and trailing spaces
+  tot({ req: 'ZSOUT', rid: null });                                      // NULL RequestID: count(distinct) skips it
+  tot({ req: 'ZSOUT', rid: 'T28T-8', panel: null });
+  tot({ req: 'ZKAFU', rid: 'T28T-K1' });
+  tot({ req: 'ZKAFU', rid: 'T28T-K2' });
+  tot({ req: 'ZKAF2', rid: 'T28T-K3' });
+  tot({ req: 'ZKAF2', rid: 'T28T-K1' });                       // counted once across the two codes of one name
+  tot({ req: 'ZUNMP', rid: 'T28T-U1' });                       // T line 8: right join, no name: one NULL group for all of these
+  tot({ req: 'ZNONE', rid: 'T28T-U2' });
+  tot({ req: null, rid: 'T28T-U3' });
+  tot({ req: 'ZUNMP', rid: 'T28T-U1' });
+  // The window is on the same date as the VL view's bucket: collection date, else registered date.
+  const chil = (o) => tot({ req: 'ZLUSA', ...o });
+  chil({ rid: 'T28T-L1', auth: '2026-06-10T00:30:00+02:00' });                                  // local 10 June (UTC 9 June)
+  chil({ rid: 'T28T-L1B', auth: '2026-06-10T00:45:00+02:00' });
+  chil({ rid: 'T28T-L2', auth: '2026-06-11T00:30:00+02:00' });                                  // local 11 June (UTC 10 June)
+  chil({ rid: 'T28T-L3', auth: '2026-06-20T09:00:00+02:00', eff: ['2026-06-10T12:00:00+02:00'] }); // collected in the window, registered later
+  chil({ rid: 'T28T-L3B', auth: '2026-06-21T09:00:00+02:00', eff: ['2026-06-10T09:00:00+02:00'] });
+  chil({ rid: 'T28T-L4', auth: '2026-06-10T09:00:00+02:00', eff: ['2026-06-20T09:00:00+02:00'] }); // registered in the window, collected later
+  chil({ rid: 'T28T-L5', auth: null });
+  chil({ rid: 'T28T-L6', auth: '2026-06' });
+  chil({ rid: 'T28T-L7', auth: '2026-06-10T09:00:00+02:00', eff: ['2026-06-10', '2026-06-25'] }); // two reports: the earliest date; counted once
+  chil({ rid: 'T28T-L8', auth: '2026-07-01T09:00:00+02:00', eff: ['2026-06-11T00:30:00+02:00'] }); // collected local 11 June (UTC 10 June)
+
+  // =========================================================================================================================
+  // VL rejections by lab (prefix t28l-)
+  // =========================================================================================================================
+  const L = 't28l-';
+  fmap(L, 1, 'ZMP', true, 'Mapped Lab Name', 'Lusaka', 'Lusaka');                // a lab with no display name takes the register name
+  const lab = (o) => add(L, { panel: 'HIVVL', auth: MAY, rej: 'CLOT', ...o });
+  const rep = (perf, display, eff) => [{ perf, display, eff }];
+  lab({ rid: 'T28L-1', reps: rep('ZAB', 'Lab Alpha') });
+  lab({ rid: 'T28L-2', reps: rep('zab ', null), rej: 'WRONG' });               // the same lab in another spelling, no name of its own
+  lab({ rid: 'T28L-1', reps: rep('ZAB', 'Lab Alpha') });                       // L line 9: count(distinct RequestID)
+  lab({ rid: 't28l-1 ', reps: rep('ZAB', 'Lab Alpha') });
+  lab({ rid: null, reps: rep('ZAB', 'Lab Alpha') });
+  lab({ rid: 'T28L-3', reps: rep('ZGH', 'Lab Shared') });
+  lab({ rid: 'T28L-4', reps: rep('ZEF', 'lab shared ') });                       // two codes with one name: one group (L line 28, group by LabName)
+  lab({ rid: 'T28L-5', reps: rep('ZMP', null) });
+  lab({ rid: 'T28L-6', reps: rep('ZXX', null) });                              // not named anywhere: the name is the code
+  lab({ rid: 'T28L-7', reps: [] });                                            // no report: no lab
+  lab({ rid: 'T28L-8', reps: rep('', null) });                                 // blank testing code: v1 would use the receiving code, CE has none
+  lab({ rid: 'T28L-9', reps: rep(null, null) });
+  lab({ rid: 'T28L-10', reps: rep('ZAB', 'Lab Alpha'), panel: 'VIRAL' });      // L line 26: panel HIVVL only
+  lab({ rid: 'T28L-11', reps: rep('ZAB', 'Lab Alpha'), panel: 'HIVPC' });
+  lab({ rid: 'T28L-12', reps: rep('ZGH', 'Lab Shared'), rej: '' });
+  lab({ rid: 'T28L-13', reps: rep('ZGH', 'Lab Shared'), rej: '  ' });
+  lab({ rid: 'T28L-14', reps: rep('ZGH', 'Lab Shared'), rej: null });
+  lab({ rid: 'T28L-15', reps: rep('ZGH', 'Lab Shared'), panel: 'hivvl ' });    // panel ignores case and trailing spaces
+  const wl = (o) => lab({ reps: rep('ZWL', 'Lab Window'), ...o });
+  wl({ rid: 'T28L-W1', auth: '2026-06-10T00:30:00+02:00' });                    // local 10 June (UTC 9 June)
+  wl({ rid: 'T28L-W1B', auth: '2026-06-10T00:45:00+02:00' });
+  wl({ rid: 'T28L-W2', auth: '2026-06-11T00:30:00+02:00' });                    // local 11 June (UTC 10 June)
+  wl({ rid: 'T28L-W3', auth: '2026-06-09T23:30:00+02:00' });
+  wl({ rid: 'T28L-W4', auth: null });
+  wl({ rid: 'T28L-W5', auth: '2026-06' });
+  wl({ rid: 'T28L-W6', auth: '2026-06-20T09:00:00+02:00', reps: rep('ZWL', 'Lab Window', '2026-06-10T12:00:00+02:00') }); // the collection date is not the window's
+  wl({ rid: 'T28L-W6B', auth: '2026-06-21T09:00:00+02:00', reps: rep('ZWL', 'Lab Window', '2026-06-10T12:00:00+02:00') });
+  wl({ rid: 'T28L-W7', auth: '2026-06-10T12:00:00+02:00', reps: rep('ZWL', 'Lab Window', '2026-06-20T12:00:00+02:00') });
+
+  const setup = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ${maps.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, requester_code, rejection_code) values
+  ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, effective, performer, performer_display) values
+  ${reports.join(',\n  ')};`;
+
+  // ---- Suites ----
+  // Remove the rows of the other two queries, so a suite sees only its own fixture (ids start with the prefix).
+  const isolate = (keep) => ['diagnostic_reports', 'lab_requests', 'facility_map'].map((t) => `delete from ${t} where id not like '${keep}%';`).join('\n');
+  let sp = 0;
+  // The exact rows in order. `only` is a WHERE condition on the query's own columns.
+  function listSuite(name, queryName, params, columns, wanted, keep, { where, subset } = {}) {
+    const q = t28query(queryName);
+    const sqlText = q?.sql ?? `select null::text as "x"`;
+    const text = q && (where || subset) ? `select ${subset ? columns.map((c) => `z."${c}"`).join(', ') : 'z.*'} from (${sqlText}) z${where ? ` where ${where}` : ''}` : sqlText;
+    const s = orderedSuite(name, text, params, columns, wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${queryName}" is missing`, ...check(got)];
+    }
+    sp += 1;
+    s.sql = `savepoint t28sp${sp};\n${isolate(keep)}\n${s.sql}\nrollback to savepoint t28sp${sp};`;
+    return s;
+  }
+  // One JSON object of values, compared whole.
+  function valueSuite(name, queryName, keep, selectExpr, want) {
+    const q = t28query(queryName);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${queryName}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t28sp${sp};\n${isolate(keep)}\nselect ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;\nrollback to savepoint t28sp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  // The declared parameters: ids in order, types, all optional (v1 has no window), the SQL a plain read-only SELECT.
+  const BANNED28 = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
+  const shape28 = (name, queryName, wantIds, wantTypes) => ({
+    name,
+    count: 4 + wantIds.length,
+    check() {
+      const q = t28query(queryName);
+      if (!q) return [`query "${queryName}" is missing`];
+      const bad = [];
+      const ids = q.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}, got ${ids}`);
+      q.params.forEach((p, i) => {
+        if (p.required) bad.push(`${p.id} is optional (v1 has no window)`);
+        if (p.type !== wantTypes[i]) bad.push(`${p.id}: expected type ${wantTypes[i]}, got ${p.type}`);
+      });
+      if (BANNED28.test(q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(q.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  });
+  // CE pages a result with LIMIT and OFFSET, so the ORDER BY must be total (the sort key names the group key).
+  const orderHas = (name, queryName, needles) => ({
+    name,
+    count: needles.length,
+    check() {
+      const q = t28query(queryName);
+      if (!q) return [`query "${queryName}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      return needles.filter((x) => !tail.includes(x)).map((x) => `ORDER BY must list ${x}`);
+    },
+  });
+  const typesOf = (columns, params) => (sqlText) => `select json_build_object(${columns.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(sqlText, params)}) q limit 1`;
+
+  const NONE = { test_type: '', from: '', to: '' };
+  const rej = (name, params, mode, window, facility = null) => listSuite(name, REJ_Q, { ...NONE, ...params }, REJ_COLUMNS, expectedRows(mode, window, facility), A,
+    facility === null ? {} : { where: `z."FacilityName" = ${lit(facility)}` });
+
+  // S1 by hand (A line 13 onwards): the 4 May group of ZSOUT, whose row is the only May row of Choma General Hospital.
+  const s1Row = (counts) => ({
+    ProvinceName: 'Southern', DistrictName: 'Choma', FacilityName: 'Choma General Hospital', RequestingFacilityCode: 'ZSOUT',
+    Year: 2026, Quarter: 2, Month: 5, Week: 19,
+    ...Object.fromEntries(T28_REASONS.map(([, name]) => [name, 0])), ...counts,
+  });
+  const s1Where = `z."FacilityName" = 'Choma General Hospital' and z."Month" = 5`;
+  const NAME = Object.fromEntries(T28_REASONS.map(([code, name]) => [code, name]));
+  // All panels: a1 a2 a3 a8 a10 a13 are WRONG (6), a4 a7 CLOT (2), a5 LEAK, a6 HAEM, a12 OS; a9 and a11 are in the total only: 13 rows.
+  const s1All = s1Row({ TotalSampleRejections: 13, [NAME.WRONG]: 6, [NAME.CLOT]: 2, [NAME.LEAK]: 1, [NAME.HAEM]: 1, [NAME.OS]: 1 });
+  // EID (E): a4 a7 (CLOT) and a12 (OS).
+  const s1Eid = s1Row({ TotalSampleRejections: 3, [NAME.CLOT]: 2, [NAME.OS]: 1 });
+  // VL (V): HIVVL and VIRAL: a1 a2 a3 a8 a10 a13 are WRONG (6), a9 and a11 add to the total: 8 rows.
+  const s1Vl = s1Row({ TotalSampleRejections: 8, [NAME.WRONG]: 6 });
+
+  const TOTAL_COLUMNS = ['FacilityName', 'Rejections'];
+  const LAB_COLUMNS = ['Laboratory', 'Rejections'];
+  const day10 = { from: '2026-06-10', to: '2026-06-10' };
+  const suites28 = [
+    { name: 't28-setup', setup, count: 0, check: () => [] },
+    shape28('t28-shape-rej', REJ_Q, ['test_type', 'from', 'to'], ['select', 'text', 'text']),
+    shape28('t28-shape-tot', TOT_Q, ['from', 'to'], ['text', 'text']),
+    shape28('t28-shape-lab', LAB_Q, ['from', 'to'], ['text', 'text']),
+    {
+      name: 't28-test-type-options',
+      count: 1,
+      check() {
+        const p = t28query(REJ_Q)?.params.find((x) => x.id === 'test_type');
+        if (!p) return ['test_type is missing'];
+        return ['all', 'EID', 'VL'].filter((x) => !(p.optionsSql ?? '').includes(`'${x}'`)).map((x) => `test_type options lack ${x}`).concat(p.optionsSql ? [] : ['no optionsSql']);
+      },
+    },
+    orderHas('t28-order-rej', REJ_Q, ['g.code_key', 'g.y', 'g.q', 'g.m', 'g.w']),
+    orderHas('t28-order-tot', TOT_Q, ['g.rejections']),
+    orderHas('t28-order-lab', LAB_Q, ['g.rejections']),
+
+    // The whole result for each test type: blank and 'all' are the all view, EID the EID view, VL the VL view.
+    rej('t28-rej-blank', {}, 'all', {}),
+    rej('t28-rej-all', { test_type: 'all' }, 'all', {}),
+    rej('t28-rej-all-spelled', { test_type: 'All  ' }, 'all', {}),
+    rej('t28-rej-eid', { test_type: 'EID' }, 'eid', {}),
+    rej('t28-rej-eid-spelled', { test_type: 'eid ' }, 'eid', {}),
+    rej('t28-rej-vl', { test_type: 'VL' }, 'vl', {}),
+    rej('t28-rej-vl-spelled', { test_type: 'vl' }, 'vl', {}),
+    rej('t28-rej-unknown', { test_type: 'TB' }, 'none', {}),
+    // S1 and S2 by hand, whatever the model says.
+    listSuite('t28-rej-s1-all', REJ_Q, NONE, REJ_COLUMNS, [s1All], A, { where: s1Where }),
+    listSuite('t28-rej-s1-eid', REJ_Q, { ...NONE, test_type: 'EID' }, REJ_COLUMNS, [s1Eid], A, { where: s1Where }),
+    listSuite('t28-rej-s1-vl', REJ_Q, { ...NONE, test_type: 'VL' }, REJ_COLUMNS, [s1Vl], A, { where: s1Where }),
+    // The VL bucket switch (V lines 10-13, 15-18): Chilenje Clinic (all rows are code CLOT).
+    listSuite('t28-rej-s2-all', REJ_Q, NONE, REJ_COLUMNS, [
+      // all view: Datepart on RegisteredDateTime. b1 b3 b4 b5 b8 b9 b10 on 4 May (b8 is VIRAL, b10 HIVPC); b2 on 2 Jan; b6 has none; b7 on 20 March.
+      { ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', Year: null, Quarter: null, Month: null, Week: null, TotalSampleRejections: 1 },
+      { ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', Year: 2026, Quarter: 1, Month: 1, Week: 1, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', Year: 2026, Quarter: 1, Month: 3, Week: 12, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', Year: 2026, Quarter: 2, Month: 5, Week: 19, TotalSampleRejections: 7, [NAME.CLOT]: 7 },
+      // b11 is registered on 5 June (Friday, week 23).
+      { ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', Year: 2026, Quarter: 2, Month: 6, Week: 23, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+    ].map((r) => ({ ...Object.fromEntries(T28_REASONS.map(([, name]) => [name, 0])), ...r })), A, { where: `z."FacilityName" = 'Chilenje Clinic'` }),
+    listSuite('t28-rej-s2-vl', REJ_Q, { ...NONE, test_type: 'VL' }, REJ_COLUMNS, [
+      // VL view: coalesce(SpecimenDateTime, RegisteredDateTime). b2 on 31 Dec 2025 (week 53), b6 on 2 Feb, b7 on its earliest report (8 March),
+      // b1 and b8 on 28 April (week 18); b3 b4 b5 b9 on 4 May. b10 is HIVPC: not a VL row.
+      { Year: 2025, Quarter: 4, Month: 12, Week: 53, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { Year: 2026, Quarter: 1, Month: 2, Week: 6, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { Year: 2026, Quarter: 1, Month: 3, Week: 11, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { Year: 2026, Quarter: 2, Month: 4, Week: 18, TotalSampleRejections: 2, [NAME.CLOT]: 2 },
+      { Year: 2026, Quarter: 2, Month: 5, Week: 19, TotalSampleRejections: 4, [NAME.CLOT]: 4 },
+      // b11: collected on local 1 June 00:30 (Monday, week 23; UTC says 31 May).
+      { Year: 2026, Quarter: 2, Month: 6, Week: 23, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+    ].map((r) => ({ ProvinceName: 'Lusaka', DistrictName: 'Lusaka', FacilityName: 'Chilenje Clinic', RequestingFacilityCode: 'ZLUSA', ...Object.fromEntries(T28_REASONS.map(([, name]) => [name, 0])), ...r })),
+    A, { where: `z."FacilityName" = 'Chilenje Clinic'` }),
+    // The reason columns: code i has i+1 requests (S3), whatever the model says.
+    listSuite('t28-rej-s3-reasons', REJ_Q, NONE, REJ_COLUMNS, [{
+      ProvinceName: 'Lusaka', DistrictName: 'Kafue', FacilityName: 'Kafue District Hospital', RequestingFacilityCode: 'ZKAFU',
+      Year: 2026, Quarter: 1, Month: 2, Week: 7, TotalSampleRejections: 407,
+      ...Object.fromEntries(T28_REASONS.map(([, name], i) => [name, i + 1])),
+    }], A, { where: `z."FacilityName" = 'Kafue District Hospital'` }),
+    // The edges (S4): a hand list of the group keys and counts, whatever the model says.
+    listSuite('t28-rej-s4-edges', REJ_Q, NONE, ['FacilityName', 'RequestingFacilityCode', 'Year', 'Quarter', 'Month', 'Week', 'TotalSampleRejections', NAME.SWC], [
+      [2022, 4, 12, 53, 1], [2023, 1, 1, 1, 2], [2023, 1, 1, 2, 1], [2024, 4, 12, 53, 1], [2025, 4, 12, 53, 1], [2026, 1, 1, 1, 2], [2026, 1, 1, 2, 1],
+      [2026, 1, 3, 14, 1], [2026, 2, 4, 14, 1], [2026, 2, 6, 27, 1], [2026, 3, 7, 27, 1], [2026, 4, 12, 53, 1], [2027, 1, 1, 1, 2], [2027, 1, 1, 2, 1],
+    ].map(([Year, Quarter, Month, Week, total]) => ({
+      FacilityName: 'Edge Clinic', RequestingFacilityCode: 'ZEDGE', Year, Quarter, Month, Week, TotalSampleRejections: total, [NAME.SWC]: total,
+    })), A, { where: `z."FacilityName" = 'Edge Clinic'`, subset: true }),
+    // Unmapped, missing and spelled facility codes (S5): by the model, and the quirk rows by hand.
+    listSuite('t28-rej-s5-nameless', REJ_Q, NONE, ['ProvinceName', 'DistrictName', 'FacilityName', 'RequestingFacilityCode', 'Year', 'Month', 'TotalSampleRejections', NAME.CLOT, NAME.OS], [
+      // c3 c4: NULL facility code. Both count in the total, neither in a reason column (NULL = NULL is unknown).
+      [null, 2, 0, 0],
+      // c5 c6: '' and spaces are one group; c5 is CLOT, c6 is OS. min('' , '  ') is ''.
+      ['', 2, 1, 1],
+      [`ZNONE`, 1, 1, 0],
+      [`ZUNMP`, 1, 1, 0],
+    ].map(([code, total, clot, os]) => ({
+      ProvinceName: null, DistrictName: null, FacilityName: null, RequestingFacilityCode: code, Year: 2026, Month: 5, TotalSampleRejections: total, [NAME.CLOT]: clot, [NAME.OS]: os,
+    })), A, { where: `z."FacilityName" is null and z."Month" = 5`, subset: true }),
+    // NULL RequestID (S5 d1-d3): d1 and d2 are one group with Total 1 and CLOT 1; d3 alone is Total 0 and CLOT 0.
+    listSuite('t28-rej-s5-null-id', REJ_Q, NONE, ['FacilityName', 'Year', 'Month', 'Week', 'TotalSampleRejections', NAME.CLOT], [
+      { FacilityName: 'Choma General Hospital', Year: 2026, Month: 8, Week: 33, TotalSampleRejections: 1, [NAME.CLOT]: 1 },
+      { FacilityName: 'Choma General Hospital', Year: 2026, Month: 9, Week: 38, TotalSampleRejections: 0, [NAME.CLOT]: 0 },
+    ], A, { where: `z."FacilityName" = 'Choma General Hospital' and z."Month" >= 8`, subset: true }),
+    // The optional window (S6, Window Clinic): inclusive local dates; a side left blank is open; no window is every row.
+    rej('t28-rej-win-none', {}, 'all', {}, 'Window Clinic'),
+    rej('t28-rej-win-day', { from: '2026-06-10', to: '2026-06-10' }, 'all', day10, 'Window Clinic'),
+    rej('t28-rej-win-from', { from: '2026-06-11' }, 'all', { from: '2026-06-11' }, 'Window Clinic'),
+    rej('t28-rej-win-to', { to: '2026-06-09' }, 'all', { to: '2026-06-09' }, 'Window Clinic'),
+    rej('t28-rej-win-vl', { test_type: 'VL', from: '2026-06-10', to: '2026-06-10' }, 'vl', day10, 'Window Clinic'),
+    rej('t28-rej-win-eid', { test_type: 'EID', from: '2026-06-10', to: '2026-06-10' }, 'eid', day10, 'Window Clinic'),
+    // The whole result for a month (all facilities, the quarter and week edges inside it).
+    rej('t28-rej-win-may', { from: '2026-05-01', to: '2026-05-31' }, 'all', { from: '2026-05-01', to: '2026-05-31' }),
+    valueSuite('t28-rej-types', REJ_Q, A, typesOf(['Year', 'Quarter', 'Month', 'Week', 'TotalSampleRejections', NAME.CLOT, NAME.OS], NONE), {
+      Year: 'integer', Quarter: 'integer', Month: 'integer', Week: 'integer', TotalSampleRejections: 'bigint', [NAME.CLOT]: 'bigint', [NAME.OS]: 'bigint',
+    }),
+
+    // ---- VL rejections by facility (total) ----
+    // T line 8-13: HIVVL only, distinct RequestIDs, one row per facility name (case and trailing spaces ignored), a NULL name for the rest.
+    // Choma: T28T-1, T28T-2 (three spellings and OBR sets), T28T-7 = 3. Kafue: K1 K2 K3 = 3 (K1 under two codes). No name: U1 U2 U3 = 3.
+    // Chilenje: L1 L1B L2 L3 L3B L4 L5 L6 L7 L8 = 10.
+    listSuite('t28-tot-all', TOT_Q, { from: '', to: '' }, TOTAL_COLUMNS, [
+      { FacilityName: null, Rejections: 3 },
+      { FacilityName: 'Chilenje Clinic', Rejections: 10 },
+      { FacilityName: 'Choma General Hospital', Rejections: 3 },
+      { FacilityName: 'Kafue District Hospital', Rejections: 3 },
+    ], T),
+    // The window is on collection date, else registered date, local. 10 June: L1 L1B (registered), L3 L3B L7 (collected); L4 is collected on the 20th.
+    listSuite('t28-tot-day', TOT_Q, day10, TOTAL_COLUMNS, [{ FacilityName: 'Chilenje Clinic', Rejections: 5 }], T),
+    // From 11 June: L2 (local 11 June), L4 (collected 20 June), L8 (collected local 11 June).
+    listSuite('t28-tot-from', TOT_Q, { from: '2026-06-11', to: '' }, TOTAL_COLUMNS, [{ FacilityName: 'Chilenje Clinic', Rejections: 3 }], T),
+    // To 9 June: the May rows only (the 4 May requests of the other facilities).
+    listSuite('t28-tot-to', TOT_Q, { from: '', to: '2026-06-09' }, TOTAL_COLUMNS, [
+      { FacilityName: null, Rejections: 3 },
+      { FacilityName: 'Choma General Hospital', Rejections: 3 },
+      { FacilityName: 'Kafue District Hospital', Rejections: 3 },
+    ], T),
+    valueSuite('t28-tot-types', TOT_Q, T, typesOf(['Rejections'], { from: '', to: '' }), { Rejections: 'bigint' }),
+
+    // ---- VL rejections by lab ----
+    // L line 9-30: HIVVL only, distinct RequestIDs, one row per lab name. Lab Alpha: 1 and 2 (ZAB, zab ). Lab Shared: 3 and 4 and 15 (two codes, one
+    // name). Lab Window: W1 W1B W2 W3 W4 W5 W6 W6B W7 = 9. Mapped Lab Name: 5. ZXX: 6. No lab: 7 (no report), 8 (blank code), 9 (no code).
+    listSuite('t28-lab-all', LAB_Q, { from: '', to: '' }, LAB_COLUMNS, [
+      { Laboratory: null, Rejections: 3 },
+      { Laboratory: 'Lab Alpha', Rejections: 2 },
+      { Laboratory: 'Lab Shared', Rejections: 3 },
+      { Laboratory: 'Lab Window', Rejections: 9 },
+      { Laboratory: 'Mapped Lab Name', Rejections: 1 },
+      { Laboratory: 'ZXX', Rejections: 1 },
+    ], L),
+    // The window is on the registered date, local: W1 W1B (10 June) and W7 (registered 10 June, collected 20 June).
+    listSuite('t28-lab-day', LAB_Q, day10, LAB_COLUMNS, [{ Laboratory: 'Lab Window', Rejections: 3 }], L),
+    // From 11 June: W2 (local 11 June), W6 and W6B (registered 20 and 21 June).
+    listSuite('t28-lab-from', LAB_Q, { from: '2026-06-11', to: '' }, LAB_COLUMNS, [{ Laboratory: 'Lab Window', Rejections: 3 }], L),
+    // To 9 June: the 4 May rows of the other labs, and W3.
+    listSuite('t28-lab-to', LAB_Q, { from: '', to: '2026-06-09' }, LAB_COLUMNS, [
+      { Laboratory: null, Rejections: 3 },
+      { Laboratory: 'Lab Alpha', Rejections: 2 },
+      { Laboratory: 'Lab Shared', Rejections: 3 },
+      { Laboratory: 'Lab Window', Rejections: 1 },
+      { Laboratory: 'Mapped Lab Name', Rejections: 1 },
+      { Laboratory: 'ZXX', Rejections: 1 },
+    ], L),
+    valueSuite('t28-lab-types', LAB_Q, L, typesOf(['Rejections'], { from: '', to: '' }), { Rejections: 'bigint' }),
+  ];
+  return { name: 't28', suites: suites28 };
+}
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28()];

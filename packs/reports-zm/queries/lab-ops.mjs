@@ -2,8 +2,8 @@
 
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  ATTR_SYSTEM, count1, dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, requestAttrSql, sqlLit,
-  ssTextKey, tbgnxCte, testedAtSql, testingCodeSql,
+  ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
+  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, tbgnxCte, testedAtSql, testingCodeSql,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -1001,6 +1001,241 @@ export function throughputSql() {
 order by ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Month", g."Requests", coalesce(t.n, 0)`;
 }
 
+// ---- Rejections by facility and reason, VL rejections by facility (total), VL rejections by lab (Task 28) ------------------------------
+//
+// Replaces five v1 views over OpenLDRData.dbo.Requests (A, E, V, T and L below are their files in the task folder):
+//   A  vAllSampleRejectionsByFacility   all panels, 37 columns
+//   E  vEIDSampleRejectionsByFacility   A plus panel HIVPC (every sub-select, line 269)
+//   V  vVLSampleRejectionsByFacility    A plus panels HIVVL and VIRAL, and the bucket date coalesce(SpecimenDateTime, RegisteredDateTime)
+//   T  vVLTotalRejectionsByFacility     FacilityName, Rejections: panel HIVVL, count distinct RequestID, no time buckets
+//   L  vVLSpecimenRejections            Laboratory, Rejections: panel HIVVL, count distinct RequestID, by lab name
+//
+// One query for A, E and V ("Rejections by facility and reason"). Their 37 columns are the same, and the three differences are one choice
+// (spec ruling "one query per v1 column set"): the parameter test_type, a select with all, EID and VL (blank is all).
+//   all  A: every panel; bucket date RegisteredDateTime (lines 8-11).
+//   EID  E: panel HIVPC; bucket date RegisteredDateTime.
+//   VL   V: panels HIVVL and VIRAL; bucket date coalesce(SpecimenDateTime, RegisteredDateTime) (V lines 10-13). The VL differences belong to
+//        that view, so they switch together.
+// T is NOT the period query with a "total" setting: its columns are FacilityName and Rejections (no province, district, code, buckets or
+// reason columns), it counts DISTINCT requests, it groups by facility NAME, and it takes panel HIVVL only (the period VL view also takes
+// VIRAL). One query per column set: "VL rejections by facility (total)". There is no grain parameter. L is a third query for the same reason.
+//
+// Columns of the first (A lines 7-12 and 13-264, names and order): ProvinceName, DistrictName, FacilityName, RequestingFacilityCode, Year,
+// Quarter, Month, Week, TotalSampleRejections, then the 28 reason columns. Two reason names are cut at 30 characters in v1 ("Mismatched names
+// on Form n Spe", "Empty Specimen containers rece") and stay cut.
+//
+// What v1 does (A lines):
+//   - The rejected requests: LIMSRejectionCode is not NULL and not '' (line 269; SQL Server's '' = ' ' is true, so spaces are empty). One row
+//     per Requests row: Count(RequestID) (line 12) counts rows with a RequestID, not distinct requests.
+//   - Grouped by facility (the FacilityList names and the requesting code) and by Datepart(year / qq / mm / wk) of the bucket date (270-274).
+//     Datepart(wk) is the US week: Sunday first, week 1 holds 1 January (dateWeekSql), not the ISO week. Local dates, never UTC.
+//   - Each reason column is a correlated sub-select that counts the rows of the SAME facility code and the SAME year, quarter, month and week
+//     whose LIMSRejectionCode equals the reason code (lines 13-264). It is a conditional count of the group: count(*) filter (where ...).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The reason codes are v1's content (Zambia's 28 codes) and stay in the query. A code compares ignoring case and trailing spaces
+//     ('wrong ' is WRONG); a leading space is a different code. A rejected request with a code that is none of the 28 is in the total only.
+//   - A request with no bucket date still has a group (Datepart of NULL is NULL, and NULL groups together), but the sub-selects compare
+//     Datepart(...) = Datepart(...), which is unknown for NULL: every reason column of that group is 0 while the total counts. The same goes
+//     for a request with no facility code (NULL = NULL is unknown): total counted, reason columns 0. An empty code '' is a code and counts.
+//   - A RequestID that is NULL is not counted (Count(RequestID) and the sub-select count(rq.requestid) skip it). A group made only of such rows
+//     appears with a total of 0.
+//   - The group key is the facility code ignoring case and trailing spaces ('ZSOUT' and 'zsout ' are one group, as SQL Server groups them).
+//     The code shown is the smallest spelling in byte order (SQL Server shows whichever it met first).
+//   - Facilities missing from the list get NULL province, district and facility names (left join, line 268).
+//   - Week 53 of a year is a partial week; 1 January is always in week 1 of its own year.
+//
+// CE mapping (spec rulings 4 and 5, Task 14): Requests -> lab_requests; RegisteredDateTime -> authored_at; SpecimenDateTime ->
+// diagnostic_reports.effective; LIMSRejectionCode -> rejection_code; LIMSPanelCode -> panel_code; RequestingFacilityCode -> requester_code;
+// FacilityList (it is not in Zambia's script) -> the ZMFAC register mapping through requesterJoin (province = region, district, facility =
+// name), left join.
+//
+// Deviations and CE gaps:
+//   - The facility mapping matches the requesting code EXACTLY (requesterJoin; v1's join ignores case and trailing spaces). A code spelled in
+//     another case than the register's, with no exactly-spelled row in its group, gets NULL names. It still joins the group of the code it
+//     folds to, so its counts merge as in v1 and the names come from the exactly-spelled rows.
+//   - The facility NAMES are not part of the group key (v1's are): one facility code, one row per period. One code mapped to two register rows
+//     (different source or performer system) shows the smaller name.
+//   - Window (spec ruling 7). The views have no window, so from and to are optional and blank is v1's all history. A given side keeps the
+//     rows whose BUCKET date (the local date of the stamp's own text) is on or after from and on or before to; a row with no bucket date is
+//     out as soon as one side is given. The bucket date is the registered date, and for VL the collection date else the registered date.
+//   - The collection date is the earliest local date among the request's reports (CE can hold several reports per request row; v1 holds one
+//     SpecimenDateTime). A blank or partial stamp ('', '2026-07') is no date and falls back to the registered date, where a v1 datetime is
+//     always a full date. The request is still counted once.
+//   - An unknown test_type gives no rows. The date parameters are not validated here (a final wave adds one check).
+//
+// Rows are ordered by the three names (SQL Server's word order), the facility code, and the bucket (v1 has no ORDER BY; this key is total).
+const REJECTION_REASONS = [
+  ['WRONG', 'Blood received in wrong tube'],
+  ['CLOT', 'Specimen clotted'],
+  ['LEAK', 'Leaked sample'],
+  ['HAEM', 'Specimen haemolysed'],
+  ['AOOO', 'ANALYSER OUT OF ORDER'],
+  ['NOQC', 'Quality Control Failed'],
+  ['TEST', 'No test requested'],
+  ['SPUN', 'Specimen unlabelled'],
+  ['007', 'Specimen more than 7 days old'],
+  ['UNS', 'Unsuitable for testing'],
+  ['INS', 'Insufficient blood received'],
+  ['FORM', 'Request form incomplete.'],
+  ['LOCOU', 'Low Count Error'],
+  ['LAC', 'Limited analyser capacity.'],
+  ['INVOL', 'Volume of Blood Exceeds Limit'],
+  ['ACC', 'Laboratory Accident'],
+  ['NAMES', 'Mismatched names on Form n Spe'],
+  ['SNR', 'SPECIMEN NOT RECEIVED IN LAB'],
+  ['EMPT', 'Empty Specimen containers rece'],
+  ['NOESR', 'ESR Tubes are Out of Stock'],
+  ['NRQF', 'No request form received'],
+  ['WRGCO', 'Wrong Sputum Container Used'],
+  ['SAMFN', 'Sample fibrin - Clot detected'],
+  ['OLD', 'Specimen too old for testing'],
+  ['INSF', 'Sample insufficient to culture'],
+  ['SWC', 'Sample Withdrawn by Client'],
+  ['DAY3', 'Specimen 3 days old on receipt'],
+  ['OS', 'Not done. Reagent out of stock'],
+];
+
+// The local date of a request's collection (the earliest among its reports), else NULL.
+const collectionDateSql = (lrAlias) => `(select min(${localDate('dr.effective')}) from diagnostic_reports dr where dr.based_on_id = ${lrAlias}.id)`;
+// A rejected request: the code is not NULL and not blank.
+const rejectedSql = (code) => `length(rtrim(${code})) > 0`;
+
+export function rejectionsByReasonSql() {
+  const testType = foldSql('{{param.test_type}}');
+  const isVl = `${testType} = 'vl'`;
+  const reasons = REJECTION_REASONS.map(([code, name], i) => `count(b.request_id) filter (where b.requester_code is not null and b.d is not null and ${foldSql('b.rejection_code')} = ${sqlLit(code.toLowerCase())}) as r${String(i + 1).padStart(2, '0')}`);
+  const outputs = REJECTION_REASONS.map(([, name], i) => `g.r${String(i + 1).padStart(2, '0')} as "${name}"`);
+  return `with rq as (
+  select lr.request_id, lr.requester_code, lr.rejection_code, fmr.region as province, fmr.district as district, fmr.name as facility,
+    case when ${isVl} then coalesce(${collectionDateSql('lr')}, ${localDate('lr.authored_at')}) else ${localDate('lr.authored_at')} end as d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${rejectedSql('lr.rejection_code')}
+    and (${testType} in ('', 'all')
+      or (${testType} = 'eid' and ${inListSql('lr.panel_code', ['HIVPC'])})
+      or (${isVl} and ${inListSql('lr.panel_code', ['HIVVL', 'VIRAL'])}))
+),
+b as (
+  select r.*, extract(year from r.d)::int as y, extract(quarter from r.d)::int as q, extract(month from r.d)::int as m, ${dateWeekSql('r.d')} as w
+  from rq r
+  where ${optionalWindowSql("to_char(r.d, 'YYYY-MM-DD')")}
+),
+g as (
+  select min(b.province collate "C") as province, min(b.district collate "C") as district, min(b.facility collate "C") as facility,
+    min(b.requester_code collate "C") as code, ${foldSql('b.requester_code')} as code_key,
+    b.y, b.q, b.m, b.w,
+    count(b.request_id) as total,
+    ${reasons.join(',\n    ')}
+  from b
+  group by ${foldSql('b.requester_code')}, b.y, b.q, b.m, b.w
+)
+select g.province as "ProvinceName", g.district as "DistrictName", g.facility as "FacilityName", g.code as "RequestingFacilityCode",
+  g.y as "Year", g.q as "Quarter", g.m as "Month", g.w as "Week", g.total as "TotalSampleRejections",
+  ${outputs.join(',\n  ')}
+from g
+order by ${ssTextKey('g.province')} collate "C" nulls first, g.province collate "C" nulls first,
+  ${ssTextKey('g.district')} collate "C" nulls first, g.district collate "C" nulls first,
+  ${ssTextKey('g.facility')} collate "C" nulls first, g.facility collate "C" nulls first,
+  g.code_key collate "C" nulls first, g.y nulls first, g.q nulls first, g.m nulls first, g.w nulls first`;
+}
+
+export const rejectionsByReasonParams = () => [
+  {
+    id: 'test_type', label: 'Test type: all (blank), EID (panel HIVPC) or VL (panels HIVVL and VIRAL, dated by collection date else registered date)',
+    type: 'select', required: false, optionsSql: "select 'all' as test_type union all select 'EID' union all select 'VL'",
+  },
+  ...windowParams(),
+];
+
+// ---- VL rejections by facility (total) ----
+//
+// Replaces vVLTotalRejectionsByFacility (T). Columns: FacilityName, Rejections. Parameters: `from` and `to`, both optional.
+//
+// What v1 does (T lines):
+//   - FacilityList right join Requests on DisaCodes = RequestingFacilityCode (lines 8-9): every request is kept, a facility missing from the
+//     list has a NULL name.
+//   - Panel HIVVL only (not VIRAL), a code that is not NULL and not blank (line 11). Grouped by FacilityName (line 12); count(Distinct
+//     RequestID): a request in several OBR sets, or spelled in another case, counts once (case and trailing spaces are ignored).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The group key is the facility NAME, so two facility codes with one name (case and trailing spaces ignored) are ONE row, and every
+//     facility without a name (unmapped code, no code) is one row with a NULL name. The distinct count runs over the whole group.
+//   - A request without a RequestID is not counted (count(distinct) skips NULL).
+//
+// Window (spec ruling 7): no window in v1, so both parameters are optional and blank is all history. A given side filters on the local
+// date of the request's collection, else its registered date: the VL bucket date of the period query, so the same window gives the same
+// requests in both reports. A request with no such date is out as soon as one side is given. Facility names: see the first query.
+export function vlRejectionsTotalSql() {
+  return `with rq as (
+  select lr.request_id, fmr.name as facility,
+    coalesce(${collectionDateSql('lr')}, ${localDate('lr.authored_at')}) as d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', ['HIVVL'])} and ${rejectedSql('lr.rejection_code')}
+),
+g as (
+  select min(r.facility collate "C") as facility, ${foldSql('r.facility')} as name_key, count(distinct ${foldSql('r.request_id')}) as rejections
+  from rq r
+  where ${optionalWindowSql("to_char(r.d, 'YYYY-MM-DD')")}
+  group by ${foldSql('r.facility')}
+)
+select g.facility as "FacilityName", g.rejections as "Rejections"
+from g
+order by ${ssTextKey('g.facility')} collate "C" nulls first, g.facility collate "C" nulls first, g.rejections`;
+}
+
+// ---- VL rejections by lab ----
+//
+// Replaces vVLSpecimenRejections (L). Columns: Laboratory, Rejections. Parameters: `from` and `to`, both optional.
+//
+// What v1 does (L lines):
+//   - Requests left join Laboratories on (TestingFacilityCode, else the receiving code when it is '') = LabCode (lines 18-23): a lab not in
+//     the dictionary has a NULL name.
+//   - Panel HIVVL only (not VIRAL), code not NULL and not blank (lines 25-27). Grouped by the lab NAME, count(Distinct RequestID).
+//
+// Kept v1 quirks (spec ruling 1): the group key is the lab name, so two lab codes with one name are one row (case and trailing spaces
+// ignored) and every lab with no name is one row with a NULL name; a request without a RequestID is not counted.
+//
+// CE mapping and gaps (spec rulings 5, 6, 7 and 8):
+//   - The lab is the report's performer, which cdr writes from OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401). A request with no
+//     report, or a blank performer, has no lab: v1 would use the receiving code, which CE does not carry, so these requests are one row with
+//     a NULL name.
+//   - CE has no Laboratories dictionary. The name is the report's (labNameSql: its display, else the register name of the mapped code, else the
+//     code) with ONE name per lab code, the Task 16 rule (labNamesCte): the rows never split on per-report names, and the code's name is the
+//     one among its listed rows that is not just the code, the smallest in byte order. A lab with no name anywhere is shown by its code
+//     (v1 would show NULL).
+//   - A request with several reports counts once for each of its labs (v1 holds one testing code per request row).
+//
+// Window (spec ruling 7): none in v1 (its Year and Month columns are commented out and read RegisteredDateTime), so both parameters are
+// optional and blank is all history. A given side filters on the local date of the registered date (authored_at); a request with none is
+// out as soon as one side is given.
+export function vlRejectionsByLabSql() {
+  return `with sel as (
+  select ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, lr.request_id
+  from lab_requests lr
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', ['HIVVL'])} and ${rejectedSql('lr.rejection_code')}
+    and ${optionalWindowSql('lr.authored_at')}
+),
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()},
+g as (
+  select min(n.lab_name collate "C") as lab, ${foldSql('n.lab_name')} as lab_key, count(distinct ${foldSql('s.request_id')}) as rejections
+  from sel s
+  left join names n on n.code_key = ${foldSql('s.code')}
+  group by ${foldSql('n.lab_name')}
+)
+select g.lab as "Laboratory", g.rejections as "Rejections"
+from g
+order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls first, g.rejections`;
+}
+
+const windowParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
+
 export function queries() {
   return [
     { name: 'VL lab performance', sql: vlLabPerformanceSql(), params: dateParams(true) },
@@ -1012,5 +1247,8 @@ export function queries() {
     { name: 'VL and EID weekly stats', sql: weeklyStatsSql(), params: dateParams(true) },
     { name: 'Tests authorised by lab and type', sql: labSummarySql(), params: dateParams(true) },
     { name: 'VL throughput by lab and month', sql: throughputSql(), params: [{ id: 'year', label: 'Year (YYYY)', type: 'text', required: true }] },
+    { name: 'Rejections by facility and reason', sql: rejectionsByReasonSql(), params: rejectionsByReasonParams() },
+    { name: 'VL rejections by facility (total)', sql: vlRejectionsTotalSql(), params: windowParams() },
+    { name: 'VL rejections by lab', sql: vlRejectionsByLabSql(), params: windowParams() },
   ];
 }
