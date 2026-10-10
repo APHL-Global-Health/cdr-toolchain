@@ -129,11 +129,11 @@ reference numbers:
 | VL results for a facility's clients | ARTNo |
 | Earlier VL results of high-VL clients | ARTNumber |
 | VL results history by client | ARTNumber |
-| EID clients by province | Name |
+| EID clients by province | Name, UNIQUEID, HealthcareNo, HOSPID, REFNO |
 | Recency tests with client names | ClientName, REFNO |
 | Culture and susceptibility results | FIRSTNAME, LastName, DOB, IdentificationNumber |
-| COVID-19 positive patients | FIRSTNAME, SURNAME |
-| COVID-19 daily line list | Patient Name, Contact Number |
+| COVID-19 positive patients | FIRSTNAME, SURNAME, Epid |
+| COVID-19 daily line list | Patient Name, Contact Number, Epid |
 | COVID-19 results (VRDSS) | DOB |
 | COVID-19 results (VRDSS V2) | dob, ct_case_id, Other Ref Number |
 
