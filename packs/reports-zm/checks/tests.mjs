@@ -1229,11 +1229,17 @@ f18.req('T18-I-O-X', { ...A18 });
 f18.req('T18-I-O-X', { ...B18, results: [{ obs: 'HIVVX', text: 'PTLTT' }] });
 f18.req('T18-I-O-CASE', { ...A18 });
 f18.req('T18-I-O-CASE', { ...B18, results: [{ obs: 'hivvc ', text: 'PTLTT' }] });
+// v1's TND reads `LIMSObservationCode in (...)` under the database collation (Cohort2x line 74), so 'hivvc ' is HIVVC there too and the
+// result is also a valid row (A's dates, B's result date), as for the six codes above. Final review minor 3 folded tndCte's compares; before
+// that this lab had the unclear row only.
+out18('SOUTH', 'T18-I-O-CASE', A18.eff, A18.recv, A18.authored, B18.iss, 'PTLTT', T18.dbs, 'VL');
 out18('SOUTH', 'T18-I-O-CASE', B18.eff, B18.recv, B18.authored, B18.iss, 'PTLTT', T18.dbs, 'VL');
 // The three panels (line 102), and RTRI / EID panels are not unclear rows.
 pair18('T18-I-P-POHVL', 'PTLTT', { panel: 'POHVL' }, { valid: false });
 pair18('T18-I-P-POCVR', 'PTLTT', { panel: 'POCVR' }, { valid: false });
-pair18('T18-I-P-CASE', 'PTLTT', { panel: 'hivvl ' }, { valid: false });
+// 'hivvl ' is HIVVL to v1's TND (Cohort2x line 74, `LIMSPanelCode in`, database collation), so the lab also has its valid row (final review
+// minor 3; before it, tndCte compared the panel exactly and the lab had the unclear row only).
+pair18('T18-I-P-CASE', 'PTLTT', { panel: 'hivvl ' });
 pair18('T18-I-P-RTRI', 'PTLTT', { panel: 'RTRI' }, { incs: false });
 pair18('T18-I-P-HIVPC', 'PTLTT', { panel: 'HIVPC' }, { valid: false, incs: false });
 // The window is the authorised date (lines 104-105), a local date.
