@@ -110,6 +110,26 @@ suites.push(caseSuite('in-range-names', ['d'], [
   { d: '2026-02-01', expected: false },
 ], bind(inRange('d', 'start', 'end'), { start: '2026-01-15', end: '2026-01-31' })));
 
+// A partial or odd stamp is outside every window. As text '2026-07' sorts between '2026-06-01' and '2026-07-31', so a bare text compare
+// would put it inside a June to July window; the stamp must start with a full date.
+suites.push(caseSuite('in-range-partial-stamps', ['d'], [
+  { d: '2026-07', expected: false },
+  { d: '2026-06', expected: false },
+  { d: '2026', expected: false },
+  { d: '2026-07-1', expected: false },
+  { d: 'garbage', expected: false },
+  { d: '', expected: false },
+  { d: '2026-06-01', expected: true },
+  { d: '2026-07-31T23:59:59Z', expected: true },
+  { d: '2026-07-15', expected: true },
+  { d: null, expected: null },
+], bind(inRange('d'), { from: '2026-06-01', to: '2026-07-31' })));
+suites.push(caseSuite('in-range-partial-stamps-extra-day', ['d'], [
+  { d: '2026-08', expected: false },
+  { d: '2026-08-01T10:00:00Z', expected: true },
+  { d: '2026-08-02', expected: false },
+], bind(inRange('d', 'from', 'to', 1), { from: '2026-06-01', to: '2026-07-31' })));
+
 // extraDays moves the end of the window later (the dashboard procedures add a day to their end date).
 suites.push(caseSuite('in-range-extra-day', ['d'], [
   { d: '2026-05-31T10:00:00Z', expected: true },

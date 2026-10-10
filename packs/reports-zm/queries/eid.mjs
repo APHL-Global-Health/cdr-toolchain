@@ -1,7 +1,7 @@
 // Custom queries for the eid reports. Each task adds { name, sql, params } entries to the list.
 
 import { inListSql, rpt, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
-import { sqlLit, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey } from '../zm-sql.mjs';
+import { sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey } from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
 //
@@ -92,9 +92,10 @@ export const eidTestingSummaryParams = (level) => ({
 //   sp_dash_getEID   an older cut of the same procedure. Its five measures (Tests, Positive, Negative, PositivityRate, AverageTAT)
 //                    are columns of this query. These things of its own are NOT carried:
 //                      - it reads Requests and LabResults directly, not the eid table, with its own rules: panel HIVPC and
-//                        observation HIVPC only, the result 'Indeterminate' left out, positive texts 'Positive', 'Positive*',
-//                        'POS' and 'Detected DBS' only (no 'Detected' or 'DET'), no dedupe per lab number, and a LEFT join to the
-//                        facility dictionary, so a request of an unmapped facility counts in its all-Zambia row. This query counts
+//                        observation HIVPC only, the result 'Indeterminate' left out (and a NULL result, because `not in` drops
+//                        NULLs, line 69), positive texts 'Positive', 'Positive*', 'POS' and 'Detected DBS' only (no 'Detected' or
+//                        'DET'), no dedupe per lab number, and a LEFT join to the facility dictionary, so a request of an
+//                        unmapped facility counts in its all-Zambia row. This query counts
 //                        what the eid table counts (V2's population), so the two give slightly different numbers;
 //                      - its all-Zambia positivity column is spelled PositvityRate (line 75); this query uses V2's PositivityRate;
 //                      - its first column is Province, District or Facility only when that level is given, and there is none for
@@ -140,12 +141,6 @@ export const eidTestingSummaryParams = (level) => ({
 //
 // Windows: `from` and `to` are required (spec ruling 3). V2 defaulted a missing start and end to last month.
 
-const given = (id) => `{{param.${id}}} <> ''`;
-const blank = (id) => `{{param.${id}}} = ''`;
-// A column against a parameter the way SQL Server compares text: case and trailing spaces ignored; a blank parameter passes everything.
-const same = (column, id) => `(${blank(id)} or ${foldSql(column)} = ${foldSql(`{{param.${id}}}`)})`;
-const count1 = (cond) => `sum(case when ${cond} then 1 else 0 end)`;
-const ratio = (top, bottom) => `(${top})::float8 / nullif(${bottom}, 0)`;
 
 // The age groups of the eid table (sp_update_EIDTable lines 19-29) with the V2 column name of each (lines 54-61).
 const EID_BANDS = [['At_Birth', 'At Birth'], ['_1_to_6wks', '1 - 6 Weeks'], ['_7wks_to_6Ms', '7 weeks to 6 Months'],

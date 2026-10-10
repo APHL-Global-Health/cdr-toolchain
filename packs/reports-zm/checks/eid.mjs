@@ -157,6 +157,17 @@ lab('T3-DUPDATEONLY', [
   { issued: '2026-05-08T10:00:00Z', results: res('Negative') },
 ], { tested_date: '2026-05-08T10:00:00Z', tat: 7 });
 
+// Lab ids compare like SQL Server (v1's RequestID is Latin1_General_CI_AS): 'T3-FOLD' and 't3-fold ' are one lab id, so the dedupe keeps
+// one row, the earlier (05-08, Negative), with its own spelling.
+lab('t3-fold ', [{ issued: '2026-05-08T10:00:00Z', results: res('Negative') }], { ...ZERO, negative: 1, tested_date: '2026-05-08T10:00:00Z', tat: 7 });
+lab('T3-FOLD', [{ issued: '2026-05-12T10:00:00Z', results: res('Positive') }], null);
+// The same pair in a window: the April row wins, so May shows nothing (the prefilter keeps the May-reported variant of the folded id).
+lab('T3-FOLDOLD', [{ effective: '2026-04-15T07:00:00Z', issued: '2026-04-20T10:00:00Z', authored: '2026-04-16T08:00:00Z',
+  analysis: '2026-04-17T09:00:00Z', received: '2026-04-15T12:00:00Z' }],
+{ tested_date: '2026-04-20T10:00:00Z', tat: 5, collected_date: '2026-04-15T07:00:00Z',
+  registered_date: '2026-04-16T08:00:00Z', run_date: '2026-04-17T09:00:00Z', recieved_date: '2026-04-15T12:00:00Z' });
+lab('t3-foldold ', [{ issued: '2026-05-15T10:00:00Z' }], null);
+
 // The window edges (tested date 2026-05-01 to 2026-05-31). TAT counts date boundaries from 2026-04-28.
 lab('T3-EDGE-IN1', [{ effective: '2026-04-28T10:00:00Z', issued: '2026-05-01T00:00:00Z' }],
   { tested_date: '2026-05-01T00:00:00Z', collected_date: '2026-04-28T10:00:00Z', tat: 3, tat_within14: 1 });
@@ -757,9 +768,10 @@ const suites13dash = [
     Tests: 1, Tests_POC: 0, Positive: 1, Positive_POC: 0, Negative: 0, PositivityRate: 1, AverageTAT: 2, TatWithin14: 1,
     Male: 1, _1_to_6wks: 1, _1_to_6wks_m: 1,
   }, 'All', 'All', 'All'))]),
-  // Partial stamps (P1 P2 in July; P3 has no usable tested date and is in no window). P2's collected date is partial, so its tat is NULL:
-  // AverageTAT averages P1 alone (1), and P2 is not within 14 days (the flag is 0). No POC test.
-  dashSuite13('dash-partial-stamps', { ...none13, from: '2026-07-01', to: '2026-07-31' }, [dash13(named13({
+  // Partial stamps (P1 P2 in July; P3's authorised date is '2026-07', which is not a date, so it is in no window). P2's collected date is
+  // partial, so its tat is NULL: AverageTAT averages P1 alone (1), and P2 is not within 14 days (the flag is 0). No POC test.
+  // The window starts 06-15 and ends 07-31 so that, as text, '2026-07' would sit inside it (and P3 would be a third test).
+  dashSuite13('dash-partial-stamps', { ...none13, from: '2026-06-15', to: '2026-07-31' }, [dash13(named13({
     Tests: 2, Tests_POC: 0, Positive: 1, Positive_POC: 0, Negative: 1, PositivityRate: 1 / 2, AverageTAT: 1, TatWithin14: 1 / 2,
     Male: 1, Female: 1, _7wks_to_6Ms: 2, _7wks_to_6Ms_m: 1, _7wks_to_6Ms_f: 1,
   }, 'All', 'All', 'All'))]),

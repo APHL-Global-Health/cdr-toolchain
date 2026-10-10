@@ -128,6 +128,19 @@ lab('T2-DUPDATEONLY', [
   { issued: '2026-05-09', results: [{ obs: 'HIVVL', num: 3000 }] },
   { issued: '2026-05-08T10:00:00Z', results: [{ obs: 'HIVVL', num: 540 }] },
 ], { tested_date: '2026-05-08T10:00:00Z', tat: 7 });
+// Lab ids compare like SQL Server (v1's RequestID is Latin1_General_CI_AS): 'T2-FOLD' and 't2-fold ' are one lab id, so the dedupe
+// keeps one row, the earlier (05-08, 3000 so not suppressed), with its own spelling. The VIRAL form sits on the dropped request and still
+// counts, because v1 keys the flags on RequestID.
+lab('t2-fold ', [{ issued: '2026-05-08T10:00:00Z', results: [{ obs: 'HIVVL', num: 3000 }] }],
+  { tested_date: '2026-05-08T10:00:00Z', suppressed: 0, uu: 0, tat: 7, pregnant: 1 });
+lab('T2-FOLD', [{ issued: '2026-05-12T10:00:00Z', results: [{ obs: 'HIVVL', num: 100 }], form: VIRAL([['ARTPR', 'Yes']]) }], null);
+// The same pair in a window: the earlier row (April) wins, so May shows nothing. The window prefilter must keep the May-reported variant
+// of the folded lab id, or the April row would be the only one it sees and a different row could win.
+lab('T2-FOLDOLD', [{ effective: '2026-04-15T07:00:00Z', issued: '2026-04-20T10:00:00Z', authored: '2026-04-16T08:00:00Z',
+  analysis: '2026-04-17T09:00:00Z', received: '2026-04-15T12:00:00Z' }],
+{ tested_date: '2026-04-20T10:00:00Z', tat: 5, collected_date: '2026-04-15T07:00:00Z',
+  registered_date: '2026-04-16T08:00:00Z', run_date: '2026-04-17T09:00:00Z', received_date: '2026-04-15T12:00:00Z' });
+lab('t2-foldold ', [{ issued: '2026-05-15T10:00:00Z' }], null);
 // Panel and observation compare like SQL Server: ignoring case and trailing spaces (v1 lines 120-121).
 lab('T2-CODECASE', [{ panel: 'hivvl ', results: [{ obs: 'hivvc ', num: 540 }] }], {});
 

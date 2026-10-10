@@ -3,14 +3,8 @@
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
-  requesterJoin, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
+  requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
 } from '../zm-sql.mjs';
-
-// Area parameters in SQL. An optional parameter arrives as '' when blank. `same` matches a column on a
-// parameter the way SQL Server does (case and trailing spaces ignored), and passes everything when blank.
-const given = (id) => `{{param.${id}}} <> ''`;
-const blank = (id) => `{{param.${id}}} = ''`;
-const same = (column, id) => `(${blank(id)} or ${foldSql(column)} = ${foldSql(`{{param.${id}}}`)})`;
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
 //
@@ -83,8 +77,6 @@ const BANDS = [['lt01', '<01'], ['1to4', '01-04'], ['5to9', '05-09'], ['10to14',
 const GENDERS = [['m', "s.gender = 'Male'"], ['f', "s.gender = 'Female'"], ['i', "s.gender = 'Indeterminate'"],
   ['u', "s.gender = 'Unknown'"], ['x', 's.gender is null']];
 
-const count1 = (cond) => `sum(case when ${cond} then 1 else 0 end)`;
-const ratio = (top, bottom) => `(${top})::float8 / nullif(${bottom}, 0)`;
 
 // The aggregate columns, in v1's order (national branch, lines 25-128): [output name, aggregate over the rows `s`].
 function dashColumns() {

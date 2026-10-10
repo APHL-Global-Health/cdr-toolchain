@@ -15,15 +15,16 @@ export const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 // 'a', 'b' from ['a', 'b']: single quotes doubled.
 export const sqlList = (values) => values.map(sqlLit).join(', ');
 
-// A window on a date column: `left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
+// A window on a date column: `expr ~ <date pattern> and left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
 // characters of the stamp's own text (YYYY-MM-DD), so it is the LOCAL date: '2026-05-31T23:30:00+02:00' and
-// '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside. The parameters are YYYY-MM-DD.
+// '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside, and so is a stamp that does not start with a full date (a partial
+// FHIR dateTime such as '2026-07', which as text would sort inside a June to July window). The parameters are YYYY-MM-DD.
 // `extraDays` moves the end of the window later by that many days, for the v1 reports that add a day to
 // their end date (the dashboard procedures run @EDate = dateadd(dd, 1, @EDate)). It is 0 for every other caller.
 export function inRange(expr, fromParam = 'from', toParam = 'to', extraDays = 0) {
   if (!Number.isInteger(extraDays) || extraDays < 0) throw new Error('inRange: extraDays must be a whole number, 0 or more');
   const end = extraDays === 0 ? `{{param.${toParam}}}` : `to_char(({{param.${toParam}}})::date + ${extraDays}, 'YYYY-MM-DD')`;
-  return `left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= ${end}`;
+  return `${expr} ~ ${DATE_START} and left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= ${end}`;
 }
 
 // ---- Parameters ----
@@ -70,6 +71,16 @@ export function areaFilter(ids = {}, fmAlias = 'fmr') {
   if (ids.facility) parts.push(`(${blank(ids.facility)} or lower(rtrim(${fmAlias}.name)) = lower(rtrim({{param.${ids.facility}}})))`);
   return parts.length > 0 ? parts.join('\n    and ') : 'true';
 }
+
+// Area parameters of the dashboard-style reports, which take the area as optional parameters on the mapped names (not areaFilter's
+// register row). An optional parameter arrives as '' when blank. `same` matches a column on a parameter the way SQL Server compares
+// text (case and trailing spaces ignored) and passes everything when the parameter is blank.
+export const given = (id) => `{{param.${id}}} <> ''`;
+export const blank = (id) => `{{param.${id}}} = ''`;
+export const same = (column, id) => `(${blank(id)} or ${foldSql(column)} = ${foldSql(`{{param.${id}}}`)})`;
+// v1's `sum(case when <cond> then 1 else 0 end)`, and a float division with a zero guard (nullif).
+export const count1 = (cond) => `sum(case when ${cond} then 1 else 0 end)`;
+export const ratio = (top, bottom) => `(${top})::float8 / nullif(${bottom}, 0)`;
 
 // The two request attributes of the v1 ART number, one row per request. Returns a CTE item
 // `name as (...)` to put in a `with` list.
@@ -567,7 +578,8 @@ export const copyAgeGroupSql = (yearsExpr) => {
 // lab id, the same request facts. The builders below call these; each helper returns SQL text.
 
 // The `from`/`to` window of a builder: `prefilter` goes in the source CTE (it keeps every row of the
-// lab ids that have a report issued in the window, so the dedupe sees them all) and `finalRange` goes
+// lab ids that have a report issued in the window, so the dedupe sees them all; lab ids match as SQL Server compares text, ignoring
+// case and trailing spaces) and `finalRange` goes
 // after the dedupe. Both are '' without a window. Giving only one of the two throws. `finalDate` is the
 // date column `finalRange` tests (a builder with no dedupe passes its own source column). `extraDays` moves
 // the end of both windows later (see inRange).
@@ -575,7 +587,7 @@ export function copyWindow(who, from, to, finalDate = 'r.tested_date', extraDays
   if ((from === undefined) !== (to === undefined)) throw new Error(`${who}: give both from and to, or neither`);
   if (from === undefined) return { prefilter: '', finalRange: '' };
   return {
-    prefilter: `and lr.request_id in (select lr2.request_id from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to, extraDays)})`,
+    prefilter: `and ${foldSql('lr.request_id')} in (select ${foldSql('lr2.request_id')} from lab_requests lr2 join diagnostic_reports dr2 on dr2.based_on_id = lr2.id where ${inRange('dr2.issued', from, to, extraDays)})`,
     finalRange: `and ${inRange(finalDate, from, to, extraDays)}`,
   };
 }
@@ -600,7 +612,9 @@ export const reportSourceSql = ({ columns, where, prefilter }) => `select lr.id 
 
 // The dedupe order (sp_remove_dupsHIVVLEID): earliest tested date per lab id, NULL first as SQL Server sorts.
 // Ties go to the request, report and result row ids; v1 keeps either one. `seq = 1` is the kept row.
-export const rankedSql = (srcName) => `select s.*, row_number() over (partition by s.lab_id order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
+// v1 partitions on RequestID in its Latin1_General_CI_AS collation, so lab ids that differ only in case or trailing spaces are one lab id
+// ('ABC123' and 'abc123 '): the partition is on the folded id, and the kept row keeps its own spelling.
+export const rankedSql = (srcName) => `select s.*, row_number() over (partition by ${foldSql('s.lab_id')} order by ${localTs('s.tested_date')} nulls first, s.request_row_id, s.report_row_id, s.result_row_id) as seq
     from ${srcName} s`;
 
 // v1's gender case of the copy tables: F, M, I and U only; everything else is NULL.
@@ -733,7 +747,7 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false }
     ${rankedSql(`${name}_src`)}
   ),
   ${name}_flags as (
-    select q.request_id as lab_id,
+    select ${foldSql('q.request_id')} as lab_key,
       max(case when ${inListSql('a.vpreg', YES_WORDS)} or ${inListSql('a.artpr', YES_WORDS)} or ${inListSql('a.artrs', ['Pregnant Mother'])} then 1 end) as pregnant,
       max(case when ${inListSql('a.vbrea', YES_WORDS)} or ${inListSql('a.artbr', YES_WORDS)} or ${inListSql('a.artrs', ['Lactating Mother'])} then 1 end) as breastfeeding,
       max(case when a.artrs ilike '%Base%' or (q.panel_code = 'RTRI' and exists (select 1 from lab_results x where x.request_id = q.id)) then 1 end) as baseline_vl,
@@ -743,8 +757,8 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false }
       ${formAnswerSql('q.id', 'ARTPR')} as artpr, ${formAnswerSql('q.id', 'VPREG')} as vpreg,
       ${formAnswerSql('q.id', 'ARTBR')} as artbr, ${formAnswerSql('q.id', 'VBREA')} as vbrea,
       ${formAnswerSql('q.id', 'ARTRS')} as artrs, ${formAnswerSql('q.id', 'VISIT')} as visit) a
-    where q.request_id in (select s.lab_id from ${name}_src s)
-    group by q.request_id
+    where ${foldSql('q.request_id')} in (select ${foldSql('s.lab_id')} from ${name}_src s)
+    group by ${foldSql('q.request_id')}
   )
   select r.province, r.district, r.facility, r.lab_id,
     ${genderFmiuSql('r.sex')} as gender,
@@ -763,7 +777,7 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false }
     case when c.is_poc then 1 else 0 end as poc,
     case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
   from ${name}_ranked r
-  left join ${name}_flags f on f.lab_id = r.lab_id
+  left join ${name}_flags f on f.lab_key = ${foldSql('r.lab_id')}
   cross join lateral (select
     ${rowFactsSql('r')}) c
   where r.seq = 1
