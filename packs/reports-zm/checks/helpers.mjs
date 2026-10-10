@@ -8,6 +8,7 @@ import {
 } from '../zm-sql.mjs';
 import { dateErrorSuites } from './epi-fixture.mjs';
 import { zmQueryFile } from '../zm-queries.mjs';
+import { allQueries } from '../all-queries.mjs';
 
 const bind = (sqlText, params) => Object.entries(params)
   .reduce((s, [k, v]) => s.replaceAll(`{{param.${k}}}`, `'${v.replace(/'/g, "''")}'`), sqlText);
@@ -496,6 +497,52 @@ const numberCases = [
 suites30c.push(evalSuite('number-of-text', numberCases.map(([expr, want]) => ({
   expr: `(${numberOfTextSql(expr)})::text`, params: {}, want: want === null ? 'ok (null)' : `ok ${want}`, label: expr,
 }))));
+// Item H: every select parameter's optionsSql ends with a total ORDER BY, and the fixed lists come out in the order written (the first value is
+// the one a picker shows first). A UNION ALL has no defined row order, so a list in it can come out in any order; a plain test cannot see
+// that, so the first check reads the text: the statement must end with ORDER BY on one column. The second runs each fixed list (the province
+// and district pickers read the register and have their own suites) and compares the values in order, and that the result has one column.
+const optionParams30 = allQueries().flatMap((q) => (q.params ?? []).filter((p) => p.optionsSql).map((p) => ({ query: q.name, param: p })));
+const LISTS_30 = {
+  pregnant_only: ['no', 'yes'],
+  rows: ['Totals', 'One row per sub-area'],
+  list: ['All requests', 'Under 2 years, no rejected requests'],
+  show: ['all', 'tested', 'positive'],
+  version: ['standard', 'Levy'],
+};
+const listFor30 = (query, id) => {
+  if (id === 'test_type') return query === 'Date completeness by lab facility' ? ['EID', 'VL'] : ['all', 'EID', 'VL'];
+  if (id === 'laboratory') return query === 'Wastewater results' ? ['Six Lusaka sites', 'CHAZ Laboratory'] : ['Levy Mwanawasa (ZFP)', 'Livingstone (ZLP)', 'Ndola (ZNP)', 'UTH (ZU_)'];
+  return LISTS_30[id];
+};
+suites30c.push({
+  name: 'options-order-by',
+  count: optionParams30.length,
+  check() {
+    return optionParams30.flatMap(({ query, param }) => {
+      const sqlText = param.optionsSql.replace(/'(?:[^']|'')*'/g, "''").trim();
+      return /\border by [a-z_][a-z_0-9.]*( (asc|desc))?$/i.test(sqlText) ? [] : [`${query}.${param.id}: optionsSql must end with ORDER BY on one column: ${param.optionsSql}`];
+    });
+  },
+});
+const fixedLists30 = [...new Map(optionParams30.filter(({ param }) => !/^select distinct /.test(param.optionsSql)).map((o) => [`${o.query}.${o.param.id}`, o])).values()];
+for (const { query, param } of fixedLists30) {
+  const name = `options-${param.id}-${query}`;
+  const want = listFor30(query, param.id);
+  suites30c.push({
+    name,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(o)::text from (${param.optionsSql}) o;`,
+    count: 2,
+    check(rows) {
+      if (!want) return [`no expected list for ${query}.${param.id}`];
+      const keys = new Set(rows.flatMap((r) => Object.keys(r)));
+      const bad = [];
+      if (keys.size !== 1 || !keys.has(param.id) && !keys.has('choice')) bad.push(`expected one column, got ${[...keys].join(', ')}`);
+      const got = rows.map((r) => Object.values(r)[0]);
+      if (JSON.stringify(got) !== JSON.stringify(want)) bad.push(`expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
+      return bad;
+    },
+  });
+}
 // Slice 1's query (VL clients by province) is not in an area file.
 suites30c.push(...dateErrorSuites('t30c-slice1', zmQueryFile().queries));
 

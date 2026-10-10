@@ -4,7 +4,7 @@ import { inListSql, rpt, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey,
   inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql, likeVarcharSql,
-  dateParamSql,
+  dateParamSql, optionsListSql,
 } from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
@@ -582,7 +582,7 @@ export const eidResultsParams = () => [
   ...dateParams(true),
   {
     id: 'list', label: 'List (blank for all requests)', type: 'select', required: false,
-    optionsSql: `select 'All requests' as list union all select ${sqlLit(EID_RESULTS_V_LIST)}`,
+    optionsSql: optionsListSql('list', ['All requests', EID_RESULTS_V_LIST]),
   },
 ];
 

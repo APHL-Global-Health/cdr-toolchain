@@ -3,7 +3,7 @@
 import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
-  requesterJoin, sqlLit, ssTextKey, testingCodeSql, hmisCodeSql, registryRowJoin,
+  requesterJoin, sqlLit, ssTextKey, testingCodeSql, hmisCodeSql, registryRowJoin, optionsListSql,
   dateParamSql,
 } from '../zm-sql.mjs';
 
@@ -210,7 +210,7 @@ export const sourceStatsParams = () => [
   laboratoryParam(),
   {
     id: 'show', label: 'Show facilities: all, positive (with positives, v1 PSources) or tested (tested and positive, v1 TSources); blank is all', type: 'select', required: false,
-    optionsSql: "select 'all' as show union all select 'tested' union all select 'positive'",
+    optionsSql: optionsListSql('show', ['all', 'tested', 'positive']),
   },
 ];
 
@@ -520,7 +520,7 @@ export const lineListParams = () => [
   { id: 'to', label: 'To, date and time (YYYY-MM-DDTHH:MM, local time; v1 ran to today 04:00)', type: 'text', required: true },
   {
     id: 'version', label: 'Version: standard (default; window on the date the result was reported) or Levy (window on the date tested, patient optional, shorter result list)',
-    type: 'select', required: false, optionsSql: "select 'standard' as version union all select 'Levy'",
+    type: 'select', required: false, optionsSql: optionsListSql('version', ['standard', 'Levy']),
   },
   {
     id: 'facility', label: 'Requesting facility code (blank: standard shows all facilities, Levy shows LVCVD and LPMGH; a code given replaces both)',
@@ -973,7 +973,7 @@ export const wastewaterParams = () => [
   {
     id: 'laboratory', type: 'select', required: false,
     label: 'Laboratory (blank or Six Lusaka sites: the six sites of v1 WasteWaterData, any lab; CHAZ Laboratory: every site of that lab, v1 WastewaterDataCHAZ)',
-    optionsSql: `select 'Six Lusaka sites' as laboratory union all select ${sqlLit(CHAZ)}`,
+    optionsSql: optionsListSql('laboratory', ['Six Lusaka sites', CHAZ]),
   },
 ];
 

@@ -60,6 +60,12 @@ export const provinceOptionsSql = (registerUrl) =>
 export const districtOptionsSql = (registerUrl) =>
   `select distinct district from facility_registry where facility_system = ${sqlLit(registerUrl)} and register_state = 'in_register' and district is not null and district <> '' order by district`;
 
+// The picker query of a fixed choice list: one column named `column`, the values in the order given. A UNION ALL has no defined row order,
+// so each value carries its position and the query ends with ORDER BY on it (the position is not a column of the result). The first value
+// is the one a picker shows first, which is the default where a query names one ('all', 'standard', 'Totals').
+export const optionsListSql = (column, values) =>
+  `select t.${column} from (values ${values.map((v, i) => `(${i + 1}, ${sqlLit(v)})`).join(', ')}) as t(o, ${column}) order by t.o`;
+
 export const provinceParam = (id = 'province', required = false, registerUrl = ZM_REGISTER_URL) =>
   ({ id, label: 'Province (blank for all)', type: 'select', required, optionsSql: provinceOptionsSql(registerUrl) });
 export const districtParam = (id = 'district', required = false, registerUrl = ZM_REGISTER_URL) =>

@@ -4,7 +4,7 @@ import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-qu
 import {
   dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, optionalWindowSql, provinceParam, recencyCte,
   recencySurveillanceCte, requesterJoin, requestAttrSql, sqlLit, ssTextKey, testingCodeSql, tndCte,
-  dateParamSql,
+  dateParamSql, optionsListSql,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -884,7 +884,7 @@ order by ${orderBy}`;
 export const astParams = () => [
   {
     id: 'laboratory', label: 'Laboratory', type: 'select', required: true,
-    optionsSql: AST_LABS.map((l, i) => (i === 0 ? `select ${sqlLit(l)} as laboratory` : `select ${sqlLit(l)}`)).join(' union all '),
+    optionsSql: optionsListSql('laboratory', AST_LABS),
   },
   ...dateParams(true),
 ];

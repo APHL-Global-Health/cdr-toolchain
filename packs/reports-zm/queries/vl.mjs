@@ -5,7 +5,7 @@ import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
-  dateParamSql, dateTextParamSql,
+  dateParamSql, dateTextParamSql, optionsListSql,
 } from '../zm-sql.mjs';
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
@@ -723,7 +723,7 @@ order by ${ssTextKey('x.province')} collate "C" nulls first, ${ssTextKey('x.dist
 // pregnant_only is a select with the two answers; blank counts as no.
 const pregnantOnlyParam = () => ({
   id: 'pregnant_only', label: 'Pregnant clients only (yes or no)', type: 'select', required: false,
-  optionsSql: "select 'no' as pregnant_only union all select 'yes'",
+  optionsSql: optionsListSql('pregnant_only', ['no', 'yes']),
 });
 
 export const historyParams = () => [
@@ -1042,7 +1042,7 @@ order by ${ssTextKey('g."Province"')} collate "C" nulls first, ${ssTextKey('g."D
 
 const uniqueRowsParam = () => ({
   id: 'rows', label: 'Rows (blank for totals)', type: 'select', required: false,
-  optionsSql: "select 'Totals' as choice union all select 'One row per sub-area'",
+  optionsSql: optionsListSql('choice', ['Totals', 'One row per sub-area']),
 });
 
 export const uniqueClientsParams = () => [

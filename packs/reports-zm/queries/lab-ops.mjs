@@ -4,7 +4,7 @@ import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-qu
 import {
   ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
   optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql, vleidRequestsCte,
-  dateParamSql,
+  dateParamSql, optionsListSql,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -1147,7 +1147,7 @@ order by ${ssTextKey('g.province')} collate "C" nulls first, g.province collate 
 export const rejectionsByReasonParams = () => [
   {
     id: 'test_type', label: 'Test type: all (blank), EID (panel HIVPC) or VL (panels HIVVL and VIRAL, dated by collection date else registered date)',
-    type: 'select', required: false, optionsSql: "select 'all' as test_type union all select 'EID' union all select 'VL'",
+    type: 'select', required: false, optionsSql: optionsListSql('test_type', ['all', 'EID', 'VL']),
   },
   ...windowParams(),
 ];
@@ -1787,7 +1787,7 @@ const completenessTypeParam = (withAll) => ({
     : 'Test type: EID (panel HIVPC) or VL (panels HIVVL and VIRAL)',
   type: 'select',
   required: !withAll,
-  optionsSql: withAll ? "select 'all' as test_type union all select 'EID' union all select 'VL'" : "select 'EID' as test_type union all select 'VL'",
+  optionsSql: withAll ? optionsListSql('test_type', ['all', 'EID', 'VL']) : optionsListSql('test_type', ['EID', 'VL']),
 });
 
 export function queries() {
