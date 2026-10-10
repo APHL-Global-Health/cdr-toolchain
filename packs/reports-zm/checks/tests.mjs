@@ -906,8 +906,491 @@ const suites17 = [
   shapeSuite17('rs-shape', SURVEILLANCE_17, NEEDLES_SURV_17),
 ];
 
+// ======================================================================
+// Group t18: DBS monitoring (VL and EID)
+// ======================================================================
+//
+// "v1 line N" is a line of StoredProcedure__dbo_sp_CIDRZ_DBS_Monitoring.sql. Fixture ids start with "t18-"; lab numbers with "T18-".
+// The main window is May 2026 (blank province, then Southern, Northern, Lusaka and Copperbelt); September 2026 holds the row order.
+//
+// The expected rows are worked out by hand from the v1 text. A row says which runs it belongs to: by default a row is in the blank
+// run when its province is one of v1's five (ignoring case and trailing spaces) and in a province run when the province is that one;
+// the cross-province labs name their runs by hand.
+//
+// A lab that tests the unclear texts (v1 lines 71-123) is a PAIR: request A (an old numeric result, issued before the window, so it
+// is not a row itself but it is the row the hivvl table keeps) and request B (the result under test, issued in the window). The
+// "valid" row of B takes its dates and its specimen from the hivvl table (A's dates); the "unclear" row takes B's own. The two rows
+// differ, so a wrong list shows as an extra row. (With one request the two rows are identical and UNION would hide the mistake.)
+
+const DBS_18 = 'DBS monitoring (VL and EID)';
+const COLUMNS_18 = ['Province', 'District', 'Facility', 'LabID', 'CollectedDate', 'ReceivedDate', 'RegisteredDate', 'ResultDate',
+  'Result', 'SpecimenType', 'Test', 'RejectionReason'];
+const fold18 = (s) => s.replace(/ +$/, '').toLowerCase();
+const FIVE_18 = ['Lusaka', 'Southern', 'Eastern', 'Western', 'North-Western'].map(fold18);
+
+// code, register name, province, district. ZUNMP is in the map but not in the register; ZNORG is in the register with no province.
+const FAC_18 = {
+  SOUTH: ['ZSOUT', 'Choma General Hospital', 'Southern', 'Choma'],
+  LUSAKA: ['ZLUSA', 'Chilenje Clinic', 'Lusaka', 'Lusaka'],
+  EAST: ['ZEAST', 'Chipata Central', 'Eastern', 'Chipata'],
+  WEST: ['ZWEST', 'Mongu General', 'Western', 'Mongu'],
+  NW: ['ZNWES', 'Solwezi General', 'North-Western', 'Solwezi'],
+  NORTH: ['ZNORT', 'Kasama General', 'Northern', 'Kasama'],
+  COPPER: ['ZCOPP', 'Ndola Central', 'Copperbelt', 'Ndola'],
+  EAST2: ['ZEAS2', 'Chadiza Clinic', 'eastern ', 'Chadiza'],
+  EAST3: ['ZEAS3', 'Chipata Central ', 'eastern ', 'Chipata'],
+  LUSAKA2: ['ZLUS2', 'CHILENJE CLINIC ', 'LUSAKA', 'lusaka '],
+  UNMAPPED: ['ZUNMP', null, null, null],
+  NOREGION: ['ZNORG', 'No Region Clinic', null, null],
+};
+const facilityMap18 = () => `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ${Object.entries(FAC_18).map(([k, [code, name, region, district]]) => `(${lit(`t18-fm-${k}`)}, '', '', ${lit(code)}, ${k === 'UNMAPPED' ? 'null::text' : lit(`reg-t18-${k}`)}, ${lit(name)}, ${lit(region)}, ${lit(district)})`).join(',\n  ')};`;
+
+// What one request row holds unless a case says otherwise: a final viral load request with a numeric result and a dried blood spot.
+const REQ_18 = {
+  panel: 'HIVVL', fac: 'SOUTH', authored: '2026-05-02T08:00:00Z', analysis: '2026-05-02T09:00:00Z', status: 'final',
+  eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z', recv: '2026-05-02T10:00:00Z', type: 'DBS', specimen: true, report: true,
+  reason: null, results: [{ obs: 'HIVVL', num: 540 }],
+};
+// A request v1 rejected: a cancelled report with no result, registered in the window.
+const CANC_18 = { status: 'cancelled', authored: '2026-05-05T08:00:00Z', eff: '2026-05-04T08:00:00Z', iss: null, recv: '2026-05-05T09:00:00Z', results: [] };
+// An EID request: a final HIVPC result.
+const EID_18 = { panel: 'HIVPC', authored: '2026-05-04T08:00:00Z', eff: '2026-05-03T07:00:00Z', iss: '2026-05-14T10:00:00Z', recv: '2026-05-04T10:00:00Z', results: [{ obs: 'HIVPC', text: 'Positive' }] };
+
+function makeFixture18() {
+  const requests = [];
+  const reports = [];
+  const specimens = [];
+  const results = [];
+  let seq = 0;
+  const pad = (n) => String(n).padStart(3, '0');
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+  return {
+    req(lab, o = {}) {
+      const r = { ...REQ_18, ...o };
+      seq += 1;
+      const qid = `t18-q${pad(seq)}`;
+      requests.push(`(${lit(qid)}, ${lit(lab)}, ${lit(r.panel)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${lit(FAC_18[r.fac][0])}, ${lit(r.reason)}, ${seq})`);
+      if (r.report !== false) {
+        let sid = null;
+        if (r.specimen !== false) {
+          sid = `t18-s${pad(seq)}`;
+          specimens.push(`(${lit(sid)}, ${lit(r.recv)}, ${lit(r.type)})`);
+        }
+        reports.push(`(${lit(`t18-d${pad(seq)}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.eff)}, ${lit(r.iss)}, ${lit(sid)})`);
+      }
+      r.results.forEach((x, j) => {
+        results.push(`(${lit(`t18-r${pad(seq)}-${j + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)}, ${num(x.num)}, ${lit(x.cmp ?? null)})`);
+      });
+    },
+    setup() {
+      return `${facilityMap18()}
+insert into specimens (id, received_time, type_code) values ${specimens.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, rejection_reason, obr_set_id) values ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, specimen_id) values ${reports.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${results.join(',\n  ')};`;
+    },
+  };
+}
+
+const RUNS_18 = [
+  { name: 'all', province: '' }, { name: 'southern', province: 'Southern' }, { name: 'northern', province: 'northern ' },
+  { name: 'lusaka', province: 'Lusaka' }, { name: 'copper', province: 'Copperbelt' },
+];
+const defaultRuns18 = (province) => RUNS_18
+  .filter((r) => (r.province === '' ? FIVE_18.includes(fold18(province)) : fold18(r.province) === fold18(province))).map((r) => r.name);
+
+const f18 = makeFixture18();
+const want18 = [];
+const T18 = { dbs: 'Dry Blood Spot', blood: 'Blood', whole: 'Whole Blood', plasma: 'Plasma', none: 'Unrecorded', other: 'Other' };
+
+// One expected row. `reason` and `runs` are optional.
+function out18(fac, lab, collected, received, registered, resultDate, result, type, test, reason = null, runs = null) {
+  const [, name, region, district] = FAC_18[fac];
+  want18.push({
+    runs: runs ?? defaultRuns18(region),
+    row: { Province: region, District: district, Facility: name, LabID: lab, CollectedDate: collected, ReceivedDate: received, RegisteredDate: registered,
+      ResultDate: resultDate, Result: result, SpecimenType: type, Test: test, RejectionReason: reason },
+  });
+}
+const hasSpecimen18 = (r) => r.report !== false && r.specimen !== false;
+
+// A viral load lab with one request and one numeric result 540 (v1 valid part, lines 8-33). The hivvl row is the request itself.
+function valid18(lab, o = {}, e = {}) {
+  const r = { ...REQ_18, ...o };
+  f18.req(lab, o);
+  out18(r.fac, lab, r.eff, hasSpecimen18(r) ? r.recv : null, r.authored, r.iss, e.result ?? '540', e.type, 'VL', e.reason ?? null, e.runs ?? null);
+}
+// A rejected request (v1 rejects part, lines 34-70; EID lines 164-201): a cancelled report registered in the window.
+function reject18(lab, o = {}, e = {}) {
+  const r = { ...REQ_18, ...CANC_18, ...o };
+  f18.req(lab, { ...CANC_18, ...o });
+  out18(r.fac, lab, r.eff, hasSpecimen18(r) ? r.recv : null, r.authored, r.iss, 'REJECTED', e.type ?? T18.dbs, e.test ?? 'VL', e.reason ?? null, e.runs ?? null);
+}
+// An EID lab with one request (v1 Evalid, lines 135-163).
+function eid18(lab, o = {}, e = {}) {
+  const r = { ...REQ_18, ...EID_18, ...o };
+  f18.req(lab, { ...EID_18, ...o });
+  out18(r.fac, lab, r.eff, hasSpecimen18(r) ? r.recv : null, r.authored, r.iss, e.result === undefined ? 'Positive' : e.result, e.type ?? T18.dbs, 'EID', e.reason ?? null, e.runs ?? null);
+}
+// A pair (see the header). `text` is the result text of B; `e.valid` and `e.incs` say which rows B gives.
+const A18 = { authored: '2026-04-18T08:00:00Z', eff: '2026-04-17T07:00:00Z', iss: '2026-04-20T10:00:00Z', recv: '2026-04-19T10:00:00Z', results: [{ obs: 'HIVVL', num: 100 }] };
+const B18 = { authored: '2026-05-12T08:00:00Z', eff: '2026-05-11T07:00:00Z', iss: '2026-05-20T10:00:00Z', recv: '2026-05-13T10:00:00Z' };
+function pair18(lab, text, b = {}, e = {}) {
+  const fac = e.fac ?? 'SOUTH';
+  const rb = { ...REQ_18, ...B18, ...b };
+  f18.req(lab, { ...A18, fac });
+  f18.req(lab, { ...B18, fac, results: [{ obs: 'HIVVL', text }], ...b });
+  const valid = e.valid ?? true;
+  const incs = e.incs ?? true;
+  // valid row: A's dates (the hivvl row), B's result date, one row per specimen type of the lab's VL requests.
+  if (valid) for (const type of e.validTypes ?? [T18.dbs]) out18(fac, lab, A18.eff, A18.recv, A18.authored, rb.iss, text, type, 'VL', e.reason ?? null, e.runs ?? null);
+  // unclear row: B's own dates and its own specimen.
+  if (incs) out18(fac, lab, rb.eff, hasSpecimen18(rb) ? rb.recv : null, rb.authored, rb.iss, text, e.incsType ?? T18.dbs, 'VL', e.reason ?? null, e.runs ?? null);
+}
+
+// ---- Valid part: the specimen type (v1 lines 13-19), one lab per source code ----
+// A reason on a valid row is not shown (the re-join only works on REJECTED rows, lines 208-216).
+valid18('T18-TY-DBS', { reason: 'Ignored' }, { type: T18.dbs });
+valid18('T18-TY-DBSL', { type: 'dbs ' }, { type: T18.dbs });
+valid18('T18-TY-B', { type: 'B' }, { type: T18.blood });
+valid18('T18-TY-BLD', { type: 'BLD' }, { type: T18.blood });
+valid18('T18-TY-WB', { type: 'WB' }, { type: T18.whole });
+valid18('T18-TY-P', { type: 'P' }, { type: T18.plasma });
+valid18('T18-TY-PL', { type: 'p ' }, { type: T18.plasma });
+valid18('T18-TY-EMPTY', { type: '' }, { type: T18.none });
+valid18('T18-TY-SPACES', { type: '   ' }, { type: T18.none });
+valid18('T18-TY-X', { type: 'X' }, { type: T18.other });
+valid18('T18-TY-PLASMA', { type: 'PLASMA' }, { type: T18.other });
+valid18('T18-TY-NULL', { type: null }, { type: T18.other });
+valid18('T18-TY-NOSPEC', { specimen: false }, { type: T18.other });
+
+// ---- Valid part: rows with no hivvl row (lines 22-25) ----
+// An RTRI result is in tnd but not in hivvl: dates empty, and the Requests join is limited to the VL panels: 'Other', though the
+// specimen is a DBS.
+f18.req('T18-RTRI', { panel: 'RTRI', results: [{ obs: 'HIVVL', num: 120 }] });
+out18('SOUTH', 'T18-RTRI', null, null, null, REQ_18.iss, '120', T18.other, 'VL');
+// A text the hivvl table does not accept ('<883 copies/mL' is neither a valid text nor a number) but tnd keeps.
+f18.req('T18-NOHV', { results: [{ obs: 'HIVVL', text: '<883 copies/mL' }] });
+out18('SOUTH', 'T18-NOHV', null, null, null, REQ_18.iss, '<883 copies/mL', T18.other, 'VL');
+
+// ---- Valid part: several request rows of one lab number ----
+// Two specimen types: the join to Requests gives a row per request (lines 22-25), so two rows.
+f18.req('T18-TWO', { type: 'DBS' });
+f18.req('T18-TWO', { type: 'P' });
+out18('SOUTH', 'T18-TWO', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+out18('SOUTH', 'T18-TWO', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.plasma, 'VL');
+// Two requests with one type, spelled 'DBS' and 'dbs ': the same output row twice, which UNION removes.
+f18.req('T18-SAMETYPE', { type: 'DBS' });
+f18.req('T18-SAMETYPE', { type: 'dbs ' });
+out18('SOUTH', 'T18-SAMETYPE', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+// UNION compares text ignoring case and trailing spaces (v1 lines 127-129, 204, 212): two results of one lab that differ only in case and a trailing
+// space are one row. The shown spelling is the smaller one in byte order ('T' before 't'; v1 shows either).
+f18.req('T18-FOLD', { results: [{ obs: 'HIVVL', text: 'Target Not Detected' }] });
+f18.req('T18-FOLD', { results: [{ obs: 'HIVVL', text: 'target not detected ' }] });
+out18('SOUTH', 'T18-FOLD', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, 'Target Not Detected', T18.dbs, 'VL');
+// The same for the facility names: two register rows of one place spelled differently ('LUSAKA' sorts before 'Lusaka').
+f18.req('T18-FOLDFAC', { fac: 'LUSAKA' });
+f18.req('T18-FOLDFAC', { fac: 'LUSAKA2' });
+out18('LUSAKA2', 'T18-FOLDFAC', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL', null, ['all', 'lusaka']);
+// And for the lab number: 'T18-LID' and 't18-lid ' are one lab number (one hivvl row, one output row).
+f18.req('T18-LID', {});
+f18.req('t18-lid ', {});
+out18('SOUTH', 'T18-LID', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+
+// ---- Valid part: the window is the result date, as a local date (lines 28-29) ----
+valid18('T18-W-START', { iss: '2026-05-01T00:30:00+02:00' }, { type: T18.dbs });
+valid18('T18-W-END', { iss: '2026-05-31T23:30:00+02:00' }, { type: T18.dbs });
+f18.req('T18-W-AFTER', { iss: '2026-06-01T00:30:00+02:00' });
+f18.req('T18-W-BEFORE', { iss: '2026-04-30T23:30:00+02:00' });
+f18.req('T18-W-PARTIAL', { iss: '2026-05' });
+
+// ---- The province (line 27): v1's five, or the one given ----
+valid18('T18-P-LUSAKA', { fac: 'LUSAKA' }, { type: T18.dbs });
+valid18('T18-P-EAST', { fac: 'EAST' }, { type: T18.dbs });
+valid18('T18-P-WEST', { fac: 'WEST' }, { type: T18.dbs });
+valid18('T18-P-NW', { fac: 'NW' }, { type: T18.dbs });
+valid18('T18-P-EAST2', { fac: 'EAST2' }, { type: T18.dbs });
+valid18('T18-P-NORTH', { fac: 'NORTH' }, { type: T18.dbs });
+valid18('T18-P-COPPER', { fac: 'COPPER' }, { type: T18.dbs });
+f18.req('T18-P-UNMAPPED', { fac: 'UNMAPPED' });
+f18.req('T18-P-NOREGION', { fac: 'NOREGION' });
+
+// ---- Rejected part (lines 34-70) ----
+reject18('T18-RJ-1', { type: 'B', reason: 'Insufficient volume' }, { type: T18.blood, reason: 'Insufficient volume' });
+reject18('T18-RJ-NOREASON', { type: 'P' }, { type: T18.plasma });
+reject18('T18-RJ-BLANK', { type: 'WB', reason: '   ' }, { type: T18.whole });        // len() ignores trailing spaces: length 0, no reason
+reject18('T18-RJ-EMPTY', { type: '', reason: '' }, { type: T18.none });
+reject18('T18-RJ-POCVR', { panel: 'POCVR', type: 'BLD', reason: 'Clotted' }, { type: T18.blood, reason: 'Clotted' });
+reject18('T18-RJ-POHVL', { panel: 'POHVL', reason: 'Haemolysed' }, { reason: 'Haemolysed' });
+// The result date is shown when the report has one; a report with no specimen has no received date and the type 'Other'.
+reject18('T18-RJ-ISSUED', { iss: '2026-05-12T10:00:00Z', specimen: false }, { type: T18.other });
+// A lab with several request rows: one reason per distinct reason of its VL-panel rows (any status, any facility, even unmapped),
+// not those of an EID panel, not a blank one; 'Leaked' and 'leaked ' are one reason.
+reject18('T18-RJ-MULTI', { reason: 'Leaked' }, { reason: 'Leaked' });
+f18.req('T18-RJ-MULTI', { report: false, reason: 'leaked ' });
+f18.req('T18-RJ-MULTI', { panel: 'POHVL', report: false, reason: 'Spoiled', fac: 'UNMAPPED' });
+f18.req('T18-RJ-MULTI', { panel: 'HIVPC', report: false, reason: 'EID only' });
+f18.req('T18-RJ-MULTI', { panel: 'POCVR', report: false, reason: '   ' });
+out18('SOUTH', 'T18-RJ-MULTI', CANC_18.eff, CANC_18.recv, CANC_18.authored, null, 'REJECTED', T18.dbs, 'VL', 'Spoiled');
+// A result text of 'REJECTED' (any case) gets the reason too (line 211: the join tests Result = 'REJECTED'), 'Rejection' does not.
+pair18('T18-I-REJ', 'rejected ', { reason: 'Clotted2' }, { reason: 'Clotted2' });
+pair18('T18-I-REJ2', 'Rejection', { reason: 'NotUsed' });
+// A status other than cancelled (v1 also takes Y and Z, which CE cannot tell from the other statuses) is not rejected.
+f18.req('T18-RJ-UNKNOWN', { ...CANC_18, status: 'unknown' });
+// Not rejected when the lab number has a valid result in the window and province (line 69)...
+f18.req('T18-RJ-VALID', { ...CANC_18, reason: 'Excluded' });
+valid18('T18-RJ-VALID', {}, { type: T18.dbs });
+// ...but only a valid result in the window: a result issued in June does not count.
+reject18('T18-RJ-VALIDOUT', { type: 'P' }, { type: T18.plasma });
+f18.req('T18-RJ-VALIDOUT', { iss: '2026-06-10T10:00:00Z' });
+// ...and only one in the province asked for: rejected in Lusaka with a valid result in Northern, and the reverse. The valid
+// rows show one row per specimen type of the lab's VL requests (the cancelled request's too).
+f18.req('T18-RJ-XPROV', { ...CANC_18, fac: 'LUSAKA', type: 'B' });
+f18.req('T18-RJ-XPROV', { fac: 'NORTH' });
+out18('LUSAKA', 'T18-RJ-XPROV', CANC_18.eff, CANC_18.recv, CANC_18.authored, null, 'REJECTED', T18.blood, 'VL');
+out18('NORTH', 'T18-RJ-XPROV', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.blood, 'VL');
+out18('NORTH', 'T18-RJ-XPROV', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+f18.req('T18-RJ-XPROV2', { ...CANC_18, fac: 'NORTH', type: 'B' });
+f18.req('T18-RJ-XPROV2', { fac: 'LUSAKA' });
+out18('NORTH', 'T18-RJ-XPROV2', CANC_18.eff, CANC_18.recv, CANC_18.authored, null, 'REJECTED', T18.blood, 'VL');
+out18('LUSAKA', 'T18-RJ-XPROV2', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.blood, 'VL');
+out18('LUSAKA', 'T18-RJ-XPROV2', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+// The lab numbers compare ignoring case and trailing spaces: a valid result under 't18-rj-case ' excludes the rejected 'T18-RJ-CASE', and
+// a reason on a request row of 't18-rj-rcase ' is the reason of 'T18-RJ-RCASE'.
+f18.req('T18-RJ-CASE', { ...CANC_18 });
+valid18('t18-rj-case ', {}, { type: T18.dbs });
+reject18('T18-RJ-RCASE', {}, { reason: 'Case reason' });
+f18.req('t18-rj-rcase ', { report: false, reason: 'Case reason' });
+// The window is the registered date (line 66), a local date.
+reject18('T18-RJ-W-START', { authored: '2026-05-01T00:30:00+02:00', type: 'WB' }, { type: T18.whole });
+reject18('T18-RJ-W-END', { authored: '2026-05-31T23:30:00+02:00', type: 'WB' }, { type: T18.whole });
+f18.req('T18-RJ-W-AFTER', { ...CANC_18, authored: '2026-06-01T00:30:00+02:00' });
+f18.req('T18-RJ-W-BEFORE', { ...CANC_18, authored: '2026-04-30T23:30:00+02:00' });
+f18.req('T18-RJ-W-PARTIAL', { ...CANC_18, authored: '2026-05' });
+// The province (line 68).
+reject18('T18-RJ-P-LUSAKA', { fac: 'LUSAKA', type: 'P' }, { type: T18.plasma });
+reject18('T18-RJ-P-NORTH', { fac: 'NORTH', type: 'P' }, { type: T18.plasma });
+f18.req('T18-RJ-P-UNMAPPED', { ...CANC_18, fac: 'UNMAPPED' });
+f18.req('T18-RJ-P-NOREGION', { ...CANC_18, fac: 'NOREGION' });
+
+// ---- Unclear part (lines 71-123): final, not a number, not on the 14 texts ----
+const LIST14_18 = ['< 20', '<30 copies/mL', '<40 copies/mL', '> 10000000', 'DET', '>9999999', '> 9999999', '>9999999 copies/mL',
+  '> 9999999 copies/mL', 'NDET', 'PLTV', 'Target Not Detected', 'RNA Not Detected', '<883 copies/mL'];
+LIST14_18.forEach((t, i) => pair18(`T18-I-L${String(i + 1).padStart(2, '0')}`, t, {}, { incs: false }));
+['ndet ', '<30 COPIES/ML', 'rna not detected', 'det  '].forEach((t, i) => pair18(`T18-I-V${i + 1}`, t, {}, { incs: false }));
+// Near misses and unlisted texts are rows.
+pair18('T18-I-PTLTT', 'PTLTT');
+pair18('T18-I-NINES', '>99999999');
+pair18('T18-I-SPACES', '>  9999999');
+pair18('T18-I-PENDING', 'Pending');
+pair18('T18-I-REPEAT', 'Please repeat', {}, { valid: false });     // on tnd's invalid list: only the unclear part has it
+// The six observation codes (line 107).
+['HIVVL', 'HIVVC', 'HIVVD', 'HIVTM', 'POCVR', 'POCVC'].forEach((obs) => {
+  const lab = `T18-I-O-${obs}`;
+  f18.req(lab, { ...A18 });
+  f18.req(lab, { ...B18, results: [{ obs, text: 'PTLTT' }] });
+  out18('SOUTH', lab, A18.eff, A18.recv, A18.authored, B18.iss, 'PTLTT', T18.dbs, 'VL');
+  out18('SOUTH', lab, B18.eff, B18.recv, B18.authored, B18.iss, 'PTLTT', T18.dbs, 'VL');
+});
+f18.req('T18-I-O-X', { ...A18 });
+f18.req('T18-I-O-X', { ...B18, results: [{ obs: 'HIVVX', text: 'PTLTT' }] });
+f18.req('T18-I-O-CASE', { ...A18 });
+f18.req('T18-I-O-CASE', { ...B18, results: [{ obs: 'hivvc ', text: 'PTLTT' }] });
+out18('SOUTH', 'T18-I-O-CASE', B18.eff, B18.recv, B18.authored, B18.iss, 'PTLTT', T18.dbs, 'VL');
+// The three panels (line 102), and RTRI / EID panels are not unclear rows.
+pair18('T18-I-P-POHVL', 'PTLTT', { panel: 'POHVL' }, { valid: false });
+pair18('T18-I-P-POCVR', 'PTLTT', { panel: 'POCVR' }, { valid: false });
+pair18('T18-I-P-CASE', 'PTLTT', { panel: 'hivvl ' }, { valid: false });
+pair18('T18-I-P-RTRI', 'PTLTT', { panel: 'RTRI' }, { incs: false });
+pair18('T18-I-P-HIVPC', 'PTLTT', { panel: 'HIVPC' }, { valid: false, incs: false });
+// The window is the authorised date (lines 104-105), a local date.
+pair18('T18-I-W-START', 'PTLTT', { iss: '2026-05-01T00:30:00+02:00' });
+pair18('T18-I-W-END', 'PTLTT', { iss: '2026-05-31T23:30:00+02:00' });
+pair18('T18-I-W-AFTER', 'PTLTT', { iss: '2026-06-01T00:30:00+02:00' }, { valid: false, incs: false });
+pair18('T18-I-W-BEFORE', 'PTLTT', { iss: '2026-04-30T23:30:00+02:00' }, { valid: false, incs: false });
+pair18('T18-I-W-PARTIAL', 'PTLTT', { iss: '2026-05' }, { valid: false, incs: false });
+// A report that is not final is nothing (line 101).
+pair18('T18-I-STATUS', 'PTLTT', { status: 'unknown' }, { valid: false, incs: false });
+// A number (line 108: ISNUMERIC) is not an unclear result, in any form it takes.
+pair18('T18-I-NUM1', '5,000', {}, { incs: false });
+pair18('T18-I-NUM2', '1E3', {}, { incs: false });
+f18.req('T18-I-NUM3', { ...A18 });
+f18.req('T18-I-NUM3', { ...B18, results: [{ obs: 'HIVVL', num: 5000 }] });
+out18('SOUTH', 'T18-I-NUM3', A18.eff, A18.recv, A18.authored, B18.iss, '5000', T18.dbs, 'VL');
+// A result with nothing in it is no row.
+f18.req('T18-I-NULL', { ...A18 });
+f18.req('T18-I-NULL', { ...B18, results: [{ obs: 'HIVVL' }] });
+// The specimen of the unclear row is its own request's; the valid row has a row per type of the lab's VL requests.
+pair18('T18-I-TYPE', 'PTLTT', { type: 'P' }, { validTypes: [T18.dbs, T18.plasma], incsType: T18.plasma });
+pair18('T18-I-NOSPEC', 'PTLTT', { specimen: false }, { validTypes: [T18.dbs, T18.other], incsType: T18.other });
+// The province (line 121).
+pair18('T18-I-P-NORTH', 'PTLTT', {}, { fac: 'NORTH' });
+pair18('T18-I-P-LUSAKA', 'PTLTT', {}, { fac: 'LUSAKA' });
+pair18('T18-I-P-UNMAPPED', 'PTLTT', {}, { fac: 'UNMAPPED', valid: false, incs: false });
+
+// ---- The specimen types of a valid row come from the lab number's requests in the three VL panels (line 25) ----
+// A request of another status still counts (it is a Requests row); RTRI and EID-panel requests do not.
+f18.req('T18-SP-POHVL', {});
+f18.req('T18-SP-POHVL', { panel: 'POHVL', status: 'unknown', type: 'P', results: [] });
+out18('SOUTH', 'T18-SP-POHVL', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+out18('SOUTH', 'T18-SP-POHVL', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.plasma, 'VL');
+f18.req('T18-SP-POCVR', {});
+f18.req('T18-SP-POCVR', { panel: 'POCVR', status: 'unknown', type: 'WB', results: [] });
+out18('SOUTH', 'T18-SP-POCVR', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+out18('SOUTH', 'T18-SP-POCVR', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.whole, 'VL');
+f18.req('T18-SP-OTHER', {});
+f18.req('T18-SP-OTHER', { panel: 'RTRI', status: 'unknown', type: 'B', results: [] });
+f18.req('T18-SP-OTHER', { panel: 'HIVPC', status: 'unknown', type: 'WB', results: [] });
+f18.req('T18-SP-OTHER', { panel: 'pohvl ', status: 'unknown', type: 'BLD', results: [] });
+out18('SOUTH', 'T18-SP-OTHER', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.dbs, 'VL');
+out18('SOUTH', 'T18-SP-OTHER', REQ_18.eff, REQ_18.recv, REQ_18.authored, REQ_18.iss, '540', T18.blood, 'VL');
+
+// ---- EID (lines 135-206) ----
+// The result (lines 139-144): Positive, Negative, Indeterminate, Error; anything else, Invalid too, is empty.
+eid18('T18-E-POS', {}, { result: 'Positive' });
+eid18('T18-E-NEG', { results: [{ obs: 'HIVPC', text: 'Negative' }] }, { result: 'Negative' });
+eid18('T18-E-IND', { results: [{ obs: 'HIVPC', text: 'Indeterminate' }] }, { result: 'Indeterminate' });
+eid18('T18-E-ERR', { results: [{ obs: 'HIVPC', text: 'Error' }] }, { result: 'Error' });
+eid18('T18-E-INV', { results: [{ obs: 'HIVPC', text: 'Invalid' }] }, { result: null });
+eid18('T18-E-WEIRD', { results: [{ obs: 'HIVPC', text: 'Weird' }] }, { result: null });
+// The panels and observations of the eid table, and the Requests join on the three EID panels (lines 154-155).
+eid18('T18-E-POEID', { panel: 'POEID', type: 'WB', results: [{ obs: 'HIVPR', text: 'Negative' }] }, { result: 'Negative', type: T18.whole });
+eid18('T18-E-POCGH', { panel: 'POCGH', type: 'P', results: [{ obs: 'PGHIV', text: 'Positive' }] }, { type: T18.plasma });
+eid18('T18-E-CASE', { panel: 'hivpc ', results: [{ obs: 'hivpr ', text: 'Positive' }] });
+f18.req('T18-E-OBS', { ...EID_18, results: [{ obs: 'XYZ', text: 'Positive' }] });
+// Two request rows of one lab number: a row per specimen type among its EID-panel requests; the eid table keeps the earlier one.
+f18.req('T18-E-TWO', { ...EID_18 });
+f18.req('T18-E-TWO', { ...EID_18, panel: 'POEID', iss: '2026-05-20T10:00:00Z', type: 'P', results: [{ obs: 'HIVPC', text: 'Negative' }] });
+f18.req('T18-E-TWO', { ...EID_18, panel: 'HIVVL', status: 'unknown', type: 'B', results: [] });   // a VL-panel request: not in the join
+out18('SOUTH', 'T18-E-TWO', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.dbs, 'EID');
+out18('SOUTH', 'T18-E-TWO', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.plasma, 'EID');
+f18.req('T18-E-TWO2', { ...EID_18 });
+f18.req('T18-E-TWO2', { ...EID_18, panel: 'POCGH', iss: '2026-05-20T10:00:00Z', type: 'WB', results: [{ obs: 'PGHIV', text: 'Negative' }] });
+out18('SOUTH', 'T18-E-TWO2', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.dbs, 'EID');
+out18('SOUTH', 'T18-E-TWO2', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.whole, 'EID');
+// The eid table keeps the earliest tested row of the lab number: it is before the window, so nothing shows.
+f18.req('T18-E-DEDUP', { ...EID_18, iss: '2026-04-20T10:00:00Z' });
+f18.req('T18-E-DEDUP', { ...EID_18, iss: '2026-05-10T10:00:00Z' });
+// The window is the tested date (lines 160-161), a local date.
+eid18('T18-E-W-START', { iss: '2026-05-01T00:30:00+02:00' });
+eid18('T18-E-W-END', { iss: '2026-05-31T23:30:00+02:00' });
+f18.req('T18-E-W-AFTER', { ...EID_18, iss: '2026-06-01T00:30:00+02:00' });
+f18.req('T18-E-W-BEFORE', { ...EID_18, iss: '2026-04-30T23:30:00+02:00' });
+f18.req('T18-E-STATUS', { ...EID_18, status: 'unknown' });
+// The province (line 158).
+eid18('T18-E-P-LUSAKA', { fac: 'LUSAKA' });
+eid18('T18-E-P-NORTH', { fac: 'NORTH' });
+f18.req('T18-E-P-UNMAPPED', { ...EID_18, fac: 'UNMAPPED' });
+// EID rejected (lines 164-201): the EID panels HIVPC, POCGH and POEID, with the reason of the lab's EID-panel requests only.
+reject18('T18-E-RJ-HIVPC', { panel: 'HIVPC', reason: 'Dry spot damaged' }, { test: 'EID', reason: 'Dry spot damaged' });
+reject18('T18-E-RJ-POCGH', { panel: 'POCGH', reason: 'Wrong card', type: 'B' }, { test: 'EID', reason: 'Wrong card', type: T18.blood });
+reject18('T18-E-RJ-POEID', { panel: 'POEID', type: 'BLD' }, { test: 'EID', type: T18.blood });
+reject18('T18-E-RJ-X1', { panel: 'HIVPC' }, { test: 'EID' });
+f18.req('T18-E-RJ-X1', { panel: 'HIVVL', report: false, reason: 'VL reason' });       // a VL panel reason is not used
+reject18('T18-E-RJ-WIN', { panel: 'HIVPC', authored: '2026-05-31T23:30:00+02:00' }, { test: 'EID' });
+reject18('T18-E-RJ-WIN2', { panel: 'HIVPC', authored: '2026-05-01T00:30:00+02:00' }, { test: 'EID' });
+f18.req('T18-E-RJ-W-AFTER', { ...CANC_18, panel: 'HIVPC', authored: '2026-06-01T00:30:00+02:00' });
+f18.req('T18-E-RJ-W-BEFORE', { ...CANC_18, panel: 'HIVPC', authored: '2026-04-30T23:30:00+02:00' });
+f18.req('T18-E-RJ-UNKNOWN', { ...CANC_18, panel: 'HIVPC', status: 'unknown' });
+// Not rejected when the lab has a valid EID row in the window and province (line 200); lab numbers compare ignoring case and spaces.
+f18.req('T18-E-RJ-CASE', { ...CANC_18, panel: 'HIVPC' });
+eid18('t18-e-rj-case ', {}, {});
+f18.req('T18-E-RJ-VALID', { ...CANC_18, panel: 'HIVPC' });
+eid18('T18-E-RJ-VALID', {}, {});
+f18.req('T18-E-RJ-VALIDOUT', { ...EID_18, iss: '2026-06-10T10:00:00Z' });
+reject18('T18-E-RJ-VALIDOUT', { panel: 'HIVPC', type: 'P' }, { test: 'EID', type: T18.plasma });
+f18.req('T18-E-RJ-XPROV', { ...CANC_18, panel: 'HIVPC', fac: 'LUSAKA', type: 'B' });
+f18.req('T18-E-RJ-XPROV', { ...EID_18, fac: 'NORTH' });
+out18('LUSAKA', 'T18-E-RJ-XPROV', CANC_18.eff, CANC_18.recv, CANC_18.authored, null, 'REJECTED', T18.blood, 'EID');
+out18('NORTH', 'T18-E-RJ-XPROV', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.blood, 'EID');
+out18('NORTH', 'T18-E-RJ-XPROV', EID_18.eff, EID_18.recv, EID_18.authored, EID_18.iss, 'Positive', T18.dbs, 'EID');
+reject18('T18-E-RJ-NORTH', { panel: 'HIVPC', fac: 'NORTH' }, { test: 'EID' });
+f18.req('T18-E-RJ-UNMAPPED', { ...CANC_18, panel: 'HIVPC', fac: 'UNMAPPED' });
+
+// ---- Row order: the September window ----
+// v1 orders by Province, District, Facility (line 218), comparing as SQL Server does (case and trailing spaces ignored, so 'eastern '
+// is Eastern and the district decides). The port adds every other column so that paging is stable (NULL first).
+const SEPT_18 = { iss: '2026-09-10T10:00:00Z' };
+const ord18 = [];
+const ordRow18 = (fac, lab, result, test = 'VL') => {
+  const [, name, region, district] = FAC_18[fac];
+  ord18.push({ Province: region, District: district, Facility: name, LabID: lab, CollectedDate: REQ_18.eff, ReceivedDate: REQ_18.recv,
+    RegisteredDate: REQ_18.authored, ResultDate: SEPT_18.iss, Result: result, SpecimenType: T18.dbs, Test: test, RejectionReason: null });
+};
+f18.req('T18-O-1', { ...SEPT_18, fac: 'WEST' }); f18.req('T18-O-2', { ...SEPT_18, fac: 'EAST2' }); f18.req('T18-O-3', { ...SEPT_18, fac: 'EAST' });
+f18.req('T18-O-4', { ...SEPT_18, fac: 'EAST', results: [{ obs: 'HIVVL', num: 540 }, { obs: 'HIVVC', num: 100 }] });
+f18.req('T18-O-5', { ...SEPT_18, fac: 'NW' }); f18.req('T18-O-6', { ...SEPT_18, fac: 'LUSAKA' }); f18.req('T18-O-7', SEPT_18);
+f18.req('T18-O-0', { ...SEPT_18, fac: 'EAST' });
+f18.req('T18-O-8', { ...SEPT_18, fac: 'EAST3' });
+f18.req('T18-O-9', { ...SEPT_18, fac: 'EAST' });
+f18.req('T18-O-9', { ...EID_18, ...SEPT_18, eff: REQ_18.eff, recv: REQ_18.recv, authored: REQ_18.authored, fac: 'EAST', results: [{ obs: 'HIVPC', text: 'Invalid' }] });
+ordRow18('EAST2', 'T18-O-2', '540');
+ordRow18('EAST', 'T18-O-0', '540');
+ordRow18('EAST', 'T18-O-3', '540');
+ordRow18('EAST', 'T18-O-4', '100');
+ordRow18('EAST', 'T18-O-4', '540');
+ordRow18('EAST', 'T18-O-9', null, 'EID');
+ordRow18('EAST', 'T18-O-9', '540');
+// Same province, district and facility as far as SQL Server compares them, spelled differently: after them, whatever the lab number.
+ordRow18('EAST3', 'T18-O-8', '540');
+ordRow18('LUSAKA', 'T18-O-6', '540');
+ordRow18('NW', 'T18-O-5', '540');
+ordRow18('SOUTH', 'T18-O-7', '540');
+ordRow18('WEST', 'T18-O-1', '540');
+
+// ---- Suites ----
+const rowsFor18 = (run) => want18.filter((w) => w.runs.includes(run)).map((w) => w.row);
+const MAIN_18 = { from: '2026-05-01', to: '2026-05-31' };
+
+// The declared shape: parameters, a plain SELECT, and a total ORDER BY (CE pages a result with LIMIT and OFFSET).
+const shape18 = {
+  name: 'dbs-shape',
+  count: 14,
+  check() {
+    const query = query17(DBS_18);
+    if (!query) return [`query "${DBS_18}" is missing`];
+    const bad = [];
+    const ids = query.params.map((p) => p.id);
+    if (JSON.stringify(ids) !== JSON.stringify(['from', 'to', 'province'])) bad.push(`params: expected from, to, province; got ${ids}`);
+    const want = { from: ['text', true], to: ['text', true], province: ['select', false] };
+    for (const p of query.params) {
+      const w = want[p.id];
+      if (w && (p.type !== w[0] || p.required !== w[1])) bad.push(`${p.id}: expected ${w[0]} required=${w[1]}, got ${p.type} required=${p.required}`);
+    }
+    const province = query.params.find((p) => p.id === 'province');
+    if (province && !String(province.label).includes('blank for Lusaka, Southern, Eastern, Western and North-Western')) bad.push(`province label must name v1's five provinces: ${province.label}`);
+    if (province && !province.optionsSql) bad.push('province must have optionsSql');
+    const text = query.sql;
+    if (BANNED_17.test(text.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+    if (!/^\s*with\b/i.test(text)) bad.push('does not start with "with"');
+    for (const p of ['from', 'to', 'province']) if (!text.includes(`{{param.${p}}}`)) bad.push(`must use {{param.${p}}}`);
+    const at = text.lastIndexOf('order by');
+    if (at < 0) bad.push('must end with an ORDER BY');
+    else {
+      let pos = at;
+      for (const c of ['province', 'district', 'facility', 'lab_id', 'collected_date', 'received_date', 'registered_date', 'result_date', 'result', 'specimen_type', 'test', 'reason']) {
+        const i = text.indexOf(`dd.${c}`, pos);
+        if (i < 0) { bad.push(`ORDER BY must list dd.${c}, after the column before it`); break; }
+        pos = i + c.length;
+      }
+    }
+    return bad;
+  },
+};
+
+const suites18 = [
+  // The fixture rows go in the first suite only.
+  ...RUNS_18.map((run, i) => setSuite17(`dbs-${run.name}`, DBS_18, { ...MAIN_18, province: run.province }, COLUMNS_18, rowsFor18(run.name), i === 0 ? f18.setup() : '')),
+  setSuite17('dbs-empty', DBS_18, { from: '2030-01-01', to: '2030-12-31', province: '' }, COLUMNS_18, []),
+  orderedSuite('dbs-order', query17(DBS_18)?.sql ?? 'select 1', { from: '2026-09-01', to: '2026-09-30', province: '' }, COLUMNS_18, ord18),
+  shape18,
+];
+
+
 export const groups = [
   { name: 't5-recency', suites: recencySuites },
   { name: 't5-surveillance', suites: survSuites },
   { name: 't17', suites: suites17 },
+  { name: 't18', suites: suites18 },
 ];

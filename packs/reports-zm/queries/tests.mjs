@@ -1,7 +1,9 @@
 // Custom queries for the tests reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql } from '../../vl-reports-mz/vl-queries.mjs';
-import { dateParams, recencyCte, recencySurveillanceCte, requestAttrSql, ssTextKey } from '../zm-sql.mjs';
+import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import {
+  dateParams, eidCte, hivvlCte, inRange, provinceParam, recencyCte, recencySurveillanceCte, requesterJoin, requestAttrSql, ssTextKey, tndCte,
+} from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
 //
@@ -149,10 +151,224 @@ from rs
 order by ${orderItems(columns)}`;
 }
 
+// ---- DBS monitoring (VL and EID) ----------------------------------------------------------------------------------------
+//
+// Replaces sp_CIDRZ_DBS_Monitoring (and the saved-output table DBSMonitor, which has the same 12 columns and no reader). One row per
+// viral load or EID sample of last month: valid results, rejections, and viral load results that are not clear, with the specimen
+// type and the rejection reason. Columns, v1's 12 and their spelling: Province, District, Facility, LabID, CollectedDate,
+// ReceivedDate, RegisteredDate, ResultDate, Result, SpecimenType, Test, RejectionReason. Test is 'VL' or 'EID'. The five dates are
+// CE's ISO text (CollectedDate = diagnostic_reports.effective, ReceivedDate = specimens.received_time, RegisteredDate =
+// lab_requests.authored_at, ResultDate = diagnostic_reports.issued).
+//
+// Parameters (spec ruling 3):
+//   - `from` and `to` replace "last calendar month" (v1 lines 28-29, 66-67, 104-105, 160-161, 196-197: the first and the last day of the
+//     month before getdate()). Both ends are whole local days, both in. v1 has no dateadd on the end date, so no extra day. For a window
+//     of one calendar month the rows are v1's rows for that month.
+//   - `province` replaces the constant list Lusaka, Southern, Eastern, Western, North-Western (lines 27, 68, 121, 158, 199). Blank means
+//     that list, exactly as v1 lists it. A province given replaces the list (any province of the register, also one v1 leaves out). The
+//     label says so. Names compare ignoring case and trailing spaces, as SQL Server does.
+//
+// What v1 does, in five parts. Each part has the province test and its own window:
+//   VL valid    (lines 8-33) the TND copy table (tndCte) joined to the hivvl copy table (hivvlCte) on the lab number, windowed on the
+//               result date. Result is the TND result text. The three dates come from the hivvl row. TND holds RTRI results and
+//               texts that the hivvl table does not accept ('<883 copies/mL'): for those the hivvl row is missing, the three dates are
+//               empty and the specimen type is 'Other' (below).
+//   VL rejected (lines 34-70) requests with a rejected status (HL7 X, Y, Z), panel HIVVL, POCVR or POHVL, registered in the window,
+//               whose lab number is not among the VL valid rows (line 69: the window and province of VL valid). Result is 'REJECTED'.
+//   VL unclear  (lines 71-123) final results of those panels and of the observations HIVVL, HIVVC, HIVVD, HIVTM, POCVR, POCVC, authorised
+//               in the window, whose text is not a number and not one of 14 texts (the list below). There is no test against VL valid, so
+//               a lab number can have a valid row and an unclear row.
+//   EID valid   (lines 135-163) the eid copy table (eidCte) windowed on the tested date, joined to the lab number's requests in the EID
+//               panels HIVPC, POEID, POCGH. Result: Positive, Negative, Indeterminate or Error (in that order); an Invalid result or a text
+//               on no list gives an empty Result.
+//   EID rejected (lines 164-201) as VL rejected, with the EID panels and the EID valid rows.
+// The five parts are joined with UNION (lines 127, 129, 204, 212), so repeated rows go (below).
+//
+// The specimen type (lines 13-19, repeated in every part): LIMSSpecimenSourceCode DBS is 'Dry Blood Spot'; B and BLD are 'Blood'; WB is
+// 'Whole Blood'; P is 'Plasma'; an empty code (spaces too) is 'Unrecorded'; any other code, and a missing one, is 'Other'.
+//   - VL valid takes it from the Requests rows of the hivvl lab number in the three VL panels (line 25), so a lab number with several
+//     request rows gives a row per type, and a row with no hivvl row gets 'Other'. EID valid joins the EID-panel requests (inner join).
+//   - The other parts take it from the request row itself.
+//   - CE has no source code on the request. The port reads specimens.type_code of the specimen of the request's report
+//     (diagnostic_reports.specimen_id). A request with no report, or a report with no specimen, has no code: 'Other'.
+//
+// The rejection reason (lines 208-216). The last select joins Requests again on the lab number, the Result being 'REJECTED' (compared as
+// SQL Server does: any case), a reason with a length (len() ignores trailing spaces, so spaces only is none) and a panel of the test (the
+// three VL panels for a VL row, the three EID panels for an EID row). It takes the reason of EVERY such request row of the lab number: any
+// status, any date, any facility. A lab number with two different reasons therefore gives two rows. With none, the reason is empty.
+//
+// Row repeats and order. UNION removes repeated rows, comparing every text column the way SQL Server does (ignoring case and trailing
+// spaces; NULLs equal; the dates by their exact text). The port groups on those and shows the whole row that is smaller in byte order
+// (province first, then the rest), so that the output is stable; v1 shows any of them. v1 orders by Province, District, Facility only
+// (line 218), in SQL Server text order (ssTextKey). The port adds every other column so that paging is stable (NULL first).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - A Result of 'REJECTED' is a test of the text, so a lab result that says 'rejected' (any case) gets the reason join too.
+//   - The unclear list is v1's fourth variant (14 texts, with DET, PLTV, the '>9999999' forms and '<883 copies/mL'); it is not the list
+//     of the province procedures. '>9999999' and '> 9999999' are different texts.
+//   - The reject parts leave out a lab number that is valid, but only valid in the same window and province. A lab number rejected in
+//     Lusaka with a valid result in Northern is a rejected row.
+//   - The Patients and LabResults joins of the reject parts add no column; they only repeat rows, which UNION removes.
+//   - RTRI rows (TND holds them) have no hivvl row: empty dates, 'Other'.
+//   - EID valid: Result has no Invalid class; the repeated 'Positive' branch (line 143) is dead.
+//
+// CE gaps (spec ruling 7) and CE choices:
+//   - The mapping from v1's LIMSSpecimenSourceCode to specimens.type_code is NOT verified. The port assumes the CE code is v1's code
+//     (DBS, B, BLD, WB, P). If CE stores another code, every row shows 'Other'. Check it against real data before relying on SpecimenType.
+//   - v1 rejects statuses X, Y and Z. CE holds cancelled (X) only; Y and Z cannot be told from the other statuses (unknown), so they
+//     are not rejected here.
+//   - A request with no report cannot reach a specimen (CE links the specimen to the report), so its specimen type is 'Other'.
+//   - TND in v1 starts at 2017-01-01 and ends now (the builder's floor and ceiling); the window is the caller's.
+//   - Province, district and facility are the requesting facility's mapped register row. A facility not in the register drops out, as
+//     v1's inner join on its dictionary drops it. A register row with no province is never in a province list.
+//
+// Deviations (spec ruling 2): none. v1 runs and returns real data.
+const DBS_PROVINCES = ['Lusaka', 'Southern', 'Eastern', 'Western', 'North-Western'];
+const DBS_VL_PANELS = ['HIVVL', 'POCVR', 'POHVL'];
+const DBS_EID_PANELS = ['HIVPC', 'POEID', 'POCGH'];
+const DBS_VL_OBSERVATIONS = ['HIVVL', 'HIVVC', 'HIVVD', 'HIVTM', 'POCVR', 'POCVC'];
+// v1 lines 109-122 (the unclear part): texts that are not unclear although they are not numbers.
+const DBS_CLEAR_TEXTS = ['< 20', '<30 copies/mL', '<40 copies/mL', '> 10000000', 'DET', '>9999999', '> 9999999', '>9999999 copies/mL',
+  '> 9999999 copies/mL', 'NDET', 'PLTV', 'Target Not Detected', 'RNA Not Detected', '<883 copies/mL'];
+
+// v1 lines 13-19: the CASE on LIMSSpecimenSourceCode. A NULL code falls to 'Other', as in SQL Server.
+const dbsSpecimenTypeSql = (code) => `case when ${inListSql(code, ['DBS'])} then 'Dry Blood Spot'
+      when ${inListSql(code, ['B'])} then 'Blood'
+      when ${inListSql(code, ['BLD'])} then 'Blood'
+      when ${inListSql(code, ['WB'])} then 'Whole Blood'
+      when ${inListSql(code, ['P'])} then 'Plasma'
+      when rtrim(${code}) = '' then 'Unrecorded'
+      else 'Other' end`;
+
+// The province test: v1's five when the parameter is blank, else the one given.
+const dbsProvinceSql = (x) => `case when {{param.province}} = '' then ${inListSql(x, DBS_PROVINCES)} else ${foldSql(x)} = ${foldSql('{{param.province}}')} end`;
+
+export function dbsMonitoringSql() {
+  const result = rpt('l');
+  // A request row of the rejected or unclear parts: the mapped facility, the report, the report's specimen.
+  const requestFrom = `from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id`;
+  const requestColumns = `fmr.region as province, fmr.district as district, fmr.name as facility, lr.request_id as lab_id,
+    dr.effective as collected_date, s.received_time as received_date, lr.authored_at as registered_date, dr.issued as result_date`;
+  const rejects = (name, panels, test, validName) => `${name} as (
+  select ${requestColumns},
+    'REJECTED'::text as result, ${dbsSpecimenTypeSql('s.type_code')} as specimen_type, ${test} as test
+  ${requestFrom}
+  where dr.status = 'cancelled'
+    and ${inListSql('lr.panel_code', panels)}
+    and ${inRange('lr.authored_at')}
+    and ${dbsProvinceSql('fmr.region')}
+    and ${foldSql('lr.request_id')} not in (select ${foldSql('v.lab_id')} from ${validName} v)
+)`;
+  const columns = 'province, district, facility, lab_id, collected_date, received_date, registered_date, result_date, result, specimen_type, test';
+  const keys = ['province', 'district', 'facility', 'lab_id', 'collected_date', 'received_date', 'registered_date', 'result_date',
+    'result', 'specimen_type', 'test', 'reason'];
+  // Text columns compare folded, dates and the two constants as they are.
+  const folded = new Set(['province', 'district', 'facility', 'lab_id', 'result', 'reason']);
+  const keyOf = (c) => (folded.has(c) ? foldSql(c) : c);
+  const plain = ['province', 'district', 'facility', 'lab_id', 'result', 'reason'].map((c) => `${c} collate "C"`).join(', ');
+  return `with ${tndCte('tn', { from: 'from', to: 'to' })},
+${hivvlCte('hv', { from: 'from', to: 'to', labsInWindow: true })},
+${eidCte('ed', { from: 'from', to: 'to' })},
+sp_vl as (
+  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code')} as specimen_type
+  from lab_requests rq
+  left join diagnostic_reports rd on rd.based_on_id = rq.id
+  left join specimens sx on sx.id = rd.specimen_id
+  where ${inListSql('rq.panel_code', DBS_VL_PANELS)}
+    and ${foldSql('rq.request_id')} in (select ${foldSql('h.lab_id')} from hv h)
+),
+sp_eid as (
+  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code')} as specimen_type
+  from lab_requests rq
+  left join diagnostic_reports rd on rd.based_on_id = rq.id
+  left join specimens sx on sx.id = rd.specimen_id
+  where ${inListSql('rq.panel_code', DBS_EID_PANELS)}
+    and ${foldSql('rq.request_id')} in (select ${foldSql('e.lab_id')} from ed e)
+),
+vl_valid as (
+  select t.province, t.district, t.facility, t.lab_id, h.collected_date, h.received_date, h.registered_date, t.result_date, t.result,
+    coalesce(sp.specimen_type, 'Other') as specimen_type, 'VL'::text as test
+  from tn t
+  left join hv h on ${foldSql('h.lab_id')} = ${foldSql('t.lab_id')}
+  left join sp_vl sp on sp.lab_key = ${foldSql('h.lab_id')}
+  where ${dbsProvinceSql('t.province')}
+),
+${rejects('vl_rejects', DBS_VL_PANELS, "'VL'::text", 'vl_valid')},
+vl_incs as (
+  select ${requestColumns},
+    ${result} as result, ${dbsSpecimenTypeSql('s.type_code')} as specimen_type, 'VL'::text as test
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  ${requesterJoin('lr', 'fmr')}
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where dr.status = 'final'
+    and ${inListSql('lr.panel_code', DBS_VL_PANELS)}
+    and ${inRange('dr.issued')}
+    and ${inListSql('l.observation_code', DBS_VL_OBSERVATIONS)}
+    and not ${isNumericSql(result)}
+    and not ${inListSql(result, DBS_CLEAR_TEXTS)}
+    and ${dbsProvinceSql('fmr.region')}
+),
+eid_valid as (
+  select e.province, e.district, e.facility, e.lab_id, e.collected_date, e.recieved_date as received_date, e.registered_date,
+    e.tested_date as result_date,
+    case when e.positive = 1 then 'Positive' when e.negative = 1 then 'Negative' when e.indeterminate = 1 then 'Indeterminate'
+      when e.error = 1 then 'Error' end as result,
+    sp.specimen_type, 'EID'::text as test
+  from ed e
+  join sp_eid sp on sp.lab_key = ${foldSql('e.lab_id')}
+  where ${dbsProvinceSql('e.province')}
+),
+${rejects('eid_rejects', DBS_EID_PANELS, "'EID'::text", 'eid_valid')},
+rows_all as (
+  select ${columns} from vl_valid
+  union all select ${columns} from vl_rejects
+  union all select ${columns} from vl_incs
+  union all select ${columns} from eid_valid
+  union all select ${columns} from eid_rejects
+),
+reasoned as (
+  select s.*, q.rejection_reason as reason
+  from rows_all s
+  left join lab_requests q on ${foldSql('s.result')} = 'rejected'
+    and ${foldSql('q.request_id')} = ${foldSql('s.lab_id')}
+    and length(rtrim(q.rejection_reason)) > 0
+    and case when s.test = 'VL' then ${inListSql('q.panel_code', DBS_VL_PANELS)} else ${inListSql('q.panel_code', DBS_EID_PANELS)} end
+),
+dd as (
+  select distinct on (${keys.map(keyOf).join(', ')})
+    ${keys.join(', ')}
+  from reasoned
+  order by ${keys.map(keyOf).join(', ')}, ${plain}
+)
+select dd.province as "Province", dd.district as "District", dd.facility as "Facility", dd.lab_id as "LabID",
+  dd.collected_date as "CollectedDate", dd.received_date as "ReceivedDate", dd.registered_date as "RegisteredDate",
+  dd.result_date as "ResultDate", dd.result as "Result", dd.specimen_type as "SpecimenType", dd.test as "Test", dd.reason as "RejectionReason"
+from dd
+order by ${ssTextKey('dd.province')} collate "C" nulls first, ${ssTextKey('dd.district')} collate "C" nulls first,
+  ${ssTextKey('dd.facility')} collate "C" nulls first,
+  dd.province collate "C" nulls first, dd.district collate "C" nulls first, dd.facility collate "C" nulls first,
+  ${ssTextKey('dd.lab_id')} collate "C" nulls first, dd.lab_id collate "C" nulls first,
+  dd.collected_date collate "C" nulls first, dd.received_date collate "C" nulls first, dd.registered_date collate "C" nulls first,
+  dd.result_date collate "C" nulls first, ${ssTextKey('dd.result')} collate "C" nulls first, dd.result collate "C" nulls first,
+  dd.specimen_type collate "C" nulls first, dd.test collate "C" nulls first,
+  ${ssTextKey('dd.reason')} collate "C" nulls first, dd.reason collate "C" nulls first`;
+}
+
+export const dbsMonitoringParams = () => [
+  ...dateParams(true),
+  { ...provinceParam('province', false), label: 'Province (blank for Lusaka, Southern, Eastern, Western and North-Western)' },
+];
+
 export function queries() {
   return [
     { name: 'Recency tests', sql: recencyTestsSql(), params: windowParams() },
     { name: 'Recency surveillance counts', sql: recencySurveillanceSql(), params: windowParams() },
     { name: 'Recency tests with client names', sql: recencyTestsWithClientNamesSql(), params: windowParams() },
+    { name: 'DBS monitoring (VL and EID)', sql: dbsMonitoringSql(), params: dbsMonitoringParams() },
   ];
 }
