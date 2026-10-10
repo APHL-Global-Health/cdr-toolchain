@@ -1726,6 +1726,10 @@ const VLEID_COLUMNS = [
 //   vleidRequestsCte('vl')                                         all rows
 //   vleidRequestsCte('vl', { from: 'from', to: 'to' })             only rows registered in the window
 //   vleidRequestsCte('vl', { from: 'from', to: 'to', on: 'period' })  the window is on another date (see below)
+//   vleidRequestsCte('vl', { rowIds: true })                       adds request_row_id as the last column: the lab_requests.id of
+//                                                                  the row (a VIRAL row from a form carries its host's id). The
+//                                                                  default columns are unchanged. Use it to tell two CE rows apart
+//                                                                  that share a request number, OBR set and panel (only id is unique).
 // v1 sp_UpdateVLEIDRequests merges every Requests row of four panels into the table (lines 19-87); it never deletes.
 // The CTE returns what the table holds when it is up to date: one row per lab request row (request number and OBR
 // set) of the panels HIVPC, HIVST, HIVVL and VIRAL (line 23), plus the VIRAL rows below. The view `Requests` of
@@ -1813,12 +1817,12 @@ const VLEID_COLUMNS = [
 // distinct RequestID are not affected). v1 has VIRAL rows the port cannot see: a specimen whose only panel is VIRAL
 // (cdr's toDocumentationFhir returns [] when there is no order graph to attach the form to) and a VIRAL panel with no
 // answers (no form is made).
-export function vleidRequestsCte(name, { from, to, on = 'registered' } = {}) {
+export function vleidRequestsCte(name, { from, to, on = 'registered', rowIds = false } = {}) {
   const windows = VLEID_WINDOWS[on];
   if (windows === undefined) throw new Error(`vleidRequestsCte: on must be one of ${Object.keys(VLEID_WINDOWS).join(', ')}`);
   const real = copyWindow('vleidRequestsCte', from, to, windows[0]).finalRange;
   const viral = copyWindow('vleidRequestsCte', from, to, windows[1]).finalRange;
-  const items = (isViral) => VLEID_COLUMNS.map(([column, requestItem, viralItem]) => `${isViral && viralItem !== undefined ? viralItem : requestItem} as ${column}`).join(',\n    ');
+  const items = (isViral) => [...VLEID_COLUMNS.map(([column, requestItem, viralItem]) => `${isViral && viralItem !== undefined ? viralItem : requestItem} as ${column}`), ...(rowIds ? ['lr.id as request_row_id'] : [])].join(',\n    ');
   const joins = `from lab_requests lr
     left join diagnostic_reports dr on dr.based_on_id = lr.id
     left join specimens s on s.id = dr.specimen_id

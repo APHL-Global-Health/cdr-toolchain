@@ -268,6 +268,25 @@ const suites = [
   builderSuite('vleid-analysis', '', windowed('analysis'), expected.filter((r) => inDay(r.analysis_date_time))),
   builderSuite('vleid-authorised', '', windowed('authorised'), expected.filter((r) => inDay(r.authorised_date_time))),
   {
+    // rowIds: true adds request_row_id as the last column and changes nothing else; the default output (vleid-all above) has no such column.
+    name: 'vleid-row-ids',
+    setup: '',
+    sql: `with ${vleidRequestsCte('vl', { rowIds: true })} select 'vleid-row-ids' || chr(9) || row_to_json(q)::text from (select * from vl) q;`,
+    count: expected.length + 3,
+    check(got) {
+      const failures = [];
+      if (got.length !== expected.length) failures.push(`expected ${expected.length} rows, got ${got.length}`);
+      if (got[0]) failures.push(...inOrder(Object.keys(got[0]), [...COLUMNS, 'request_row_id']), ...(Object.keys(got[0]).length === COLUMNS.length + 1 ? [] : [`expected ${COLUMNS.length + 1} columns, got ${Object.keys(got[0]).length}`]));
+      const key = (r) => JSON.stringify(COLUMNS.map((c) => r[c] ?? null));
+      const have = got.map(key).sort();
+      const want = expected.map(key).sort();
+      if (JSON.stringify(have) !== JSON.stringify(want)) failures.push('rows differ from the default output once request_row_id is left out');
+      const bad = got.filter((r) => !/^t5v-q[0-9]+$/.test(r.request_row_id ?? ''));
+      if (bad.length > 0) failures.push(`request_row_id must be a lab_requests id; got ${JSON.stringify(bad[0].request_row_id)}`);
+      return failures;
+    },
+  },
+  {
     name: 'vleid-shape',
     count: 6,
     check() {
@@ -4183,6 +4202,9 @@ function group30() {
   ]);
   // apple: a name that starts with a small letter sorts among the others (case ignored).
   lab('apple', 'ZAP', [one('HIVPC', '05-04')]);
+  // Key: two request rows with one number, no OBR set (NULL) and one panel, but two ids and two dates. Only id is unique in CE, so they are two rows
+  // (weeks 19 and 21), not one merged on v1's key (RequestID, panel, OBR set).
+  lab('Key', 'ZKY', [one('HIVPC', '05-04', { rid: 'K1' }), one('HIVPC', '05-18', { rid: 'K1' })]);
   // zab: a lab code in small letters sorts between ZAP and ZBK in SQL Server (case ignored); in byte order it would come last.
   lab('Lower', 'zab', [one('HIVPC', '05-04')]);
 
@@ -4240,14 +4262,14 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
       const hasViral = r.rid !== null && recs.some((o) => o.rid === r.rid && t29fold(o.panel) === 'viral');
       for (const x of r.reps) {
         if (blank(x.code)) continue;
-        const row = { rid: r.rid, obr: r.obr, code: x.code, spec: t30ts(x.spec), reg: t30ts(r.reg) };
+        const row = { id: r.id, rid: r.rid, obr: r.obr, code: x.code, spec: t30ts(x.spec), reg: t30ts(r.reg) };
         if (r.panel !== null && T30_COPY.includes(t29fold(r.panel))) copy.push({ ...row, panel: r.panel });
         if (r.form && !hasViral) copy.push({ ...row, panel: 'VIRAL' });
       }
     }
     const byKey = new Map();
     for (const c of copy) {
-      const key = JSON.stringify([c.rid === null ? null : t29fold(c.rid), c.obr, t29fold(c.panel), t29fold(c.code)]);
+      const key = JSON.stringify([c.rid === null ? null : t29fold(c.rid), c.obr, t29fold(c.panel), c.id, t29fold(c.code)]);
       if (!byKey.has(key)) byKey.set(key, []);
       byKey.get(key).push(c);
     }
@@ -4326,7 +4348,7 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
   const BANNED = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
   const shape = (name, kind) => ({
     name,
-    count: 5,
+    count: 6,
     check() {
       const q = t30query(kind);
       if (!q) return [`query "${Q30[kind]}" is missing`];
@@ -4334,8 +4356,11 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
       const ids = q.params.map((p) => p.id);
       if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: expected from, to; got ${ids}`);
       q.params.forEach((p) => {
-        if (p.required !== false) bad.push(`${p.id}: v1 has no required input, so it must be optional`);
+        // W's `from` is v1's fixed 2018-05-31 floor: a required parameter (ruling 3). Everything else is optional (V had no window).
+        const wantRequired = kind === 'w' && p.id === 'from';
+        if (p.required !== wantRequired) bad.push(`${p.id}: expected required ${wantRequired}, got ${p.required}`);
         if (p.type !== 'text') bad.push(`${p.id}: expected type text, got ${p.type}`);
+        if (wantRequired && !String(p.label).includes('2018-05-31')) bad.push(`${p.id}: the label must name v1's value 2018-05-31`);
       });
       if (BANNED.test(q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
       if (!/^\s*with\b/i.test(q.sql)) bad.push('does not start with "with"');
@@ -4449,6 +4474,7 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
     W('nolab-blank', {}, [], 'blank lab'),
     W('nolab-none', {}, [], 'no code lab'),
     W('apple', {}, [wr('ZAP', 'apple Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'apple lab'),
+    W('key', {}, [wr('ZKY', 'Key Lab', 2026, 2, 5, 19, 1, 1, 0, 0), wr('ZKY', 'Key Lab', 2026, 2, 5, 21, 1, 1, 0, 0)], 'key lab'),
     W('lower', {}, [wr('zab', 'Lower Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'lower lab'),
 
     // ===== By hand: V (vReceivedRequestsSummary, the VLEID copy) =====
@@ -4511,6 +4537,7 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
     V('nolab-blank', {}, [], 'blank lab'),
     V('nolab-none', {}, [], 'no code lab'),
     V('apple', {}, [vr('ZAP', 'apple Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'apple lab'),
+    V('key', {}, [vr('ZKY', 'Key Lab', 2026, 2, 5, 19, 1, 1, 0, 0), vr('ZKY', 'Key Lab', 2026, 2, 5, 21, 1, 1, 0, 0)], 'key lab'),
     V('lower', {}, [vr('zab', 'Lower Lab', 2026, 2, 5, 19, 1, 1, 0, 0)], 'lower lab'),
 
     // ===== Whole results against the model =====

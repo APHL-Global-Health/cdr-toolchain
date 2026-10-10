@@ -1596,7 +1596,8 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 // helper, weeklySql:
 //   Requests received by week                  W   Labprefix, LabName, Year, Quarter, Month, Week, TotalRequests, PCRRequests, VLRequests, OtherRequests
 //   Requests received by week (VLEID copy)     V   LabPrefix, labFacility, LabName, then the same eight columns
-// Both take `from` and `to` (text, YYYY-MM-DD, optional; a final wave adds validation).
+// Both take `from` and `to` (text, YYYY-MM-DD; a final wave adds validation). W's `from` is REQUIRED: v1's 2018-05-31 floor is a fixed window,
+// which ruling 3 turns into a required parameter (as "Days since last transmission" does with its 2019 floor). W's `to` and both of V's are optional.
 //
 // What differs (W lines, V lines):
 //
@@ -1621,8 +1622,11 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 // in each part it belongs to; the same number on three rows is one; and a week whose requests all have no number is a row of zeros.
 // The base set is one row per request row and folded lab code (the Task 29a pattern), never one per report: a request with two reports of one
 // lab (the code in two spellings) is one row with the earliest valid date of each column, a request with reports from two labs counts for each
-// lab. V's copy holds one row per v1 key (request number, OBR set, panel) and lab, so V folds on that key (the copy does not carry the request
-// row's id; CE data cannot hold two rows with one key, so this only changes two rows that share a key and have no number).
+// lab. V's copy holds one row per v1 key (request number, OBR set, panel; sp_createVLEIDRequestsPK) and lab. V folds on that key plus the
+// request row's id (vleidRequestsCte rowIds): the several reports of one row merge, but two CE rows that share a number, OBR set and panel are
+// not merged. Only lab_requests.id is unique in CE, and an OBR set that is not numeric is NULL, so a CE key can repeat; v1's cannot (its primary
+// key), so the id changes no result v1 can reach. A VIRAL row from a form carries its host's id and has its own panel, so it is never merged
+// with its host. The zero row for a week of requests that all have a NULL number is CE-only: v1's RequestID is NOT NULL.
 //
 // Kept v1 quirks (spec ruling 1):
 //   - Total counts every panel at the lab (W has no panel filter on the group; V's copy has four). PCR, VL and Other follow the panel rules, so Total
@@ -1645,7 +1649,8 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 // The floor (spec ruling 3). W's `> '2018-05-31'` (W line 47) compares a datetime with a date: the stamp must be after 00:00:00 of that day. It
 // becomes the parameter `from`, and keeps that compare: a stamp at exactly 00:00:00 of the day (also a stamp that is a date alone) is out, one
 // second later is in; the time is the stamp's own local wall time (a +02:00 stamp stays on its local day). A stamp with a fraction of a second
-// is read to the second (v1's datetime would keep the fraction), so one at 00:00:00.5 is out here and in v1. Blank `from` is no floor. `to` is
+// is read to the second (v1's datetime would keep the fraction), so one at 00:00:00.5 is out here and in v1. `from` is required (2018-05-31
+// gives v1's output; the SQL still reads a blank `from` as no floor, for callers that bypass the form). `to` is
 // a whole local day, inclusive. V has no floor in v1: its `from` and `to` are the usual inclusive local-date window on the bucket date, and
 // blank both is all history (the NULL-date group stays; as soon as one side is given it goes, as in Task 29b). W drops a NULL bucket date always.
 //
@@ -1674,9 +1679,9 @@ function weeklySql({ copy }) {
     ? { pcr: ['HIVPC', 'HIVWB'], vl: ['HIVVL', 'VIRAL'], other: ['HIVPC', 'HIVWB', 'HIVVL', 'VIRAL'] }
     : { pcr: ['HIVPC'], vl: ['HIVVL'], other: ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'] };
   const rows = copy
-    ? `${vleidRequestsCte('vleid')},
+    ? `${vleidRequestsCte('vleid', { rowIds: true })},
 rr as (
-  select v.request_id, v.obr_set_id as obr, v.lims_panel_code as panel,
+  select v.request_id, v.request_row_id, v.obr_set_id as obr, v.lims_panel_code as panel,
     case when rtrim(v.testing_facility_code) = '' then null else v.testing_facility_code end as code,
     ${localTs('v.specimen_date_time')} as spec, null::timestamp as recv, ${localTs('v.registered_date_time')} as reg
   from vleid v
@@ -1686,7 +1691,7 @@ rq as (
     min(r.spec) as spec, min(r.recv) as recv, min(r.reg) as reg
   from rr r
   where r.code is not null
-  group by ${foldSql('r.request_id')}, r.obr, ${foldSql('r.panel')}, ${foldSql('r.code')}
+  group by ${foldSql('r.request_id')}, r.obr, ${foldSql('r.panel')}, r.request_row_id, ${foldSql('r.code')}
 )`
     : `rr as (
   select lr.id as row_id, lr.request_id, lr.panel_code as panel, ${testingCodeSql('dr')} as code,
@@ -1764,9 +1769,9 @@ export const weeklyRequestsSql = () => weeklySql({ copy: false });
 export const weeklyRequestsCopySql = () => weeklySql({ copy: true });
 
 // The two date parameters of the weekly request queries. W's `from` is v1's floor (a datetime after 00:00:00 of the day); V's is the usual
-// inclusive date. Both are optional text; a final wave validates them.
+// inclusive date. W's `from` is required, the others optional text; a final wave validates them.
 const weeklyParams = (floor) => [
-  { id: 'from', label: floor ? 'Date after (YYYY-MM-DD; blank for no limit; v1 used 2018-05-31; a request at exactly 00:00 of that day is out)' : 'Date from (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
+  { id: 'from', label: floor ? 'Date after (YYYY-MM-DD; use 2018-05-31 to match v1; a request at exactly 00:00 of that day is out)' : 'Date from (YYYY-MM-DD; blank for no limit)', type: 'text', required: floor },
   { id: 'to', label: 'Date to (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
 ];
 
