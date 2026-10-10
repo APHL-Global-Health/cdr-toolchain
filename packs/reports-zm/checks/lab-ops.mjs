@@ -506,6 +506,16 @@ function group25() {
   vlExpected.push(vlGen('Twelve Register Name'));
   vl('N1E5', '1E5', {});                                                           // isnumeric is true for 1E5; no name anywhere: the code
   vlExpected.push(vlGen('1E5'));
+  // -- Repeating fractions, so that SQL Server's decimal(26,12) cut can be told from a float (v1 lines 26-27 of the VL procedure: count(x) * 100.0 / count(*)).
+  // Lab 99 (numeric, so a POC lab), 3 tests, all registered 05-05 and tested 05-06:
+  //   collected: Q1 and Q2 have a collected date, Q3 not = 2 of 3 = 66.666666666666 (a float gives 66.66666666666667)
+  //   received: only Q1 has a received date = 1 of 3 = 33.333333333333 (a float: 33.333333333333336)
+  //   disalink: only Q1 has a pre-registration facility = 1 of 3 = 33.333333333333
+  //   suppressed: Q1 (500) and Q3 (500), not Q2 (5000) = 2 of 3 = 66.666666666666
+  vl('REP-1', '99', { attrs: [{ code: 'prereg-registration-facility', value: 'ZSOUT' }] });
+  vl('REP-2', '99', { recv: null, results: [{ obs: 'HIVVL', num: 5000 }] });
+  vl('REP-3', '99', { eff: null, recv: null });
+  vlExpected.push(vlRow('99', 66.666666666666, 33.333333333333, 3, 0, 3, 3, 3, 100, 100, null, 33.333333333333, 66.666666666666, 100, 100, 100));
   // Two labs with one name: ordered by the next column (requests 1, then 2).
   vl('N88', '88', { display: 'Tied Name' });
   vl('N89-1', '89', { display: 'Tied Name' });
@@ -629,6 +639,11 @@ function group25() {
   eidExpected.push(eidGen('Display Dict EID'));
   eid('D-777', '777', {});
   eidExpected.push(eidGen('777'));
+  // -- Throughput as a repeating fraction (decimal, cut): 1 test and 3 requests give 1 x 100 / 3 = 33.333333333333 for both throughputs. --
+  eid('R3-1', 'ZR3', {});
+  eid('R3-2', 'ZR3', noResults);
+  eid('R3-3', 'ZR3', noResults);
+  eidExpected.push(eidRow('ZR3', 100, 100, 3, 0, 3, 1, 1, 33.333333333333, 33.333333333333, 0, null, 0, 0, 100, 0, 0, 0, 0, 100, 100, 100, 100));
 
   // -- Left out: the five excluded codes (any case, trailing spaces), and a test with no testing lab --
   ['ZZZ', 'MNC', 'MZM', 'ZNN', 'XXX', 'xxx '].forEach((code, i) => eid(`OUT-${i}`, code, {}));
@@ -727,6 +742,24 @@ function group25() {
   // Positivity 4/11, no result 3/11, error 2/11, invalid 1/11 (as floats). RIF indeterminate rate: MTB positive and RIF indeterminate: none = 0 of 4.
   // RIF resistance rate: MTB positive and RIF positive: R1, R3 = 2 of 4 = 50. TAT: 100 percent under 72, none under 24 or 48.
   tbExpected.push(tbRow('ZRIF', 100, 100, 11, 11, 11, 11, 100, 100, 4, 3, 1, 3, 2, 1, (4 * 100) / 11, (3 * 100) / 11, 0, (2 * 100) / 11, (1 * 100) / 11, 50, 0, 0, 100));
+  // -- Decimal against float (TB lines 23, 30-39). CollectedDate and ReceivedDate are count(x) * 100.0 / nullif(count(*), 0): decimal(26,12), cut.
+  // RIF_IND_Rate, RIF_RES_Rate and TATW24H/48H/72H are cast(.. as float) * 100.0 / nullif(.., 0): float. Lab ZREP has 6 tests, so that every one of
+  // the seven is a repeating fraction (a decimal and a float then differ in the last digits). All six are registered 05-02 and authorised 05-03 or 05-04.
+  //   P1 MTB Detected, RIF Detected, 12 hours.   P2 MTB Detected, RIF Detected, 47 hours.   P3 MTB Detected, RIF Indeterminate, 51 hours.
+  //   P4 MTB and RIF Not Detected, 51 hours.     P5 MTB only, no collected and no received date, so no TAT.   P6 MTB only, no received date, 51 hours.
+  //   (P5 and P6 have no GXRIF result because a missing fact loses the RIF in v_GeneXpert; P1 to P4 have every fact.)
+  // collected: all but P5 = 5 of 6 = 83.333333333333 (decimal; a float is 83.33333333333333). received: all but P5 and P6 = 4 of 6 = 66.666666666666.
+  // MTB positive 3 (P1 to P3). RIF indeterminate rate 1 of 3 MTB positive = 33.333333333333336. RIF resistance rate 2 of 3 = 66.66666666666667.
+  // Under 24 hours: P1 = 1 of 6 = 16.666666666666668. Under 48: P1, P2 = 2 of 6 = 33.333333333333336. Under 72: P1 to P4 and P6 = 5 of 6 = 83.33333333333333.
+  // Positivity 3 of 6 = 50. Six requests, six valid, all reviewed and processed.
+  const rep = (k, o) => tb(`REP-${k}`, 'ZREP', o);
+  rep(1, { eff: '2026-05-02T08:00:00Z', iss: '2026-05-02T20:00:00Z', results: gx('Detected', 'Detected') });
+  rep(2, { eff: '2026-05-02T08:00:00Z', iss: '2026-05-04T07:00:00Z', results: gx('Detected', 'Detected') });
+  rep(3, { results: gx('Detected', 'Indeterminate') });
+  rep(4, { results: gx('Not Detected', 'Not Detected') });
+  rep(5, { eff: null, recv: null, results: gx('Not Detected') });
+  rep(6, { recv: null, results: gx('Not Detected') });
+  tbExpected.push(tbRow('ZREP', 83.333333333333, 66.666666666666, 6, 6, 6, 6, 100, 100, 3, 2, 1, 0, 0, 0, 50, 0, (1 * 100) / 3, 0, 0, (2 * 100) / 3, (1 * 100) / 6, (2 * 100) / 6, (5 * 100) / 6));
   // -- No constant name: the dictionary's name. TB does not fold ZU_ codes. --
   tb('D-ZDX', 'ZDX', { display: 'Dictionary TB Lab' });
   tbExpected.push(tbGen('Dictionary TB Lab'));

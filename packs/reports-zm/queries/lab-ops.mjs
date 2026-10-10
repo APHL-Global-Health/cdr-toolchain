@@ -41,7 +41,9 @@ import { rateCutSql } from './vl.mjs';
 // names; the group has the name of its rows that is not just the code, the smallest in byte order. The names are read from the REQUEST rows
 // that are listed (VL, TB) or the TEST rows (EID), the half v1's dictionary join hangs off. Where a request row's own testing code differs from
 // the folded lab code (ZUB in lab ZUL, ZLP in lab ZLR, ZUA in lab ZUE) it does not name the lab: the lab's name is then the code itself unless
-// a row with that very code has a name. The rows are ordered by lab name, as v1 orders by its first column, in SQL Server's text order
+// a row with that very code has a name. Why: v1 keys the dictionary on the folded code (VL lines 97-98, TB lines 89-90), so the name belongs to
+// the folded code and not to any raw code that folds into it. The rule never changes a shown name in EID: its folds only touch codes that
+// have a constant name (ZUL, ZLR, ZUE), and the constant wins over the dictionary name. The rows are ordered by lab name, as v1 orders by its first column, in SQL Server's text order
 // (ssTextKey), then by every other column so that CE can page the result.
 //
 // Windows: the three queries take the same two parameters.
