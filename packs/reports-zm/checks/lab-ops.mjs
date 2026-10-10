@@ -877,4 +877,633 @@ insert into lab_request_attributes (id, lab_request_id, system, code, value_text
   return { name: 't25', suites: suites25 };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25()];
+// ==========================================================================================================================
+// Group t26: Days since last transmission, Suspect collection dates, DISA Link weekly stats (v1 sp_DQ_DaysSinceLastVLEIDTans,
+// sp_DQ_VLEIDSuspectedWrongSampleCollectionDateEntries, sp_getDisaLinkStats over fn_WeeklyDisaLinkUpdate). Fixture ids start with
+// "t26d-" (days since last transmission), "t26s-" (suspect dates) and "t26l-" (DISA Link). All three queries read the same tables, so
+// every suite first deletes the rows of the other two (isolate) and runs inside a savepoint.
+// "D line N", "S line N" and "L line N" mean a line of StoredProcedure__dbo_sp_DQ_DaysSinceLastVLEIDTans.sql,
+// ..._VLEIDSuspectedWrongSampleCollectionDateEntries.sql and UserDefinedFunction__dbo_fn_WeeklyDisaLinkUpdate.sql.
+//
+// "Today" is the Zambian date (Africa/Lusaka, UTC+2): v1 getdate() is the clock of Zambia's SQL Server. Every stamp of the days
+// fixture is written relative to it, so the expected days do not move. The fixture reads the date once, so the check can fail only if
+// it runs across midnight in Lusaka.
+
+const DAYS_Q = 'Days since last transmission';
+const SUSPECT_Q = 'Suspect collection dates';
+const DISALINK_Q = 'DISA Link weekly stats';
+const t26query = (name) => queries().find((q) => q.name === name);
+
+const DAYS_COLUMNS = ['Province', 'LabCode', 'LabName', 'LastTransmission'];
+const SUSPECT_COLUMNS = ['Laboratory', 'Test Type', 'RequestID', 'Days from collection to accessioning'];
+const DISALINK_COLUMNS = ['Facility', 'New Registrations', 'Tested', 'Reviewed', 'Tested from Old Requests', 'Tested & Reviewed from Old Requests'];
+
+// The lab codes of D line 62, typed again from the v1 text (45 codes).
+const D_EXCLUDED = ['ZXZ', 'ZZZ', 'MZM', 'MNC', 'XXX', 'ZNA', 'ZNC', 'ZLA', '005', '144', '028', '004', 'ZFI', '022', 'POC', 'ZDR', 'MAC',
+  'MAF', 'MDR', 'ZCX', 'ZLX', 'ZMR', '094', '095', '068', '108', '001', '015', '073', '054', '009', '055', '091', '128', '131', '153', '154',
+  '155', '125', '132', '161', '074', '026', '115', '097'];
+
+const zmToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Lusaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+const utcDay = (iso) => Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)));
+const addDays = (iso, n) => new Date(utcDay(iso) + n * 86400000).toISOString().slice(0, 10);
+const daysBetween = (a, b) => Math.round((utcDay(b) - utcDay(a)) / 86400000);
+
+// SQL Server's word sort for the characters the fixture uses: case and trailing spaces ignored, hyphens ignored, NULL first. Ties fall
+// to the plain text (byte order), as the ORDER BY does.
+const textKey = (s) => s.toLowerCase().replace(/-/g, '').trimEnd();
+function byColumns(cols) {
+  return (x, y) => {
+    for (const [c, kind] of cols) {
+      const a = x[c];
+      const b = y[c];
+      if (a === b) continue;
+      if (a === null) return -1;
+      if (b === null) return 1;
+      if (kind === 'number') return a < b ? -1 : 1;
+      const ka = textKey(a);
+      const kb = textKey(b);
+      if (ka !== kb) return ka < kb ? -1 : 1;
+      return a < b ? -1 : 1;
+    }
+    return 0;
+  };
+}
+
+function group26() {
+  const TODAY = zmToday();
+  const d = (n) => addDays(TODAY, -n);
+  // A stamp n days before today at 10:00 local (+02:00, DISA's offset).
+  const at = (n, time = '10:00:00') => `${d(n)}T${time}+02:00`;
+
+  // ---- The fixture ----
+  const requests = [];
+  const reports = [];
+  const results = [];
+  const attrs = [];
+  const maps = [];
+  let n = 0;
+  let m = 0;
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+
+  // One request row. `reports`: [{ perf, display, eff, iss, status, ss, ps }]. `results`: observation codes. `attrs`: [{ code, value, system }].
+  const BASE = { panel: 'HIVVL', obr: 1, authored: null, analysis: null, reports: [], results: [], attrs: [] };
+  function add(prefix, requestId, o = {}) {
+    const r = { ...BASE, ...o };
+    n += 1;
+    const qid = `${prefix}q${n}`;
+    requests.push(`(${lit(qid)}, ${lit(requestId)}, ${lit(r.panel)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${num(r.obr)})`);
+    r.reports.forEach((x, i) => reports.push(`(${lit(`${prefix}d${n}-${i + 1}`)}, ${lit(qid)}, ${lit(x.status ?? 'final')}, ${lit(x.eff ?? null)}, ${lit(x.iss ?? null)}, ${lit(x.perf ?? null)}, ${lit(x.display ?? null)}, ${lit(x.ss ?? null)}, ${lit(x.ps ?? null)})`));
+    r.results.forEach((obs, i) => results.push(`(${lit(`${prefix}r${n}-${i + 1}`)}, ${lit(qid)}, ${lit(obs)})`));
+    r.attrs.forEach((a, i) => attrs.push(`(${lit(`${prefix}a${n}-${i + 1}`)}, ${lit(qid)}, ${lit(a.system ?? T25_ATTR)}, ${lit(a.code)}, ${lit(a.value)})`));
+    return qid;
+  }
+  // One facility_map row. `reg` is the register id (null: not in the register).
+  function map(prefix, code, reg, name, region, { ss = '', ps = '' } = {}) {
+    m += 1;
+    maps.push(`(${lit(`${prefix}fm${m}`)}, ${lit(ss)}, ${lit(ps)}, ${lit(code)}, ${lit(reg)}, ${lit(name)}, ${lit(region)}, null)`);
+  }
+
+  // =========================================================================================================================
+  // Days since last transmission (prefix t26d-)
+  // =========================================================================================================================
+  const D = 't26d-';
+  const dRows = [];
+  const dExpect = (province, code, name, days) => dRows.push({ Province: province, LabCode: code, LabName: name, LastTransmission: days });
+  // A lab with its requests: `stamps` are registered stamps; every request has a report by `perf`.
+  function dLab(perf, display, stamps, o = {}) {
+    stamps.forEach((s, i) => add(D, `T26-D-${perf.trim() || 'BLANK'}-${i + 1}`, { authored: s, reports: [{ perf, display, ...(o.report ?? {}) }] }));
+  }
+
+  // -- Part a (D lines 18-36): the days since the latest registration of the lab's requests, whole local days --
+  // D line 23: datediff(dd, max(RegisteredDateTime), getdate()) counts date boundaries. The latest of 10 and 3 days ago is 3.
+  map(D, 'ZA1', 'RG-ZA1', 'Alpha Register', 'Southern');
+  dLab('ZA1', 'Alpha Lab', [at(10), at(3)]);
+  dExpect('Southern', 'ZA1', 'Alpha Lab', 3);
+  // Today at 23:30+02:00 is 0. Today at 00:30+02:00 is 0 too (UTC says yesterday, which would give 1).
+  map(D, 'ZA2', 'RG-ZA2', 'x', 'central');
+  dLab('ZA2', 'Bravo Lab', [at(0, '23:30:00')]);
+  dExpect('central', 'ZA2', 'Bravo Lab', 0);
+  map(D, 'ZA3', 'RG-ZA3', 'x', 'Copperbelt');
+  dLab('ZA3', 'Charlie Lab', [at(0, '00:30:00')]);
+  dExpect('Copperbelt', 'ZA3', 'Charlie Lab', 0);
+  // Five days ago at 23:59:59: date boundaries give 5. Elapsed whole days would give 4.
+  map(D, 'ZA4', 'RG-ZA4', 'x', 'Lusaka');
+  dLab('ZA4', 'Delta Lab', [at(5, '23:59:59')]);
+  dExpect('Lusaka', 'ZA4', 'Delta Lab', 5);
+  // A date-only stamp (midnight) yesterday is 1.
+  map(D, 'ZA5', 'RG-ZA5', 'x', 'Lusaka');
+  dLab('ZA5', 'Echo Lab', [d(1)]);
+  dExpect('Lusaka', 'ZA5', 'Echo Lab', 1);
+  // D line 64 compares an int with getdate() and is always true: a stamp tomorrow gives -1 and the row stays.
+  dLab('ZNEG', 'Negative Lab', [at(-1, '09:00:00')]);
+  dExpect(null, 'ZNEG', 'Negative Lab', -1);
+
+  // -- The floor (D line 30): RegisteredDateTime > 2019-01-01 00:00:00, strictly --
+  const since2019 = daysBetween('2019-01-01', TODAY);
+  dLab('ZF1', 'Floor One', ['2019-01-01T00:00:00+02:00']);                    // = midnight: out
+  dLab('ZF2', 'Floor Two', ['2019-01-01T00:00:01+02:00']);                    // one second after: in
+  dExpect(null, 'ZF2', 'Floor Two', since2019);
+  dLab('ZF3', 'Floor Three', ['2018-12-31T23:59:59+02:00']);                  // before: out
+  dLab('ZF4', 'Floor Four', ['2019-01-01']);                                  // a date only is midnight: out
+  dLab('ZF5', 'Floor Five', ['2019-01-01T01:00:00+02:00']);                   // local 01:00 is in (UTC would be 2018-12-31 and out)
+  dExpect(null, 'ZF5', 'Floor Five', since2019);
+  dLab('ZF6', 'Floor Six', ['2018-06-01T10:00:00+02:00']);                    // an old stamp of a lab with no other request: out
+  // The floor is the parameter: three labs around a floor of six days ago (the variant suite moves the floor).
+  dLab('ZV1', 'Vee One', [at(6, '00:00:00')]);
+  dExpect(null, 'ZV1', 'Vee One', 6);
+  dLab('ZV2', 'Vee Two', [at(6, '00:00:01')]);
+  dExpect(null, 'ZV2', 'Vee Two', 6);
+  dLab('ZV3', 'Vee Three', [at(7, '23:59:59')]);
+  dExpect(null, 'ZV3', 'Vee Three', 7);
+
+  // -- Lab codes compare ignoring case and trailing spaces (SQL Server collation). The spelling shown is the smallest in byte order. --
+  // Two spellings are one lab; the latest request of either counts; the name is the smallest of the displays (Task 16 rule).
+  map(D, 'ZN2', 'RG-ZN2', 'x', 'Lusaka');
+  add(D, 'T26-D-ZN2-1', { authored: at(9), reports: [{ perf: 'ZN2', display: 'Zulu Name' }] });
+  add(D, 'T26-D-ZN2-2', { authored: at(4), reports: [{ perf: 'zn2 ', display: 'Alpha Name' }] });
+  dExpect('Lusaka', 'ZN2', 'Alpha Name', 4);
+
+  // -- Lab names (spec ruling 8): the display, else the register name of the mapped code, else the code --
+  map(D, 'ZR1', 'RG-ZR1', 'Register Lab Name', 'Lusaka');
+  dLab('ZR1', null, [at(2)]);
+  dExpect('Lusaka', 'ZR1', 'Register Lab Name', 2);
+  dLab('ZC1', null, [at(6)]);
+  dExpect(null, 'ZC1', 'ZC1', 6);
+  dLab('ZC2', '  ', [at(7)]);
+  dExpect(null, 'ZC2', 'ZC2', 7);
+  // Two labs with one name stay two rows (v1 groups on the code and the name).
+  dLab('ZS1', 'Same Name', [at(8)]);
+  dLab('ZS2', 'Same Name', [at(8)]);
+  dExpect(null, 'ZS1', 'Same Name', 8);
+  dExpect(null, 'ZS2', 'Same Name', 8);
+  // The facility mapping needs the report's own systems; a mapping of another performer system gives no province.
+  map(D, 'ZSYS', 'RG-ZSYS', 'x', 'Southern');
+  dLab('ZSYS', 'Sys Lab', [at(3)], { report: { ps: 'urn:sys' } });
+  dExpect(null, 'ZSYS', 'Sys Lab', 3);
+  // A mapping that is not in the register gives no province.
+  map(D, 'ZUM', null, 'x', 'Lusaka');
+  dLab('ZUM', 'Unmapped Reg Lab', [at(4)]);
+  dExpect(null, 'ZUM', 'Unmapped Reg Lab', 4);
+
+  // -- No testing lab: v1 falls back to the receiving code, which CE does not carry. The request is left out. --
+  dLab('', 'No Code Lab', [at(1)]);
+  dLab('   ', 'Spaces Lab', [at(1)]);
+  add(D, 'T26-D-NULLCODE', { authored: at(1), reports: [{ perf: null, display: 'Null Lab' }] });
+  add(D, 'T26-D-NOREPORT', { authored: at(1) });
+
+  // -- The exclusion list (D line 62): one lab per code, each registered yesterday. None may show. --
+  // Three codes are spelled another way (lower case with a trailing space, mixed case, trailing spaces) with no plain spelling beside them,
+  // so a compare that is not SQL Server's would let them through.
+  const D_VARIANTS = { ZXZ: 'zxz ', POC: 'Poc', MAF: 'MAF  ' };
+  D_EXCLUDED.forEach((code) => dLab(D_VARIANTS[code] ?? code, `Excluded ${code}`, [at(1)]));
+  // Near misses are labs: a longer code, a leading space, a code without its zeros.
+  dLab('ZZZ1', 'Near Miss One', [at(1)]);
+  dExpect(null, 'ZZZ1', 'Near Miss One', 1);
+  dLab(' XXX', 'Near Miss Two', [at(1)]);
+  dExpect(null, ' XXX', 'Near Miss Two', 1);
+  dLab('5', 'Near Miss Five', [at(1)]);
+  dExpect(null, '5', 'Near Miss Five', 1);
+
+  // -- Part b (D lines 37-51): DISA Link pre-registrations. The lab is the one whose register facility is the pre-registration facility. --
+  // The pre-registered requests are tested by ZZZ (excluded, so they make no part a row) and carry the attribute. `auth` is the report's
+  // issued stamp; `reg` the registered stamp.
+  const PREP = { panel: 'HIVWB' };
+  function pre(tag, code, auth, o = {}) {
+    add(D, `T26-D-PRE-${tag}`, { ...PREP, authored: o.reg ?? at(30), reports: [{ perf: 'ZZZ', iss: auth }], attrs: [{ code: 'prereg-registration-facility', value: code }] });
+  }
+  // Lab ZB1: part a is 20, part b is the latest issued stamp of its pre-registrations (4 and 11 days ago, and one with no result): MIN is 4.
+  map(D, 'ZB1', 'RG-B1', 'x', 'Lusaka');
+  map(D, 'PRE1', 'RG-B1', 'Pre Site 1', 'Lusaka');
+  dLab('ZB1', 'Bee One', [at(20)]);
+  pre('B1-1', 'PRE1', at(4));
+  pre('B1-2', 'PRE1', at(11));
+  pre('B1-3', 'PRE1', null);
+  dExpect('Lusaka', 'ZB1', 'Bee One', 4);
+  // Part a is smaller than part b: MIN is a.
+  map(D, 'ZB2', 'RG-B2', 'x', 'Southern');
+  map(D, 'PRE2', 'RG-B2', 'x', 'Southern');
+  dLab('ZB2', 'Bee Two', [at(2)]);
+  pre('B2', 'PRE2', at(8));
+  dExpect('Southern', 'ZB2', 'Bee Two', 2);
+  // A lab with no request after the floor is a part b row only.
+  map(D, 'ZB3', 'RG-B3', 'x', 'Southern');
+  map(D, 'PRE3', 'RG-B3', 'x', 'Southern');
+  dLab('ZB3', 'Bee Three', ['2018-05-05T10:00:00+02:00']);
+  pre('B3', 'PRE3', at(6), { reg: at(8) });
+  dExpect('Southern', 'ZB3', 'Bee Three', 6);
+  // Pre-registrations with no issued stamp give no part b row (D line 50).
+  map(D, 'ZB4', 'RG-B4', 'x', 'Lusaka');
+  map(D, 'PRE4', 'RG-B4', 'x', 'Lusaka');
+  dLab('ZB4', 'Bee Four', [at(3)]);
+  pre('B4', 'PRE4', null);
+  dExpect('Lusaka', 'ZB4', 'Bee Four', 3);
+  // D line 50: a part b value of -1 (issued tomorrow) is dropped; -2 is kept.
+  map(D, 'ZB5', 'RG-B5', 'x', 'Lusaka');
+  map(D, 'PRE5', 'RG-B5', 'x', 'Lusaka');
+  dLab('ZB5', 'Bee Five', [at(9)]);
+  pre('B5', 'PRE5', at(-1));
+  dExpect('Lusaka', 'ZB5', 'Bee Five', 9);
+  map(D, 'ZB6', 'RG-B6', 'x', 'Lusaka');
+  map(D, 'PRE6', 'RG-B6', 'x', 'Lusaka');
+  dLab('ZB6', 'Bee Six', [at(9)]);
+  pre('B6', 'PRE6', at(-2));
+  dExpect('Lusaka', 'ZB6', 'Bee Six', -2);
+  // D line 44: the pre-registration counts only if registered after the floor (strictly).
+  map(D, 'ZB7', 'RG-B7', 'x', 'Lusaka');
+  map(D, 'PRE7', 'RG-B7', 'x', 'Lusaka');
+  dLab('ZB7', 'Bee Seven', [at(5)]);
+  pre('B7', 'PRE7', at(1), { reg: '2019-01-01T00:00:00+02:00' });
+  dExpect('Lusaka', 'ZB7', 'Bee Seven', 5);
+  map(D, 'ZB12', 'RG-B12', 'x', 'Lusaka');
+  map(D, 'PRE12', 'RG-B12', 'x', 'Lusaka');
+  dLab('ZB12', 'Bee Twelve', [at(9)]);
+  pre('B12', 'PRE12', at(1), { reg: '2019-01-01T00:00:01+02:00' });
+  dExpect('Lusaka', 'ZB12', 'Bee Twelve', 1);
+  // The facility code compares ignoring case and trailing spaces. Part b (7) is below part a (12).
+  map(D, 'ZB8', 'RG-B8', 'x', 'Lusaka');
+  map(D, 'PRE8', 'RG-B8', 'x', 'Lusaka');
+  dLab('ZB8', 'Bee Eight', [at(12)]);
+  pre('B8', 'pre8 ', at(7));
+  dExpect('Lusaka', 'ZB8', 'Bee Eight', 7);
+  // A lab whose mapping is not in the register has no facility: no part b row, and no province.
+  map(D, 'ZB9', null, 'x', 'Lusaka');
+  map(D, 'PRE9', 'RG-B9', 'x', 'Lusaka');
+  dLab('ZB9', 'Bee Nine', [at(6)]);
+  pre('B9', 'PRE9', at(1));
+  dExpect(null, 'ZB9', 'Bee Nine', 6);
+  // A pre-registration facility that is not in the dictionary gives nothing.
+  map(D, 'ZB10', 'RG-B10', 'x', 'Lusaka');
+  dLab('ZB10', 'Bee Ten', [at(7)]);
+  pre('B10', 'PREX', at(1));
+  dExpect('Lusaka', 'ZB10', 'Bee Ten', 7);
+  // The date of the issued stamp is its local date: 5 days ago at 00:30+02:00 is 5 (UTC would be 6).
+  map(D, 'ZB11', 'RG-B11', 'x', 'Southern');
+  map(D, 'PRE11', 'RG-B11', 'x', 'Southern');
+  dLab('ZB11', 'Bee Eleven', [at(20)]);
+  pre('B11', 'PRE11', at(5, '00:30:00'));
+  dExpect('Southern', 'ZB11', 'Bee Eleven', 5);
+  // Not the attribute: the wrong code, a blank value and another system are all ignored.
+  map(D, 'ZB13', 'RG-B13', 'x', 'Lusaka');
+  map(D, 'PRE13', 'RG-B13', 'x', 'Lusaka');
+  map(D, '', 'RG-B13', 'x', 'Lusaka');                    // a dictionary row with a blank code: a blank attribute must not match it (D line 44)
+  dLab('ZB13', 'Bee Thirteen', [at(4)]);
+  add(D, 'T26-D-PRE-B13-1', { ...PREP, authored: at(30), reports: [{ perf: 'ZZZ', iss: at(1) }], attrs: [{ code: 'referring-request-id', value: 'PRE13' }] });
+  add(D, 'T26-D-PRE-B13-2', { ...PREP, authored: at(30), reports: [{ perf: 'ZZZ', iss: at(1) }], attrs: [{ code: 'prereg-registration-facility', value: '  ' }] });
+  add(D, 'T26-D-PRE-B13-3', { ...PREP, authored: at(30), reports: [{ perf: 'ZZZ', iss: at(1) }], attrs: [{ code: 'prereg-registration-facility', value: 'PRE13', system: 'urn:other' }] });
+  dExpect('Lusaka', 'ZB13', 'Bee Thirteen', 4);
+  // One lab in two spellings, only the second one mapped: part a shows the smaller spelling (ZB14), part b would show the mapped one.
+  map(D, 'zb14 ', 'RG-B14', 'x', 'Lusaka');
+  map(D, 'PRE14', 'RG-B14', 'x', 'Lusaka');
+  add(D, 'T26-D-ZB14-1', { authored: at(9), reports: [{ perf: 'ZB14', display: 'Bee Fourteen' }] });
+  add(D, 'T26-D-ZB14-2', { authored: at(14), reports: [{ perf: 'zb14 ', display: 'Bee Fourteen' }] });
+  pre('B14', 'PRE14', at(6));
+  dExpect('Lusaka', 'ZB14', 'Bee Fourteen', 6);
+  // Two labs of one facility both get the part b value.
+  map(D, 'ZB15', 'RG-B15', 'x', 'Lusaka');
+  map(D, 'ZB16', 'RG-B15', 'x', 'Lusaka');
+  map(D, 'PRE15', 'RG-B15', 'x', 'Lusaka');
+  dLab('ZB15', 'Bee Fifteen', [at(10)]);
+  dLab('ZB16', 'Bee Sixteen', [at(1)]);
+  pre('B15', 'PRE15', at(3));
+  dExpect('Lusaka', 'ZB15', 'Bee Fifteen', 3);
+  dExpect('Lusaka', 'ZB16', 'Bee Sixteen', 1);
+  // The exclusion list applies to part b rows too: ZLA has a pre-registration row (2 days) and a part a row (1 day, from the exclusion
+  // loop above). Neither may show.
+  map(D, 'ZLA', 'RG-EX', 'x', 'Lusaka');
+  map(D, 'PREEX', 'RG-EX', 'x', 'Lusaka');
+  pre('EX', 'PREEX', at(2));
+
+  // =========================================================================================================================
+  // Suspect collection dates (prefix t26s-). Window 2026-05-01 to 2026-05-31 unless a suite says otherwise.
+  // =========================================================================================================================
+  const S = 't26s-';
+  const sRows = [];
+  const sExpect = (lab, type, id, days) => sRows.push({ Laboratory: lab, 'Test Type': type, RequestID: id, 'Days from collection to accessioning': days });
+  // Defaults: panel HIVVL, observation HIVVL, lab ZQ1 'Quartz Lab', collected 2026-01-01, registered 2026-04-02 (91 days: January 31 +
+  // February 28 + March 31 = 90 days to 04-01), analysed 2026-05-10.
+  const SP = { eff: '2026-01-01T08:00:00+02:00', reg: '2026-04-02T08:00:00+02:00', ana: '2026-05-10T09:00:00+02:00', perf: 'ZQ1', display: 'Quartz Lab', obs: ['HIVVL'] };
+  function susp(id, o = {}) {
+    const x = { ...SP, ...o };
+    return add(S, id, { panel: 'panel' in o ? o.panel : 'HIVVL', authored: x.reg, analysis: x.ana, obr: x.obr ?? 1, results: x.obs, reports: x.noReport ? [] : (x.reports ?? [{ perf: x.perf, display: x.display, eff: x.eff }]) });
+  }
+  // S lines 40-42, 38: a request over 90 days. The default is 91.
+  susp('T26-S-BASIC');
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-BASIC', 91);
+  // The threshold is > 90: 90 is out, 92 is in.
+  susp('T26-S-90', { reg: '2026-04-01T08:00:00+02:00' });
+  susp('T26-S-92', { reg: '2026-04-03T08:00:00+02:00' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-92', 92);
+  // datediff(dd) counts date boundaries: 90 days and 2 minutes apart, but 91 boundaries.
+  susp('T26-S-BOUND', { eff: '2026-01-01T23:59:00+02:00', reg: '2026-04-02T00:01:00+02:00' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-BOUND', 91);
+  // Local dates, not UTC: 91 local days (90 in UTC) is in; 90 local days (91 in UTC) is out.
+  susp('T26-S-UTCIN', { eff: '2026-01-01T23:30:00+02:00', reg: '2026-04-02T00:30:00+02:00' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-UTCIN', 91);
+  susp('T26-S-UTCOUT', { eff: '2026-01-02T00:30:00+02:00', reg: '2026-04-02T23:30:00+02:00' });
+  susp('T26-S-DATEONLY', { eff: '2026-01-01', reg: '2026-04-02' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-DATEONLY', 91);
+  // A partial, missing or earlier collection date gives no row.
+  susp('T26-S-PARTIAL-SP', { eff: '2026-01' });
+  susp('T26-S-PARTIAL-REG', { reg: '2026-04' });
+  susp('T26-S-BEFORE', { eff: '2026-04-10T08:00:00+02:00' });
+  susp('T26-S-NOSPEC', { eff: null });
+  susp('T26-S-NOREP', { noReport: true });
+
+  // Panels: HIVVL is Viral Load, HIVPC is EID (S lines 23-26). Case and trailing spaces do not matter. Other panels are out.
+  susp('T26-S-EID', { panel: 'HIVPC', obs: ['HIVPC'] });
+  sExpect('Quartz Lab', 'EID', 'T26-S-EID', 91);
+  susp('T26-S-EIDCASE', { panel: 'hivpc ' });
+  sExpect('Quartz Lab', 'EID', 'T26-S-EIDCASE', 91);
+  susp('T26-S-PANELCASE', { panel: 'hivvl ' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-PANELCASE', 91);
+  susp('T26-S-RTRI', { panel: 'RTRI' });
+  susp('T26-S-NOPANEL', { panel: null });
+  // Observations HIVVL, HIVVC and HIVPC (S line 39), whatever the panel. Others, and no result, are out.
+  susp('T26-S-OBSVC', { obs: ['HIVVC'] });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-OBSVC', 91);
+  susp('T26-S-OBSPC', { obs: ['HIVPC'] });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-OBSPC', 91);
+  susp('T26-S-EIDOBSVL', { panel: 'HIVPC', obs: ['HIVVL'] });
+  sExpect('Quartz Lab', 'EID', 'T26-S-EIDOBSVL', 91);
+  susp('T26-S-OBSCASE', { obs: ['hivvc '] });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-OBSCASE', 91);
+  susp('T26-S-OBSBAD', { obs: ['HIVTM'] });
+  susp('T26-S-NORES', { obs: [] });
+
+  // SELECT DISTINCT (S line 22): several results, several reports and several OBR sets of one request are one row.
+  susp('T26-S-TWORES', { obs: ['HIVVL', 'HIVVC'] });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-TWORES', 91);
+  susp('T26-S-TWOREP', { reports: [{ perf: 'ZQ1', display: 'Quartz Lab', eff: SP.eff }, { perf: 'ZQ1', display: 'Quartz Lab', eff: SP.eff }] });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-TWOREP', 91);
+  susp('T26-S-TWOOBR', { obr: 1 });
+  susp('T26-S-TWOOBR', { obr: 2 });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-TWOOBR', 91);
+  // Different days, or a different test type, are different rows.
+  susp('T26-S-TWODAYS', { reg: '2026-04-02T08:00:00+02:00' });
+  susp('T26-S-TWODAYS', { reg: '2026-04-03T08:00:00+02:00' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-TWODAYS', 91);
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-TWODAYS', 92);
+  susp('T26-S-PANELS', { panel: 'HIVVL' });
+  susp('T26-S-PANELS', { panel: 'HIVPC' });
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-PANELS', 91);
+  sExpect('Quartz Lab', 'EID', 'T26-S-PANELS', 91);
+  // The distinct is on text that ignores case and trailing spaces: the request number, and the lab name. The smallest spelling shows.
+  susp('T26-S-Fold');
+  susp('t26-s-fold ');
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-Fold', 91);
+  susp('T26-S-TWIN', { perf: 'ZT1', display: 'Twin Lab' });
+  susp('T26-S-TWIN', { perf: 'ZT2', display: 'Twin Lab' });
+  susp('T26-S-TWIN', { perf: 'ZT3', display: 'twin lab ' });
+  sExpect('Twin Lab', 'Viral Load', 'T26-S-TWIN', 91);
+  // Order: the request number in word order, not byte order ('aaa' before 'BASIC').
+  susp('T26-S-aaa');
+  sExpect('Quartz Lab', 'Viral Load', 'T26-S-aaa', 91);
+
+  // The testing lab (S line 41): ZZZ, XXX and ZXZ are out, in any case with trailing spaces. No code at all (NULL) is out; a blank code is
+  // not in the list, so the row stays, with no lab name (v1 would read the receiving lab, which CE does not carry).
+  ['ZZZ', 'XXX', 'ZXZ', 'zzz '].forEach((perf, i) => susp(`T26-S-X${i}`, { perf, display: `Excluded ${i}` }));
+  susp('T26-S-NEAR', { perf: 'ZZZ1', display: 'Near Lab' });
+  sExpect('Near Lab', 'Viral Load', 'T26-S-NEAR', 91);
+  susp('T26-S-NULLLAB', { perf: null, display: 'Null Lab' });
+  susp('T26-S-BLANK', { perf: '', display: 'Blank Lab' });
+  sExpect(null, 'Viral Load', 'T26-S-BLANK', 91);
+  susp('T26-S-SPACES', { perf: '   ', display: 'Spaces Lab' });
+  sExpect(null, 'Viral Load', 'T26-S-SPACES', 91);
+
+  // The window (S line 42): AnalysisDateTime BETWEEN the two dates taken as midnight. The end day is not in, except its first instant.
+  const anaCase = (id, ana, into) => { susp(id, { ana }); if (into) sExpect('Quartz Lab', 'Viral Load', id, 91); };
+  anaCase('T26-S-AN-START', '2026-05-01T00:00:00+02:00', true);
+  anaCase('T26-S-AN-BEFORE', '2026-04-30T23:59:59+02:00', false);
+  anaCase('T26-S-AN-ENDMID', '2026-05-31T00:00:00+02:00', true);
+  anaCase('T26-S-AN-ENDPLUS', '2026-05-31T00:00:01+02:00', false);
+  anaCase('T26-S-AN-DATEONLY', '2026-05-31', true);
+  anaCase('T26-S-AN-TZIN', '2026-05-01T00:30:00+02:00', true);
+  anaCase('T26-S-AN-TZOUT', '2026-05-31T01:00:00+02:00', false);
+  anaCase('T26-S-AN-LAST', '2026-05-30T23:59:59+02:00', true);
+  anaCase('T26-S-AN-NULL', null, false);
+  anaCase('T26-S-AN-PARTIAL', '2026-05', false);
+
+  // Lab names (spec ruling 8, Task 16 rule): ONE name per code, chosen from the rows the query returns.
+  susp('T26-S-N1', { perf: 'ZN1', display: 'Zeta Name' });
+  susp('T26-S-N2', { perf: 'ZN1', display: 'Alpha Name' });
+  sExpect('Alpha Name', 'Viral Load', 'T26-S-N1', 91);
+  sExpect('Alpha Name', 'Viral Load', 'T26-S-N2', 91);
+  map(S, 'ZN2', 'RG-S2', 'Mapped Lab Name', 'Lusaka');
+  susp('T26-S-N3', { perf: 'ZN2', display: null });
+  sExpect('Mapped Lab Name', 'Viral Load', 'T26-S-N3', 91);
+  susp('T26-S-N4', { perf: 'ZN3', display: null });
+  sExpect('ZN3', 'Viral Load', 'T26-S-N4', 91);
+  // A name that is not just the code wins over the bare code.
+  susp('T26-S-N5', { perf: 'ZN4', display: null });
+  susp('T26-S-N6', { perf: 'ZN4', display: 'Real Name' });
+  sExpect('Real Name', 'Viral Load', 'T26-S-N5', 91);
+  sExpect('Real Name', 'Viral Load', 'T26-S-N6', 91);
+  // A row the query leaves out (10 days only) does not name the lab.
+  susp('T26-S-N7', { perf: 'ZN5', display: null });
+  susp('T26-S-N8', { perf: 'ZN5', display: 'Hidden Name', reg: '2026-01-11T08:00:00+02:00' });
+  sExpect('ZN5', 'Viral Load', 'T26-S-N7', 91);
+
+  // =========================================================================================================================
+  // DISA Link weekly stats (prefix t26l-). Window 2026-05-04 to 2026-05-10.
+  // =========================================================================================================================
+  const L = 't26l-';
+  const lRows = [];
+  const lExpect = (facility, newReg, tested, reviewed, old, oldReviewed) => lRows.push({ Facility: facility, 'New Registrations': newReg, Tested: tested, Reviewed: reviewed, 'Tested from Old Requests': old, 'Tested & Reviewed from Old Requests': oldReviewed });
+  // The facility dictionary (Facilities): the mapped facility_map rows. DL1 has a second row of another system, which must not double rows.
+  map(L, 'DL1', 'RG-L1', 'Alpha Clinic', 'Lusaka');
+  map(L, 'DL1', 'RG-L1', 'Alpha Clinic', 'Lusaka', { ss: 'urn:other' });
+  map(L, 'DL2', 'RG-L2', 'Beta Clinic', 'Lusaka');
+  map(L, 'DL3A', 'RG-L3A', 'Gamma Clinic', 'Lusaka');
+  map(L, 'DL3B', 'RG-L3B', 'gamma clinic ', 'Lusaka');
+  map(L, 'DL4', 'RG-L4', null, 'Lusaka');
+  map(L, 'DL5', null, 'Unmapped Clinic', 'Lusaka');
+  map(L, 'DL6', 'RG-L6', 'delta Clinic', 'Lusaka');
+  map(L, 'DL7', 'RG-L7', 'Echo Clinic', 'Lusaka');
+  // A request: panel, registered, analysed, the pre-registration code, report issued stamps (none: no report), result observations.
+  function link(id, code, reg, o = {}) {
+    return add(L, id, {
+      panel: o.panel ?? 'HIVVL', authored: reg, analysis: o.ana ?? null, obr: o.obr ?? 1,
+      reports: (o.iss ?? []).map((iss) => ({ perf: 'ZL1', iss })), results: o.obs ?? [],
+      attrs: code === undefined ? [] : [{ code: 'prereg-registration-facility', value: code, ...(o.attr ?? {}) }],
+    });
+  }
+  const W = (day, time = '08:00:00') => `2026-05-${day}T${time}+02:00`;
+
+  // -- DL1, Alpha Clinic: window 05-04 00:00:00 up to, not including, 05-11 00:00:00 (L lines 37-38) --
+  link('T26L-A1', 'DL1', W('04', '00:00:00'), { ana: W('05', '10:00:00'), iss: [W('06', '10:00:00')], obs: ['HIVVL'] });   // new, tested, reviewed
+  link('T26L-A2', 'DL1', W('10', '23:59:59'), { panel: 'HIVPC' });                                                           // new (last second)
+  link('T26L-A3', 'DL1', W('11', '00:00:00'), { ana: W('08', '10:00:00'), iss: [W('09', '10:00:00')], obs: ['HIVVL'] });   // registered after: not new, not old
+  link('T26L-A4', 'DL1', W('03', '23:59:59'), { ana: W('04', '00:00:00'), iss: [W('12', '10:00:00')], obs: ['HIVVL'] });   // old, tested at the first instant; reviewed after the window
+  link('T26L-A5', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('10', '23:59:59'), iss: [W('10', '00:00:00')], obs: ['HIVVC'] }); // old, tested and reviewed in the window
+  link('T26L-A6', 'DL1', '2026-04-28T08:00:00+02:00', { ana: W('11', '00:00:00'), iss: [W('05', '10:00:00')], obs: ['HIVVL'] }); // analysed at the end instant: out
+  link('T26L-A7', 'DL1', '2026-04-20T08:00:00+02:00', { panel: 'RTRI', ana: W('06'), obs: ['HIVVL'] });                         // another panel: nothing
+  link('T26L-A7B', 'DL1', W('05'), { panel: 'RTRI', ana: W('06') });
+  link('T26L-A8', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06') });                                                       // old, no result row: not counted
+  link('T26L-A9', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), obs: ['XYZ'] });                                         // old, another observation: not counted
+  link('T26L-A10', 'DL1', W('04', '01:00:00'), { ana: W('04', '00:30:00'), obs: ['HIVVL'] });                                // new on its local date (UTC says 05-03)
+  link('T26L-A11', 'DL1', W('11', '01:00:00'));                                                                              // local 05-11 (UTC says 05-10): out
+  link('T26L-DUP', 'DL1', W('05'), { ana: W('06'), iss: [W('07')], obr: 1 });                                                // two OBR sets: one request, two tested, two reviewed
+  link('T26L-DUP', 'DL1', W('05'), { ana: W('06'), iss: [W('08')], obr: 2 });                                                // (both rows have a report: two reviewed, one request)
+  link('T26L-CASE', 'DL1', W('06'));                                                                                         // one request number in two spellings
+  link('t26l-case ', 'DL1', W('06'));
+  link('T26L-A19', 'DL1', '2026-04-20T08:00:00+02:00', { panel: 'HIVPC', ana: W('06'), obs: ['HIVPC'] });                  // old, panel and observation HIVPC: tested
+  link('T26L-A20', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: [W('06'), W('20')], obs: ['HIVVL'] }); // old, two reports: the LATEST issued stamp (05-20) counts, so tested but not reviewed in the period
+  link('T26L-A15', 'dl1 ', W('07'), { panel: 'hivvl ' });                                                                    // code and panel ignore case and trailing spaces
+  link('T26L-TWOREP', 'DL1', W('08'), { ana: W('09'), iss: [W('09'), W('10')] });                                            // two reports: still one tested and one reviewed
+  link('T26L-A17', 'DL1', W('08'), { ana: W('08'), iss: [null] });                                                           // a report with no issued stamp: tested, not reviewed
+  link('T26L-A18', 'DL1', '2026-05', { ana: W('08') });                                                                       // a partial registered date: out
+  link('T26L-OLD', 'DL1', '2026-04-10T08:00:00+02:00', { ana: W('07'), iss: [W('08')], obs: ['HIVVL'] });                     // two old rows, one request
+  link('T26L-OLD', 'DL1', '2026-04-10T08:00:00+02:00', { ana: W('07'), iss: [W('08')], obs: ['HIVVL'], obr: 2 });
+  link('T26L-OLDC', 'DL1', '2026-04-11T08:00:00+02:00', { ana: W('07'), iss: [W('08')], obs: ['HIVVL'] });                    // one old request number in two spellings
+  link('t26l-oldc ', 'DL1', '2026-04-11T08:00:00+02:00', { ana: W('07'), iss: [W('08')], obs: ['HIVVL'] });
+  link('T26L-A21', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: [W('07')] });                                      // old, reviewed in the period, no result row: neither old column
+  link('T26L-A22', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: [W('07')], obs: ['XYZ'] });                        // old, reviewed in the period, another observation: neither
+  link('T26L-A23', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: ['2026-05-11T01:00:00+02:00'], obs: ['HIVVL'] }); // reviewed on local 05-11 (UTC says 05-10): tested, not reviewed in the period
+  link('T26L-A25', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: ['2026-05-11T00:30:00+02:00'], obs: ['HIVVL'] }); // reviewed on local 05-11 again (a second one, so a UTC error cannot cancel out)
+  link('T26L-A24', 'DL1', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: ['2026-05-04T01:00:00+02:00'], obs: ['HIVVL'] }); // reviewed on local 05-04 (UTC says 05-03): in the period
+  // Not facilities of the dictionary: no attribute, a blank one, another system, another code, an unknown code, a code outside the register.
+  link('T26L-NOATTR', undefined, W('05'), { ana: W('06') });
+  link('T26L-BLANK', '  ', W('05'), { ana: W('06') });
+  link('T26L-SYSTEM', 'DL1', W('05'), { ana: W('06'), attr: { system: 'urn:other' } });
+  add(L, 'T26L-CODE', { authored: W('05'), analysis: W('06'), attrs: [{ code: 'referring-request-id', value: 'DL1' }] });
+  link('T26L-NOPE', 'NOPE', W('05'), { ana: W('06') });
+  link('T26L-UNREG', 'DL5', W('05'), { ana: W('06') });
+  // New: A1, A2, A10, DUP, CASE, A15, TWOREP, A17 = 8 requests. Tested (rows with an analysis stamp): A1, A10, DUP x2, TWOREP, A17 = 6.
+  // Reviewed (rows with a report issued stamp): A1, DUP x2, TWOREP = 4.
+  // Old tested (distinct requests with a result row of the list): A4, A5, OLD, OLDC, A19, A20, A23, A25, A24 = 9 (A21 and A22 have no such result).
+  // Old tested and reviewed (latest issued stamp in the period): A5, OLD, OLDC, A24 = 4 (A4 05-12, A20 05-20, A23 and A25 on 05-11 local are out).
+  lExpect('Alpha Clinic', 8, 6, 4, 9, 4);
+
+  // -- DL2, Beta Clinic: an old request only, no new registration in the window: no row (the outer query starts from new requests) --
+  link('T26L-B1', 'DL2', '2026-04-20T08:00:00+02:00', { ana: W('06'), iss: [W('07')], obs: ['HIVVL'] });
+
+  // -- DL3A and DL3B: two codes with one name (case and trailing space aside) are one row. The old counts add up, where v1's TOP 1 over
+  //    FacilityCode groups would return one of the two arbitrarily. --
+  link('T26L-G1', 'DL3A', W('05'), { ana: W('05'), iss: [W('06')] });
+  link('T26L-G2', 'DL3A', '2026-04-01T08:00:00+02:00', { ana: W('05'), iss: [W('06')], obs: ['HIVVL'] });
+  link('T26L-G3', 'DL3B', W('06'));
+  link('T26L-G4', 'DL3B', '2026-04-02T08:00:00+02:00', { ana: W('06'), iss: [W('20')], obs: ['HIVVL'] });
+  lExpect('Gamma Clinic', 2, 1, 1, 2, 1);
+
+  // -- DL4, no description: one row with NULL Facility, and the old columns stay NULL (NULL = NULL is not true, L line 21) --
+  link('T26L-N1', 'DL4', W('05'), { ana: W('05') });
+  link('T26L-N2', 'DL4', '2026-04-01T08:00:00+02:00', { ana: W('06'), iss: [W('07')], obs: ['HIVVL'] });
+  lExpect(null, 1, 1, 0, null, null);
+
+  // -- DL6: a new registration and nothing else: Tested 0 and Reviewed 0, the old columns NULL (the TOP 1 sub-select returns no row) --
+  link('T26L-D1', 'DL6', W('05'));
+  lExpect('delta Clinic', 1, 0, 0, null, null);
+
+  // -- DL7: tested from an old request, reviewed after the window: the second old column is NULL, not 0 --
+  link('T26L-E1', 'DL7', W('05'), { ana: W('05'), iss: [W('06')] });
+  link('T26L-E2', 'DL7', '2026-04-01T08:00:00+02:00', { ana: W('06'), iss: [W('20')], obs: ['HIVVL'] });
+  lExpect('Echo Clinic', 1, 1, 1, 1, null);
+
+  // =========================================================================================================================
+  // The warehouse rows
+  // =========================================================================================================================
+  const setup = `insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, obr_set_id) values
+  ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display, source_system, performer_system) values
+  ${reports.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code) values
+  ${results.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values
+  ${attrs.join(',\n  ')};
+insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ${maps.join(',\n  ')};`;
+
+  // =========================================================================================================================
+  // Suites
+  // =========================================================================================================================
+  // Remove the rows of the other two queries, so a suite sees only its own fixture (ids start with the prefix).
+  const isolate = (keep) => ['lab_results', 'lab_request_attributes', 'diagnostic_reports', 'lab_requests', 'facility_map']
+    .map((t) => `delete from ${t} where id not like '${keep}%';`).join('\n');
+  let sp = 0;
+  // The exact rows in order. `only` keeps the rows of those values of one column (for the variants).
+  function listSuite(name, queryName, params, columns, wanted, keep, { only, onlyColumn, before = '' } = {}) {
+    const q = t26query(queryName);
+    const sqlText = q?.sql ?? `select 'x'::text as "${onlyColumn ?? 'x'}"`;
+    const text = only ? `select z.* from (${sqlText}) z where z."${onlyColumn}" in (${only.map(lit).join(', ')})` : sqlText;
+    const s = orderedSuite(name, text, params, columns, wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${queryName}" is missing`, ...check(got)];
+    }
+    sp += 1;
+    s.sql = `savepoint t26sp${sp};\n${isolate(keep)}\n${before}\n${s.sql}\nrollback to savepoint t26sp${sp};`;
+    return s;
+  }
+  // A suite that prints one JSON object of values and compares it.
+  function valueSuite(name, queryName, keep, selectExpr, want) {
+    const q = t26query(queryName);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${queryName}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t26sp${sp};\n${isolate(keep)}\nselect ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;\nrollback to savepoint t26sp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  const shape = (name, queryName, ids) => shapeSuite(name, t26query(queryName), ids, ids.map(() => 'text'));
+  // CE pages a result with LIMIT and OFFSET, so the ORDER BY must be total: it names every output column.
+  const orderSuite = (name, queryName, count) => ({
+    name,
+    count,
+    check() {
+      const q = t26query(queryName);
+      if (!q) return [`query "${queryName}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      const bad = [];
+      for (let i = 1; i <= count; i += 1) {
+        const id = `res.c${String(i).padStart(2, '0')}`;
+        if (!tail.includes(id)) bad.push(`ORDER BY must list ${id}`);
+      }
+      return bad;
+    },
+  });
+
+  const MAY = { from: '2026-05-01', to: '2026-05-31' };
+  const WEEK = { from: '2026-05-04', to: '2026-05-10' };
+  const FLOOR = { from: '2019-01-01' };
+  const daysOrder = byColumns([['Province', 'text'], ['LabName', 'text'], ['LabCode', 'text'], ['LastTransmission', 'number']]);
+  const suspectOrder = byColumns([['Laboratory', 'text'], ['Test Type', 'text'], ['RequestID', 'text'], ['Days from collection to accessioning', 'number']]);
+  const disalinkOrder = byColumns([['Facility', 'text']]);
+
+  const suites26 = [
+    { name: 't26-setup', setup, count: 0, check: () => [] },
+    shape('t26-shape-days', DAYS_Q, ['from']),
+    shape('t26-shape-suspect', SUSPECT_Q, ['from', 'to']),
+    shape('t26-shape-disalink', DISALINK_Q, ['from', 'to']),
+    orderSuite('t26-order-days', DAYS_Q, 4),
+    orderSuite('t26-order-suspect', SUSPECT_Q, 4),
+    orderSuite('t26-order-disalink', DISALINK_Q, 6),
+    // Static: the days query counts to today's date in Zambia, whatever the server's clock zone. The rows above cannot tell Lusaka's date
+    // from UTC's between 00:00 and 22:00 UTC, so this reads the SQL.
+    {
+      name: 't26-today-lusaka',
+      count: 1,
+      check: () => (t26query(DAYS_Q)?.sql.includes("(now() at time zone 'Africa/Lusaka')::date") ? [] : ["today must be (now() at time zone 'Africa/Lusaka')::date"]),
+    },
+    listSuite('t26-days-all', DAYS_Q, FLOOR, DAYS_COLUMNS, [...dRows].sort(daysOrder), D),
+    // The floor is the parameter: from six days ago, ZV1 (exactly midnight) and ZV3 (before) are out and ZV2 is in.
+    listSuite('t26-days-floor', DAYS_Q, { from: d(6) }, DAYS_COLUMNS, [dRows.find((r) => r.LabCode === 'ZV2')], D, { only: ['ZV1', 'ZV2', 'ZV3'], onlyColumn: 'LabCode' }),
+    // Today is the date in Zambia whatever the session time zone: the same rows with the session far east and far west of Lusaka.
+    listSuite('t26-days-tz-east', DAYS_Q, FLOOR, DAYS_COLUMNS, [...dRows].sort(daysOrder), D, { before: "set local time zone 'Pacific/Kiritimati';" }),
+    listSuite('t26-days-tz-west', DAYS_Q, FLOOR, DAYS_COLUMNS, [...dRows].sort(daysOrder), D, { before: "set local time zone 'Pacific/Pago_Pago';" }),
+    valueSuite('t26-days-type', DAYS_Q, D, (sqlText) => `select json_build_object('days', pg_typeof(q."LastTransmission")::text) from (${bind(sqlText, FLOOR)}) q limit 1`, { days: 'integer' }),
+    listSuite('t26-suspect-all', SUSPECT_Q, MAY, SUSPECT_COLUMNS, [...sRows].sort(suspectOrder), S),
+    valueSuite('t26-suspect-type', SUSPECT_Q, S, (sqlText) => `select json_build_object('days', pg_typeof(q."Days from collection to accessioning")::text) from (${bind(sqlText, MAY)}) q limit 1`, { days: 'integer' }),
+    listSuite('t26-disalink-all', DISALINK_Q, WEEK, DISALINK_COLUMNS, [...lRows].sort(disalinkOrder), L),
+    valueSuite('t26-disalink-type', DISALINK_Q, L, (sqlText) => `select json_build_object('n', pg_typeof(q."New Registrations")::text, 't', pg_typeof(q."Tested")::text, 'r', pg_typeof(q."Reviewed")::text, 'o', pg_typeof(q."Tested from Old Requests")::text, 'or', pg_typeof(q."Tested & Reviewed from Old Requests")::text) from (${bind(sqlText, WEEK)}) q limit 1`, { n: 'bigint', t: 'bigint', r: 'bigint', o: 'bigint', or: 'bigint' }),
+    // One day only: Alpha Clinic has A1 and A10 registered on 05-04 (the first and the end day are both whole days), both tested, A1 reviewed.
+    // Old: A4 (registered 05-03 23:59:59, analysed 05-04 00:00:00, reviewed 05-12) is tested; none is reviewed in the window.
+    listSuite('t26-disalink-day', DISALINK_Q, { from: '2026-05-04', to: '2026-05-04' }, DISALINK_COLUMNS, [
+      { Facility: 'Alpha Clinic', 'New Registrations': 2, Tested: 2, Reviewed: 1, 'Tested from Old Requests': 1, 'Tested & Reviewed from Old Requests': null },
+    ], L, { only: ['Alpha Clinic'], onlyColumn: 'Facility' }),
+  ];
+  return { name: 't26', suites: suites26 };
+}
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26()];
