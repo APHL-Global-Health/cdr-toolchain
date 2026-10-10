@@ -2637,7 +2637,7 @@ const nmRow = (lab, pathogen, isolated, count, tests, o = {}) => ({
   AccessionedDate: '2026-05-10T08:00:00Z', AccessionYear: 2026, AccessionMonth: 'May',
   ResultsEntryDate: '2026-05-11T09:30:00Z', ResultsEntryYear: 2026, ResultsEntryMonth: 'May',
   ResultsAuthorizationDate: '2026-05-12T10:00:00Z', Year: 2026, Month: 'May',
-  ClinicalInfo: 'Fever', SpecimenType: 'Blood', TestingStatus: 'Final', Pathogen: pathogen, Isolated: isolated, FirstPrinted: null,
+  ClinicalInfo: 'Fever', SpecimenType: 'Blood', TestingStatus: 'Final results; results stored and verified. Can only be changed with a corrected result.', Pathogen: pathogen, Isolated: isolated, FirstPrinted: null,
   LabName: 'Lusaka Lab', IsolateCount: count, PathogenTestRequests: 1, PathogenTests: tests, ...o,
 });
 const nmYes = (lab, o = {}) => nmRow(lab, 'Cryptococcus', 'Yes', 1, 1, o);

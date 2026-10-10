@@ -954,10 +954,7 @@ export function hivdrSql() {
   ${requesterJoin('lr', 'fmr', 'left join')}
   where ${inListSql('lr.panel_code', ['DRUGR'])}
     and not (rtrim(l.observation_code) ilike '%TXT')
-    and (({{param.from}} = '' and {{param.to}} = '')
-      or (lr.authored_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-        and ({{param.from}} = '' or left(lr.authored_at, 10) >= {{param.from}})
-        and ({{param.to}} = '' or left(lr.authored_at, 10) <= {{param.to}})))
+    and ${optionalWindowSql('lr.authored_at')}
 ),
 names as (
   select ${foldSql('p.code')} as code_key,
@@ -993,7 +990,8 @@ export const hivdrParams = () => dateParams(false).map((p) => ({ ...p, label: `$
 // (diagnostic_reports.issued), compared on the local date of the stamp's own text. Why that date: it is the date the views themselves
 // call the result date (PHSIMS ResultDate, line 28) and the one NMPDP's plain Year and Month columns read (lines 25-27), so a period
 // here means "results authorised in the period", the way these feeds are read. HIV drug resistance windows on the registered date
-// instead, because that view has no authorised-date column of its own. A blank side is open; a report with no issued date, or one that
+// instead, because it keeps requests that are not authorised, whose issued date is NULL; these two feeds keep final reports only.
+// A blank side is open; a report with no issued date, or one that
 // is not a full date, is out whenever a side is given.
 //
 // Row order. v1 has no ORDER BY, and CE pages a result with LIMIT and OFFSET, so each query orders by every output column: text in SQL
@@ -1078,8 +1076,8 @@ function finalSelect21(labels, kinds) {
 //   - FirstPrinted (LabResults.FirstPrinted) is not in CE: the column is NULL.
 //   - LabName falls back to the receiving lab when the testing code is blank (line 54). CE does not carry ReceivingFacilityCode, so a blank
 //     code gives no name.
-//   - TestingStatus is the text v1 reads from its status dictionary (line 30). The filter keeps final reports only, so it is the text of F;
-//     CE holds only the status code, so the column shows 'Final'. v1's own wording for F is not in CE: HONEST NON-PROOF.
+//   - TestingStatus is the text v1 reads from its status dictionary (line 30). The filter keeps final reports only, so it is the text of F:
+//     taken from the stock OpenLDRDict seed (v1.0.1); Zambia to confirm their row.
 //   - Age is lab_requests.age_years, Sex the patient's sex, ClinicalInfo lab_requests.clinical_info, SpecimenType the specimen's type text.
 export function pathogenPanelSql() {
   const labels = ['Province', 'District', 'Facility', 'LabID', 'Age', 'Sex', 'AccessionedDate', 'AccessionYear', 'AccessionMonth',
@@ -1116,7 +1114,7 @@ res as (
     s.authored as c07, ${yearOf('s.authored')} as c08, ${monthOf('s.authored')} as c09,
     s.analysis as c10, ${yearOf('s.analysis')} as c11, ${monthOf('s.analysis')} as c12,
     s.issued as c13, ${yearOf('s.issued')} as c14, ${monthOf('s.issued')} as c15,
-    s.clinical as c16, s.specimen as c17, 'Final' as c18, s.pathogen as c19, s.isolated as c20, null::text as c21, n.lab_name as c22,
+    s.clinical as c16, s.specimen as c17, 'Final results; results stored and verified. Can only be changed with a corrected result.' as c18, s.pathogen as c19, s.isolated as c20, null::text as c21, n.lab_name as c22,
     case when ${foldSql('s.isolated')} = 'yes' then 1 when ${foldSql('s.isolated')} = 'no' then 0 end as c23,
     1 as c24,
     case when ${inListSql('s.isolated', ['Yes', 'No'])} then 1 else 0 end as c25
@@ -1170,6 +1168,8 @@ const PHSIMS_LABS_OUT = ['XXX', 'ZZZ', 'ZLX', 'ZCX', '000'];
 //     the link in the register mapping instead: the mapped register row's national code (ZMFAC's MFL Code). DisaFacilityCode is the
 //     mapped row's DISA code. Both are empty for a facility the register does not map. v1 shows a request once per MFL row that lists
 //     its DISA code, so a DISA code on two MFL rows doubles the request there; the mapping is one row per code, so it is one row here.
+//   - CE shows an MFL code for any mapped facility, even where v1's MFL table lists no DISA code for it (v1 leaves MFL Code empty then).
+//   - DisaFacilityCode is empty for an unmapped code that v1's own dictionary knows (v1 shows the code from its Facilities dictionary).
 //   - LabName has no fallback here (line 37 joins on TestingFacilityCode only); see the lab names note above.
 export function surveillanceResultsSql() {
   const labels = ['CDRTimeStamp', 'SourceLIMSTimeStamp', 'Province', 'District', 'DisaFacilityCode', 'MFL Code', 'Facility', 'LIMSPanelDesc',
