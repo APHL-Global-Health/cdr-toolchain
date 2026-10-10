@@ -3,7 +3,7 @@
 import { lit, caseSuite } from '../../shared/pg-check.mjs';
 import {
   sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
-  dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, labNameSql,
+  dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, formAnswersCte, labNameSql,
   districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql, numberOfTextSql,
 } from '../zm-sql.mjs';
 import { dateErrorSuites } from './epi-fixture.mjs';
@@ -187,7 +187,13 @@ insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, 
   ('t1-q2', 'q', 'other_form', 't1-r1', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'WRONG FORM' }] }])}),
   ('t1-q3', 'q', 'hiv_vl_documentation', 't1-r2', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'Other' }] }])}),
   ('t1-q4a', 'q', 'hiv_vl_documentation', 't1-r4', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'old' }] }])}),
-  ('t1-q4b', 'q', 'hiv_vl_documentation', 't1-r4', '2026-05-02T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'new' }] }])});`;
+  ('t1-q4b', 'q', 'hiv_vl_documentation', 't1-r4', '2026-05-02T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'new' }] }])}),
+  ('t1-q5a', 'q', 'hiv_vl_documentation', 't1-r5', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'early' }] }])}),
+  ('t1-q5b', 'q', 'hiv_vl_documentation', 't1-r5', '2026-05-02T10:00:00Z', ${json([{ linkId: 'VISIT', answer: [{ valueString: 'later' }] }])}),
+  ('t1-q6b', 'q', 'hiv_vl_documentation', 't1-r6', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'tie b' }] }])}),
+  ('t1-q6a', 'q', 'hiv_vl_documentation', 't1-r6', '2026-05-01T10:00:00Z', ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'tie a' }] }])}),
+  ('t1-q6c', 'q', 'hiv_vl_documentation', 't1-r6', null, ${json([{ linkId: 'ARTPR', answer: [{ valueString: 'undated' }] }])});
+insert into lab_requests (id, request_id) values ('t1-r5', 'E'), ('t1-r6', 'F');`;
 const FORM_WANT = [
   ['t1-r1', 'Option B+', 'ARTPR'],  // text answer; the other form's row for this request is ignored
   ['t1-r1', '1.5', 'AGE'],          // decimal answer as text
@@ -201,9 +207,20 @@ const FORM_WANT = [
   ['t1-r2', 'Other', 'ARTPR'],
   ['t1-r3', null, 'ARTPR'],         // request without a response
   ['t1-r4', 'new', 'ARTPR'],        // two responses: the later authored one
+  ['t1-r5', 'early', 'ARTPR'],      // the later response has no ARTPR: the earlier answer stands
+  ['t1-r5', 'later', 'VISIT'],
+  ['t1-r6', 'tie a', 'ARTPR'],      // equal stamps: the lower response id; the undated response comes last
 ];
 suites.push(pairSuite('form-answer', FORM_ROWS,
   FORM_WANT.map(([id, , code]) => `select 'form-answer' || chr(9) || json_build_object('id', r.id, 'code', ${lit(code)}, 'got', ${formAnswerSql('r.id', code)})::text from lab_requests r where r.id = ${lit(id)};`).join('\n'),
+  FORM_WANT));
+// formAnswersCte (one read per query) gives formAnswerSql's answer for every case above.
+const FORM_CODES = [...new Set(FORM_WANT.map(([, , code]) => code))];
+suites.push(pairSuite('form-answers-cte', '',
+  `with ${formAnswersCte('fa', FORM_CODES)}
+select 'form-answers-cte' || chr(9) || json_build_object('id', w.id, 'code', w.code, 'got', case w.code ${FORM_CODES.map((c) => `when ${lit(c)} then fa.${c.toLowerCase()}`).join(' ')} end)::text
+from (values ${FORM_WANT.map(([id, , code]) => `(${lit(id)}, ${lit(code)})`).join(', ')}) as w(id, code)
+left join fa on fa.request_row_id = w.id;`,
   FORM_WANT));
 
 // ---- labNameSql (ruling 8): performer_display, else the mapped register name, else the code ----

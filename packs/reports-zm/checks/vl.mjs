@@ -3010,9 +3010,80 @@ suites30c.push(
   ]),
 );
 
+// ============================================================================================
+// Group c1 (final review, item C1): the VIRAL form answers when a request has several responses. The hivvl builder and
+// "VL results history by client" read each answer once per query. The answer for a question code is the one in the
+// latest authored response that holds that code (formAnswerSql's rule): a later response without the code does not hide
+// an earlier answer. Equal authored stamps: the lower response id wins. A response with no authored stamp comes last.
+// Fixture ids start with "c1-"; lab ids start with "C1-".
+// ============================================================================================
+
+const C1_REQS = [
+  // [lab id, ART number, forms: [response id suffix, authored, [[code, answer]]]]
+  ['C1-NEWNO', 'C101', [['a', '2026-05-01T08:00:00Z', [['ARTPR', 'Yes']]], ['b', '2026-05-03T08:00:00Z', [['ARTPR', 'No']]]]],
+  ['C1-NEWYES', 'C102', [['a', '2026-05-01T08:00:00Z', [['ARTPR', 'No']]], ['b', '2026-05-03T08:00:00Z', [['ARTPR', 'Yes']]]]],
+  ['C1-LACKS', 'C103', [['a', '2026-05-01T08:00:00Z', [['VPREG', 'Y']]], ['b', '2026-05-03T08:00:00Z', [['VISIT', 'Routine']]]]],
+  ['C1-TIE', 'C104', [['a', '2026-05-02T08:00:00Z', [['ARTBR', 'Yes'], ['ARTRS', 'Pregnant Mother']]], ['b', '2026-05-02T08:00:00Z', [['ARTBR', 'No'], ['ARTRS', 'Routine']]]]],
+  ['C1-NULLAUTH', 'C105', [['a', null, [['ARTRS', 'Post EAC']]], ['b', '2026-05-01T08:00:00Z', [['ARTRS', 'Routine']]]]],
+  ['C1-NONE', 'C106', []],
+];
+const SETUP_C1 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('c1-fm1', '', '', 'ZC1A', 'reg-c1', 'C1 Clinic', 'Northern', 'Kasama');
+insert into patients (id, surname, sex) values ${C1_REQS.map((_, i) => `('c1-p${i + 1}', 'C1', 'F')`).join(', ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years) values
+  ${C1_REQS.map(([lab], i) => `('c1-q${i + 1}', ${lit(lab)}, 'HIVVL', '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', 'ZC1A', 'c1-p${i + 1}', 30)`).join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values
+  ${C1_REQS.map((_, i) => `('c1-d${i + 1}', 'c1-q${i + 1}', 'final', '2026-05-01T07:00:00Z', '2026-05-10T10:00:00Z', 'LUS')`).join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values
+  ${C1_REQS.map((_, i) => `('c1-r${i + 1}', 'c1-q${i + 1}', 'HIVVL', null, 540, null)`).join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values
+  ${C1_REQS.map(([, art], i) => `('c1-a${i + 1}', 'c1-q${i + 1}', ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(art)})`).join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values
+  ${C1_REQS.flatMap(([, , forms], i) => forms.map(([s, authored, answers]) => `('c1-f${i + 1}${s}', 'q', 'hiv_vl_documentation', 'c1-q${i + 1}', ${lit(authored)}, ${lit(JSON.stringify(answers.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }))))})`)).join(',\n  ')};`;
+
+// Exact rows of chosen columns, in the query's own order (`order` is a total ORDER BY over the chosen columns).
+function pickSuite(name, setup, sqlText, columns, rows, order) {
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || json_build_object(${columns.map((c) => `${lit(c)}, q."${c}"`).join(', ')})::text from (${sqlText}) q order by ${order};`,
+    count: rows.length + 1,
+    check(got) {
+      const failures = [];
+      if (got.length !== rows.length) failures.push(`expected ${rows.length} rows, got ${got.length}`);
+      const key = (r) => JSON.stringify(columns.map((c) => r[c] ?? null));
+      got.forEach((g, i) => { if (rows[i] && key(g) !== key(rows[i])) failures.push(`row ${i + 1}: expected ${key(rows[i])}, got ${key(g)}`); });
+      return failures;
+    },
+  };
+}
+const C1_FLAGS = ['lab_id', 'pregnant', 'breastfeeding', 'three_m_post_unsuppressed'];
+const c1flags = (lab_id, pregnant, breastfeeding, three_m_post_unsuppressed) => ({ lab_id, pregnant, breastfeeding, three_m_post_unsuppressed });
+const suitesC1 = [
+  // The hivvl builder, one row per lab id.
+  pickSuite('c1-hivvl-flags', SETUP_C1, `with ${hivvlCte('hv')} select * from hv`, C1_FLAGS, [
+    c1flags('C1-LACKS', 1, null, null),     // VPREG 'Y' from the earlier response; the later one has no VPREG
+    c1flags('C1-NEWNO', null, null, null),  // ARTPR: the later 'No' wins over the earlier 'Yes'
+    c1flags('C1-NEWYES', 1, null, null),    // ARTPR: the later 'Yes' wins over the earlier 'No'
+    c1flags('C1-NONE', null, null, null),
+    c1flags('C1-NULLAUTH', null, null, null), // ARTRS: the dated 'Routine' wins over the undated 'Post EAC'
+    c1flags('C1-TIE', 1, 1, null),          // equal stamps: response 'a' (lower id) wins, ARTBR 'Yes' and ARTRS 'Pregnant Mother'
+  ], 'q.lab_id'),
+  // "VL dashboard summary", national: the one 'All' row (v1 line 22). Pregnant counts C1-LACKS, C1-NEWYES and C1-TIE; BreastFeeding
+  // counts C1-TIE. ThreeMPostUnSuppressed is a sum of a flag that is never 1 here, so NULL (a kept v1 quirk).
+  pickSuite('c1-dashboard', '', bind(dashQuery?.sql ?? 'select 1', { province: '', district: '', facility: '', from: '2026-05-01', to: '2026-05-31' }),
+    ['Facility', 'Tests', 'Pregnant', 'BreastFeeding', 'ThreeMPostUnSuppressed'],
+    [{ Facility: 'All', Tests: 6, Pregnant: 3, BreastFeeding: 1, ThreeMPostUnSuppressed: null }], 'q."Facility"'),
+  // "VL results history by client", pregnant_only yes: the clients whose answers say pregnant (C1-LACKS VPREG, C1-NEWYES ARTPR,
+  // C1-TIE ARTRS 'Pregnant Mother').
+  pickSuite('c1-history-pregnant', '', bind(historyQuery?.sql ?? 'select 1', { from: '2026-05-01', to: '2026-05-31', province: '', pregnant_only: 'yes' }),
+    ['ARTNumber'], [{ ARTNumber: 'C102' }, { ARTNumber: 'C103' }, { ARTNumber: 'C104' }], 'q."ARTNumber"'),
+];
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
   { name: 't16', suites: suitesV16 },
-  { name: 't30c', suites: suites30c }
+  { name: 't30c', suites: suites30c },
+  { name: 'c1', suites: suitesC1 },
 ];

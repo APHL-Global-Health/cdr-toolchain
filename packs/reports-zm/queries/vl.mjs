@@ -3,7 +3,7 @@
 import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
-  requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
+  requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswersCte, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
   dateParamSql, dateTextParamSql, optionsListSql,
 } from '../zm-sql.mjs';
@@ -693,13 +693,15 @@ export function historySql() {
   const number = numberOfTextSql(result);
   const t = 'x.issued_ts';
   const resultDate = `to_char(${t}, 'Mon') || ' ' || lpad(extract(day from ${t})::int::text, 2) || ' ' || to_char(${t}, 'YYYY') || ' ' || lpad(to_char(${t}, 'FMHH12'), 2) || ':' || to_char(${t}, 'MI') || to_char(${t}, 'AM')`;
-  const pregnantAnswers = `${inListSql(formAnswerSql('q.id', 'VPREG'), YES_WORDS)} or ${inListSql(formAnswerSql('q.id', 'ARTPR'), YES_WORDS)} or ${inListSql(formAnswerSql('q.id', 'ARTRS'), ['Pregnant Mother'])}`;
+  const pregnantAnswers = `${inListSql('fa.vpreg', YES_WORDS)} or ${inListSql('fa.artpr', YES_WORDS)} or ${inListSql('fa.artrs', ['Pregnant Mother'])}`;
   return `with ${zmIdsCte('zm_ids')},
+${formAnswersCte('fa', ['VPREG', 'ARTPR', 'ARTRS'])},
 ${cohortHistoryCtes({ observations: ['HIVVL', 'HIVVC', 'HIVVD'], days: 730, direction: 'desc' })},
 ${cohortRowsCte((r) => `${r} is not null and not ${inListSql(r, COHORT_EXCLUDED_TEXTS)} and ${inListSql('lr.panel_code', ['HIVVL'])} and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVVD'])}`)},
 y as (
   select distinct fmr.name as facility, ${cohortArt()} as art_no
-  from lab_requests q
+  from fa
+  join lab_requests q on q.id = fa.request_row_id
   ${requesterJoin('q', 'fmr')}
   left join zm_ids zi on zi.lab_request_id = q.id
   where ${foldSql('{{param.pregnant_only}}')} = 'yes'

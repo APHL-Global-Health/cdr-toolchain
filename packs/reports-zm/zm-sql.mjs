@@ -233,12 +233,44 @@ export const VL_FORM_CODE = 'hiv_vl_documentation';
 // of { linkId: <observation code>, answer: [{ valueString } | { valueDecimal }] }. Returns the first
 // answer's valueString, else its valueDecimal as text, else NULL. `requestIdExpr` is the lab
 // request's id. If a request has several responses, the latest authored one is used.
+// No query calls it now: it scans questionnaire_responses once per call. Queries use formAnswersCte below, which
+// gives the same answers. It stays as the plain statement of the rule, and its check pins both.
 export const formAnswerSql = (requestIdExpr, observationCode) => `(select coalesce(zit.item -> 'answer' -> 0 ->> 'valueString', zit.item -> 'answer' -> 0 ->> 'valueDecimal')
     from questionnaire_responses zqr
     cross join lateral jsonb_array_elements(zqr.items::jsonb) as zit(item)
     where zqr.form_code = ${sqlLit(VL_FORM_CODE)} and zqr.based_on_id = ${requestIdExpr} and zit.item ->> 'linkId' = ${sqlLit(observationCode)}
     order by zqr.authored desc nulls last, zqr.id
     limit 1)`;
+
+// Several VIRAL form answers per request, read once for the whole query: `<name> as (...)`. Put it in a `with` list.
+// formAnswerSql above is a subquery per request row. questionnaire_responses has no index on based_on_id, so each call
+// scans the whole table; a report that calls it for every request in its window scans it once per request and code.
+// This CTE scans it once.
+//   formAnswersCte('fa', ['ARTPR', 'VPREG'])                      every request that has the form
+//   formAnswersCte('fa', ['ARTPR'], { requestIds: 'select ...' })  only the requests whose lab_requests.id the subquery returns
+// Columns: request_row_id (the lab request's id), then one column per code, named by the code in small letters. Join it
+// with a left join on request_row_id; a request without the form has no row, so each answer is NULL, as formAnswerSql gives.
+// Each answer is exactly formAnswerSql's: of the responses of the form that hold an item with that linkId, the latest
+// authored one (no stamp last, then the lowest response id); its first answer's valueString, else its valueDecimal as text.
+// The pick is per code: a later response without the code does not hide an earlier answer. If one response holds the code
+// twice, the first item wins (formAnswerSql leaves that tie to the sort).
+export function formAnswersCte(name, codes, { requestIds = null } = {}) {
+  if (codes.length === 0 || codes.some((c) => !/^[A-Z0-9]+$/.test(c))) throw new Error('formAnswersCte: codes must be capital letters and digits');
+  return `${name} as (
+  select zfa.based_on_id as request_row_id,
+    ${codes.map((c) => `max(zfa.answer) filter (where zfa.link_id = ${sqlLit(c)}) as ${c.toLowerCase()}`).join(',\n    ')}
+  from (
+    select distinct on (zqr.based_on_id, zit.item ->> 'linkId') zqr.based_on_id, zit.item ->> 'linkId' as link_id,
+      coalesce(zit.item -> 'answer' -> 0 ->> 'valueString', zit.item -> 'answer' -> 0 ->> 'valueDecimal') as answer
+    from questionnaire_responses zqr
+    cross join lateral jsonb_array_elements(zqr.items::jsonb) with ordinality as zit(item, n)
+    where zqr.form_code = ${sqlLit(VL_FORM_CODE)} and zit.item ->> 'linkId' in (${sqlList(codes)})${requestIds ? `
+      and zqr.based_on_id in (${requestIds})` : ''}
+    order by zqr.based_on_id, zit.item ->> 'linkId', zqr.authored desc nulls last, zqr.id, zit.n
+  ) zfa
+  group by zfa.based_on_id
+)`;
+}
 
 // The testing laboratory's name (spec ruling 8): the report's performer_display, else the register
 // name of the performer's mapped facility, else the performer's code. `drAlias` is a
@@ -815,6 +847,7 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //     reported text, so v1's coded-value test (LIMSCodedValue = 'BASE', line 22) is covered by the text
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
+//     The answers are read once per query (formAnswersCte), only for the request rows of the lab ids in the table.
 export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false, rowIds = false } = {}) {
   const { prefilter, finalRange: windowed } = copyWindow('hivvlCte', from, to, 'r.tested_date', extraDays);
   const finalRange = labsInWindow ? '' : windowed;
@@ -833,6 +866,9 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false, 
   ${name}_ranked as (
     ${rankedSql(`${name}_src`)}
   ),
+  ${formAnswersCte(`${name}_form`, ['ARTPR', 'VPREG', 'ARTBR', 'VBREA', 'ARTRS', 'VISIT'], {
+    requestIds: `select q.id from lab_requests q where ${foldSql('q.request_id')} in (select ${foldSql('s.lab_id')} from ${name}_src s)`,
+  })},
   ${name}_flags as (
     select ${foldSql('q.request_id')} as lab_key,
       max(case when ${inListSql('a.vpreg', YES_WORDS)} or ${inListSql('a.artpr', YES_WORDS)} or ${inListSql('a.artrs', ['Pregnant Mother'])} then 1 end) as pregnant,
@@ -840,10 +876,7 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false, 
       max(case when a.artrs ilike '%Base%' or (q.panel_code = 'RTRI' and exists (select 1 from lab_results x where x.request_id = q.id)) then 1 end) as baseline_vl,
       max(case when ${inListSql('a.visit', ['3 months post unsuppressed VL result'])} or ${inListSql('a.artrs', ['Confirmation of Treatment Failure (repeat VL at 3M)', 'Post EAC'])} then 1 end) as three_m_post_unsuppressed
     from lab_requests q
-    cross join lateral (select
-      ${formAnswerSql('q.id', 'ARTPR')} as artpr, ${formAnswerSql('q.id', 'VPREG')} as vpreg,
-      ${formAnswerSql('q.id', 'ARTBR')} as artbr, ${formAnswerSql('q.id', 'VBREA')} as vbrea,
-      ${formAnswerSql('q.id', 'ARTRS')} as artrs, ${formAnswerSql('q.id', 'VISIT')} as visit) a
+    left join ${name}_form a on a.request_row_id = q.id
     where ${foldSql('q.request_id')} in (select ${foldSql('s.lab_id')} from ${name}_src s)
     group by ${foldSql('q.request_id')}
   )

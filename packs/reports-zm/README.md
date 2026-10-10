@@ -283,6 +283,18 @@ each, if wrong, is in the spec.
 - **Size.** "Unique VL clients" is about 39 KB of SQL and "COVID-19 daily line list" about 11 KB,
   because the builders are inlined. CE has no size limit that we found.
 
+## Performance notes
+
+Nothing here was timed on a large warehouse (see HONEST NON-PROOF). These notes say where the cost
+sits.
+
+- **VIRAL form answers.** `questionnaire_responses` has no index on `based_on_id` in CE (only the
+  primary key). `formAnswerSql` is a subquery per request, so each call scans the whole table. The
+  queries do not call it any more. `formAnswersCte` reads the form once per query, for the requests
+  in scope, and the hivvl builder and "VL results history by client" join that. We recommend an
+  index on `questionnaire_responses (based_on_id)` in CE. It is a CE change and is not part of this
+  pack.
+
 ## Shared builders
 
 Each builder is a function in `zm-sql.mjs` that returns a CTE (a named sub-query). It takes the date
@@ -305,7 +317,7 @@ Other shared helpers: `inRange`, `localDate`, `localTs`, `utcTs`, `dateParamSql`
 `requesterJoin`, `registryRowJoin`, `hmisCodeSql`, `areaFilter`, `given`, `blank`, `same`, `count1`,
 `ratio`, `ssTextKey`, `numberOfTextSql`, `likeVarcharSql` (SQL Server's varchar LIKE: a trailing space
 can fill a `_`), `testedAtSql`, `referralSql`, `labNameSql`, `labNamesCte`, `testingCodeSql`,
-`requestAttrSql`, `formAnswerSql`, `genderSql`, `ageGroupSql`, `dateWeekSql`, `optionsListSql` and
+`requestAttrSql`, `formAnswerSql`, `formAnswersCte`, `genderSql`, `ageGroupSql`, `dateWeekSql`, `optionsListSql` and
 `TODAY_ZM`.
 
 ## The queries
