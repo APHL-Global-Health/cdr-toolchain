@@ -1421,6 +1421,26 @@ const suites14 = [
 const suites30c = [];
 suites30c.push(...dateErrorSuites('t30c-eid', queries()));
 
+// Item C: the EID testing summaries group by area name the way SQL Server groups text (case and trailing spaces ignored). Two mapping rows,
+// one request each (a negative test, turnaround 9), spelled ZT30A Southern / Choma / Choma Clinic and ZT30B SOUTHERN (trailing space) / CHOMA /
+// CHOMA CLINIC (trailing space). v1 has one row at every level. The shown spelling is the smaller one in byte order (the uppercase one).
+const F30E = epiFixture('t30c', {
+  panel: 'HIVPC', obs: 'HIVPC', status: 'final', req: 'ZT30A',
+  auth: '2026-05-02T08:00:00Z', ana: '2026-05-03T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z',
+  noReport: false, results: [{ text: 'Negative' }],
+});
+F30E.req('T30C-EA01');
+F30E.req('T30C-EB01', { req: 'ZT30B' });
+const SETUP30E = F30E.setup(facilityRows('t30c', [
+  ['ZT30A', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT30B', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
+]));
+suites30c.push(
+  orderedSuite10('t30c-province-fold', provE?.sql ?? 'select 1', MAY_E, colsE('Province'), [pE('SOUTHERN ', 2, 2, 2, null, 2, 18)], SETUP30E),
+  orderedSuite10('t30c-district-fold', distE?.sql ?? 'select 1', { province: 'southern', ...MAY_E }, colsE('District'), [dE('CHOMA', 2, 2, 2, null, 2, 18)]),
+  orderedSuite10('t30c-facility-fold', facE?.sql ?? 'select 1', { province: 'SOUTHERN', district: 'choma', ...MAY_E }, colsE('Facility'), [fE('CHOMA CLINIC ', 2, 2, 2, null, 2, 18)]),
+);
+
 export const groups = [{ name: 't3', suites }, { name: 't10-eid', suites: suites10e },
   { name: 't13', suites: [...suites13dash, ...suites13list, ...suites13trend] },
   { name: 't14', suites: suites14 },

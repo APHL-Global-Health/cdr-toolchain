@@ -2908,6 +2908,44 @@ const suitesV16 = [
 const suites30c = [];
 suites30c.push(...dateErrorSuites('t30c-vl', queries()));
 
+// Item C: the testing summaries group by area name the way SQL Server groups text (case and trailing spaces ignored), and a group shows the
+// names of ONE mapping row. Four facilities of one province and district, each with one registered and tested request (suppressed,
+// turnaround 9). The spellings differ only in case and trailing spaces, so v1 has one row at every level:
+//   ZT30A  Southern   / Choma   / Choma Clinic
+//   ZT30B  SOUTHERN   / CHOMA   / CHOMA CLINIC      (spaces after the region and the name)
+//   ZT30C  Southern   / Choma   / ALPHA CLINIC
+//   ZT30D  southern   / CHOMA   / Alpha Clinic      (a space after the name)
+// The shown spelling is the mapping row that is smallest in byte order across the group columns together. At the facility level the
+// columns are District then Facility Name: for 'alpha clinic' the rows are ('Choma', 'ALPHA CLINIC') and ('CHOMA', 'Alpha Clinic '); the
+// smaller district is 'CHOMA', so the row is ('CHOMA', 'Alpha Clinic '). A per-column min() would show ('CHOMA', 'ALPHA CLINIC'), a pair no
+// mapping row holds.
+const F30 = epiFixture('t30c', {
+  panel: 'HIVVL', obs: 'HIVVL', status: 'final', req: 'ZT30A',
+  auth: '2026-05-02T08:00:00Z', ana: '2026-05-03T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z',
+  noReport: false, results: [{ num: 540 }],
+});
+F30.req('T30C-A01');
+F30.req('T30C-B01', { req: 'ZT30B' });
+F30.req('T30C-C01', { req: 'ZT30C' });
+F30.req('T30C-D01', { req: 'ZT30D' });
+const SETUP30 = F30.setup(facilityRows('t30c', [
+  ['ZT30A', 'Choma Clinic', 'Southern', 'Choma'],
+  ['ZT30B', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
+  ['ZT30C', 'ALPHA CLINIC', 'Southern', 'Choma'],
+  ['ZT30D', 'Alpha Clinic ', 'southern', 'CHOMA'],
+]));
+suites30c.push(
+  // Province: four mapping rows, one region group. 'SOUTHERN ' is the smallest spelling in byte order.
+  orderedSuite10('t30c-province-fold', provQ?.sql ?? 'select 1', MAY10, P10_COLUMNS, [p10('SOUTHERN ', 4, 4, 4, null, 4, 36)], SETUP30),
+  // District of Southern (the parameter ignores case and trailing spaces too): one row, 'CHOMA'.
+  orderedSuite10('t30c-district-fold', distQ?.sql ?? 'select 1', { province: 'southern', ...MAY10 }, D10_COLUMNS, [d10('CHOMA', 4, 4, 4, null, 4, 36)]),
+  // Facility of district Choma: two groups. Names come from one mapping row each.
+  orderedSuite10('t30c-facility-fold', facQ?.sql ?? 'select 1', { district: 'choma', ...MAY10 }, F10_COLUMNS, [
+    f10('CHOMA', 'Alpha Clinic ', 2, 2, 2, null, 2, 18),
+    f10('CHOMA', 'CHOMA CLINIC ', 2, 2, 2, null, 2, 18),
+  ]),
+);
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },

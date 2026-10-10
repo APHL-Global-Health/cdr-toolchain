@@ -19,8 +19,8 @@ import {
 // F from, to, province, district. Province and district are required selects (v1 has no "all" mode: a blank name matches nothing);
 // from and to are required (spec ruling 3).
 //
-// Rows. One per area name (P: province; D: district of the province, a NULL district is one row; F: facility name, so two register
-// entries with one name merge), ordered as v1 orders them (SQL Server text order, NULL first).
+// Rows. One per area name (P: province; D: district of the province, a NULL district is one row; F: facility name, so two mapping rows
+// with one name merge), names compared ignoring case and trailing spaces, ordered as v1 orders them (SQL Server text order, NULL first).
 //
 // Counts, per requesting facility, then summed by area name:
 //   Registrations   distinct lab numbers of panel HIVPC registered (RegisteredDateTime = lab_requests.authored_at) in the window, any status.
@@ -47,7 +47,9 @@ import {
 //     same district name in another province does not mix here (unlike the VL facility summary).
 //   - A province over 25 characters or a district over 50 would be cut by v1's varchar parameters and match nothing. The port matches the
 //     full name (evident intent). Names compare ignoring case and trailing spaces, as SQL Server does.
-//   - Facilities are keyed by the register row, where v1 keys by the facility code. Two codes mapped to one register row would merge here.
+//   - Facilities are keyed by the facility_map mapping row (one per code, as v1 keys by code), not by the register row. The sums are then
+//     grouped by area name the way SQL Server groups text, ignoring case and trailing spaces ('Choma Clinic' and 'CHOMA CLINIC ' are one
+//     row), and the row shows the names of one mapping row, the smallest in byte order (epiSummarySql).
 //
 // Deviations (spec ruling 2): none.
 //

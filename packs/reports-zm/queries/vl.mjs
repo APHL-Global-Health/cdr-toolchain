@@ -782,7 +782,9 @@ export const historyParams = () => [
 //     F filters mapped district = district.
 //   - A province over 15 characters or a district over 20 would be cut by v1's varchar parameters and match nothing. The port matches
 //     the full name (evident intent). Names compare ignoring case and trailing spaces, as SQL Server does.
-//   - Facilities are keyed by the register row, where v1 keys by the facility code. Two codes mapped to one register row would merge here.
+//   - Facilities are keyed by the facility_map mapping row (one per code, as v1 keys by code), not by the register row. The sums are then
+//     grouped by area name the way SQL Server groups text, ignoring case and trailing spaces ('Choma Clinic' and 'CHOMA CLINIC ' are one
+//     row), and the row shows the names of one mapping row, the smallest in byte order (epiSummarySql).
 //
 // Deviations (spec ruling 2):
 //   - v1 casts the result text to bigint to test it against 1000 (all three procedures). A decimal text ('999.5'), a text with a thousands

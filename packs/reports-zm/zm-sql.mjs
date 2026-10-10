@@ -1900,6 +1900,10 @@ export function vleidRequestsCte(name, { from, to, on = 'registered', rowIds = f
 // Counts are of distinct requests, as v1's count(distinct requestid). The turnaround is the whole-day average, cut toward zero as
 // SQL Server's int AVG cuts it, over the result rows (not the requests) with a collection date and at most 90 days to the
 // authorised date; TATTests counts those requests and TATpre = average x TATTests, summed over facilities. A sum over nothing is NULL.
+// Facilities are keyed by the facility_map mapping row (`fmr.id`: one per source code, where v1 keys by the facility code), not by the
+// register row. The sums are then taken by area name, and v1 groups text the way SQL Server compares it (case and trailing spaces ignored),
+// so the group key is the folded names. A group shows ONE spelling of its names: all the names come from the same mapping row, the
+// smallest in byte order across the group columns together (NULL last), never a per-column min() that could mix two rows.
 // Rows come ordered by the group columns as SQL Server orders text (NULL first).
 export function epiSummarySql({ panel, observations, anchor, endExtraDays = 0, lead, area, resultWhere = 'true', splits }) {
   const lo = `${dateParamSql('from')}::timestamp`;
@@ -1936,12 +1940,18 @@ export function epiSummarySql({ panel, observations, anchor, endExtraDays = 0, l
   ];
   const others = ['reg', 'tests', ...splitNames, 'tat'].filter((c) => c !== anchor);
   const exprs = lead.map(([, expr]) => expr);
-  return `with ${ctes.join(',\n')}
-select ${lead.map(([name, expr]) => `${expr} as "${name}"`).join(', ')}, sum(reg.n)::bigint as "Registrations", sum(tests.n)::bigint as "Tests",
-  ${splits.map((s, i) => `sum(${splitNames[i]}.n)::bigint as "${s.column}"`).join(', ')}, sum(tat.n)::bigint as "TATTests", sum(tat.avg_days * tat.n)::bigint as "TATpre"
-from ${anchor}
-join facility_map fmr on fmr.id = ${anchor}.fid
-${others.map((c) => `left join ${c} on ${c}.fid = ${anchor}.fid`).join('\n')}
-group by ${exprs.join(', ')}
-order by ${exprs.map((e) => `${ssTextKey(e)} collate "C" nulls first, ${e} collate "C" nulls first`).join(', ')}`;
+  const pick = (expr) => `(array_agg(${expr} order by ${exprs.map((e) => `${e} collate "C" nulls last`).join(', ')}))[1]`;
+  const quoted = lead.map(([name]) => `g."${name}"`);
+  return `with ${ctes.join(',\n')},
+grouped as (
+  select ${lead.map(([name, expr]) => `${pick(expr)} as "${name}"`).join(', ')}, sum(reg.n)::bigint as "Registrations", sum(tests.n)::bigint as "Tests",
+    ${splits.map((s, i) => `sum(${splitNames[i]}.n)::bigint as "${s.column}"`).join(', ')}, sum(tat.n)::bigint as "TATTests", sum(tat.avg_days * tat.n)::bigint as "TATpre"
+  from ${anchor}
+  join facility_map fmr on fmr.id = ${anchor}.fid
+  ${others.map((c) => `left join ${c} on ${c}.fid = ${anchor}.fid`).join('\n  ')}
+  group by ${exprs.map((e) => foldSql(e)).join(', ')}
+)
+select g.*
+from grouped g
+order by ${quoted.map((e) => `${ssTextKey(e)} collate "C" nulls first, ${e} collate "C" nulls first`).join(', ')}`;
 }
