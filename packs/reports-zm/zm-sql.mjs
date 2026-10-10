@@ -927,14 +927,15 @@ export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not de
 // row without a date (no report stamp, or a partial one such as '2026-07') is out, as v1's BETWEEN drops a NULL date. v1's own floor and
 // ceiling apply (line 105: AuthorisedDateTime between 2017-01-01 00:00:00 and getdate()): a report on a local date before 2017-01-01, or
 // stamped after now, is out, so a future-dated result never becomes a client's newest. The ceiling compares INSTANTS (the stamp carries its
-// offset, utcTs against now() in UTC), so it does not depend on the server's time zone; a date-only stamp has no offset and falls back to its
-// midnight against localtimestamp. The default
+// offset, utcTs against now() in UTC), so it does not depend on the server's time zone; a date-only stamp has no offset and is compared on
+// Zambia's clock: its date is in when it is not after Zambia's today (TODAY_ZM, the midnight of that date against v1's getdate()), whatever
+// time zone the session runs in. The default
 // (`rank` false) is unchanged, so slice 1 and every other caller read the same rows as before. `rank` cannot be used with `orRegistered`.
 export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`, where = 'true', extraPanels = [], orRegistered = false, rank = false } = {}) {
   if (rank && orRegistered) throw new Error('tndCte: rank cannot be used with orRegistered');
   const idsName = `${name}_ids`;
   const result = rpt('r');
-  const requestWindow = rank ? `${localDate('dr.issued')} >= date '2017-01-01' and coalesce(${utcTs('dr.issued')} <= now() at time zone 'UTC', ${localTs('dr.issued')} <= localtimestamp)` : `${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''}`;
+  const requestWindow = rank ? `${localDate('dr.issued')} >= date '2017-01-01' and coalesce(${utcTs('dr.issued')} <= now() at time zone 'UTC', ${localDate('dr.issued')} <= ${TODAY_ZM})` : `${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''}`;
   const resultWindow = rank ? '' : `
     and ${inRange('q.result_date', from, to)}`;
   const columns = `q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.firstname, q.surname, q.age_years, q.sex, q.gender,

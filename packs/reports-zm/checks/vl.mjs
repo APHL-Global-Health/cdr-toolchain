@@ -2960,6 +2960,56 @@ suites30c.push(
   ]),
 );
 
+// Item G: tndCte's ceiling (v1 line 105: AuthorisedDateTime <= getdate()) for a date-only stamp. A stamp with a time and an offset is an instant
+// and is compared as one. A stamp that is only a date has no instant, so it is the midnight of that date on Zambia's clock: a date-only stamp
+// for Zambia's today is in, and one for Zambia's tomorrow is out, whatever time zone the session runs in. It used the session's clock
+// (localtimestamp), so a session far west of Lusaka dropped today's result and one far east kept tomorrow's.
+// The clients are registered in January 2025 in another province, so the fold suites above (May 2026) do not see them.
+// The two stamps are built from Zambia's clock when the check starts. Each runs under three session zones: the default, Pacific/Kiritimati
+// (UTC+14, twelve hours ahead of Lusaka) and Etc/GMT+12 (UTC-12, fourteen hours behind). Whatever the time of day in Lusaka, one of the two
+// old failures shows: today is lost in the west zone before 14:00 in Lusaka, and tomorrow is kept in the east zone from 12:00.
+const zmDay = (offsetDays) => {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Lusaka', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const d = new Date(`${parts}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
+};
+const TODAY_30 = zmDay(0);
+const TOMORROW_30 = zmDay(1);
+const g30 = [];
+const clientG = (labId, who, issued, n) => {
+  const k = String(g30.length + 1).padStart(2, '0');
+  g30.push({ k, labId, who, issued, n });
+};
+clientG('T30C-G-TODAY', ['Today', 'Date'], TODAY_30, 100);
+clientG('T30C-G-TOMORROW', ['Tomorrow', 'Date'], TOMORROW_30, 100);
+const SETUP30G = `${facilityRows('t30c-g', [['ZT30R', 'Rank Clinic', 'Eastern', 'Chipata']])}
+insert into patients (id, firstname, surname, sex) values ${g30.map((c) => `(${lit(`t30c-g-p${c.k}`)}, ${lit(c.who[0])}, ${lit(c.who[1])}, 'F')`).join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, rejection_code, obr_set_id) values
+  ${g30.map((c) => `(${lit(`t30c-g-q${c.k}`)}, ${lit(c.labId)}, 'HIVVL', '2025-01-10T08:00:00Z', '2025-01-11T09:00:00Z', 'ZT30R', ${lit(`t30c-g-p${c.k}`)}, 30, 'REJ', 1)`).join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id) values
+  ${g30.map((c) => `(${lit(`t30c-g-d${c.k}`)}, ${lit(`t30c-g-q${c.k}`)}, 'final', '2026-05-01T07:00:00Z', ${lit(c.issued)}, '', null)`).join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
+  ${g30.map((c) => `(${lit(`t30c-g-r${c.k}`)}, ${lit(`t30c-g-q${c.k}`)}, 'HIVVL', null, ${c.n}, null, null)`).join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values
+  ${g30.map((c) => `(${lit(`t30c-g-a${c.k}`)}, ${lit(`t30c-g-q${c.k}`)}, ${lit(ATTR_SYSTEM)}, ${lit(REF)}, ${lit(`G${c.k}00`)})`).join(',\n  ')};`;
+// A suite under a session time zone: the zone is set after a savepoint, and the rollback to the savepoint puts it back.
+const tzSuite30 = (name, zone, params, row, setup = '') => {
+  const s = rSuite(name, params, row, setup);
+  const sp = `sp_${name.replace(/[^a-z0-9]/gi, '_')}`;
+  s.sql = `savepoint ${sp};\n${zone ? `set local time zone '${zone}';\n` : ''}${s.sql}\nrollback to savepoint ${sp};`;
+  return s;
+};
+const ZONES_30 = [['default', ''], ['east', 'Pacific/Kiritimati'], ['west', 'Etc/GMT+12']];
+suites30c.push(
+  ...ZONES_30.flatMap(([label, zone], i) => [
+    // Today's date-only result is in, and the one client counts (suppressed and undetectable: 100).
+    tzSuite30(`t30c-ceiling-today-${label}`, zone, r12('', '', '', { from: TODAY_30, to: TODAY_30 }), rate(1, 1, 1, 100, 100), i === 0 ? SETUP30G : ''),
+    // Tomorrow's is past the ceiling: no TND row, no client.
+    tzSuite30(`t30c-ceiling-tomorrow-${label}`, zone, r12('', '', '', { from: TOMORROW_30, to: TOMORROW_30 }), NULLS),
+  ]),
+);
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
