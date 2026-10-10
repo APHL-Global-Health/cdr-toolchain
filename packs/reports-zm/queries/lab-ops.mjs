@@ -25,8 +25,11 @@ import { labMonthSource, rateCutSql } from './vl.mjs';
 //
 // Testing lab (spec ruling 5). The testing lab of a test or a request is the performer of its report, which cdr writes from OPENLDR_LAB_CODE
 // for each push (cdr v2-transform.ts:401). v1 uses the testing code and falls back to the receiving code when the testing code is blank
-// (`len(TestingFacilityCode) = 0`, lines 41-43). CE does not carry the receiving code (spec ruling 7), so a request or test with a blank or
-// no testing code has no lab. It is left out of the list (a NULL code is in no `in` list and is not numeric) and never counted.
+// (`len(TestingFacilityCode) = 0`, lines 41-43). CE does not carry the receiving code (spec ruling 7). A blank DISA testing code is not lost:
+// cdr writes the configured lab code for every push (site-config.ts:64-73), so such a request is credited to the pushing lab where v1 credits
+// the receiving lab. The difference is which lab gets the credit, not a lower count. Only a report with a blank performer (data cdr did not
+// push, or no OPENLDR_LAB_CODE set) or a request with no report has no lab; it is left out of the list (a NULL code is in no `in` list and
+// is not numeric) and never counted.
 //
 // Rates are SQL Server's `int * 100.0 / int`: decimal(26,12), the quotient CUT at 12 decimals, not rounded (rateCutSql; measured on the
 // local SQL Server: 2 of 3 gives 66.666666666666). TB's rate columns are float (`cast(.. as float) * 100.0 / nullif(.., 0)`). A rate over
@@ -134,7 +137,8 @@ function finalSelect(labels) {
 //   - The request half has no register join and no report status test: a request whose facility is not in the register, or whose report is
 //     cancelled, counts in b. The test half needs a mapped facility and a final report (the builder).
 //
-// CE gaps (spec ruling 7): Referrals (above); a request or test whose report has no testing code is dropped (no receiving lab).
+// CE gaps (spec ruling 7): Referrals (above). A blank DISA testing code is credited to the pushing lab, not dropped (see the testing lab note
+// above); only a report with a blank performer, or no report, has no lab.
 //
 // Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
 const VL_LABS = ['ZAP', 'ZBP', 'ZCH', 'ZCM', 'ZCN', 'ZCD', 'ZCP', 'ZFP', 'ZKM', 'ZKS', 'ZKT', 'ZLR', 'ZLP', 'ZMB', 'ZMG', 'ZML', 'ZMP', 'ZNP', 'ZSJ',
@@ -227,7 +231,8 @@ ${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'VLTestRequests', 
 //   - The result classes are the builder's lists ('INVAL' sets no class, 'VALID' sets Invalid). A result on no list counts in no class.
 //   - Rejections counts requests with report status cancelled, which is v1's X. CE folds v1's other statuses to unknown, so those are not seen.
 //
-// CE gaps (spec ruling 7): Referrals (above). A request or test whose report has no testing code is dropped.
+// CE gaps (spec ruling 7): Referrals (above). A blank DISA testing code is credited to the pushing lab, not dropped (see the testing lab note
+// above); a request or test whose report has a blank performer (data cdr did not push), or no report, is dropped.
 //
 // Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
 const EID_OUT = ['ZZZ', 'MNC', 'MZM', 'ZNN', 'XXX'];
@@ -327,8 +332,9 @@ ${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'EIDTestRequests',
 //   - TBGNX has one row per GXMTB result with no dedupe, and v_GeneXpert joins GXRIF to GXMTB on equal facts (tbgnxCte, Task 4, not solved
 //     again here): a request with a missing fact loses its RIF result, so it is not a RIF test.
 //
-// CE gaps (spec ruling 7): none of its own. A request or test whose report has no testing code is dropped (no receiving lab: line 49
-// falls back to it in v1).
+// CE gaps (spec ruling 7): none of its own. Line 49 falls back to the receiving lab when the testing code is blank; in CE a blank DISA testing
+// code is credited to the pushing lab (see the testing lab note above), so the count is the same and only the lab can differ. A report with a
+// blank performer, or no report, has no lab and is dropped.
 //
 // Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
 const TB_OUT = ['ZZZ', 'XXX', '000'];
@@ -450,9 +456,10 @@ ${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'TBTestRequests', 
 //   - A DISA Link site in v1's Laboratories that never tests has a part b row only in v1. CE has no Laboratories list: a lab exists only through a
 //     report's testing code, so such a site has no row in CE.
 //   - v1's lab key is ReceivingFacilityCode when set, else TestingFacilityCode. CE carries no receiving code, so the key is the testing
-//     code, diagnostic_reports.performer. cdr writes it from its configured OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401), so
-//     the lab is the lab that PUSHED the data, which v1's receiving lab is not always. A request with no report, or a blank or missing
-//     testing code, has no lab and is left out.
+//     code, diagnostic_reports.performer. cdr writes it from its configured OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401,
+//     site-config.ts:64-73), so the lab is the lab that PUSHED the data, which v1's receiving lab is not always. A blank DISA testing code is
+//     not lost: its request is credited to the pushing lab. Only a request with no report, or a report with a blank performer (not pushed by
+//     cdr), has no lab and is left out.
 //   - There is no Laboratories dictionary, so the inner join to it (which drops codes it does not hold) is not reproduced: every code is a
 //     lab. The name is the report's name with one name per code (labNamesCte), read from every report of the code (a dictionary does not
 //     depend on the floor).
@@ -583,8 +590,9 @@ ${finalSelect26(['Province', 'LabCode', 'LabName', 'LastTransmission'], ['text',
 //   - A request with no collection date, a partial one ('2026-01'), no report or no registered date has no day count, so it is out.
 //
 // CE gaps (spec ruling 7 and 8):
-//   - v1's lab is the testing code, else the receiving code (lines 33-36). CE has no receiving code: a request with a blank testing code
-//     is listed with no lab name where v1 would name the receiving lab.
+//   - v1's lab is the testing code, else the receiving code (lines 33-36). CE has no receiving code. A blank DISA testing code is credited to
+//     the pushing lab (cdr writes OPENLDR_LAB_CODE as the performer of every push, v2-transform.ts:401), so the lab differs from v1's receiving
+//     lab but the request is listed. Only a report with a blank performer (not pushed by cdr) is listed with no lab name.
 //   - Laboratory is the report's name with ONE name per testing code (labNamesCte, the Task 16 rule), chosen from the rows this query
 //     returns: the report's display, else the register name of the mapped code, else the code. v1's join is to its dictionary.
 //   - The collection date is diagnostic_reports.effective, the registered date lab_requests.authored_at, the analysis date
@@ -770,8 +778,9 @@ ${finalSelect26(['Facility', 'New Registrations', 'Tested', 'Reviewed', 'Tested 
 //
 // CE gaps (spec ruling 7 and 8):
 //   - v1's lab is the testing code, else the receiving code (F 11-14, W). CE has no receiving code: the lab is the report's performer (cdr writes
-//     OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401). A request whose report has a blank testing code, or no report, has no
-//     lab and is in no count (a rejected request with no report is not counted in Rejects).
+//     OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401, site-config.ts:64-73). A blank DISA testing code is not lost: the request is
+//     credited to the pushing lab, where v1 credits the receiving lab (which lab differs, the counts do not). A request with no report, or whose
+//     report has a blank performer (not pushed by cdr), has no lab and is in no count (a rejected request with no report is not counted in Rejects).
 //   - v1 inner joins its dictionary of laboratories (F 255-259), so a lab missing from it is not listed. CE has no dictionary: every testing code
 //     is a laboratory.
 //   - LabName. W 23-33 is a constant CASE and is kept as written, on the folded lab code (ZUL, ZUX, ZUC, ZUP, ZUA, ZUE, ZLP, ZLR). Any other lab has
@@ -901,7 +910,8 @@ ${finalSelect26(labels, ['text', 'text', 'text', ...Array(12).fill('number')])}`
 //
 // CE gaps (spec ruling 7 and 8):
 //   - The lab key. v1 uses the testing code, else the receiving code (S 96-97). CE has no receiving code, so the lab is the report's performer.
-//     A request whose testing code is blank is in the row with no lab (all six leading columns NULL); v1 would put it with its receiving lab.
+//     A request whose report has a blank performer (not pushed by cdr, which writes the pushing lab for every push, so a blank DISA testing code
+//     is credited to that lab) is in the row with no lab (all six leading columns NULL); v1 would put it with its receiving lab.
 //     That row also holds the requests of v1's labs missing from the dictionary. v1 puts all of those in ONE row with NULL province, district,
 //     facility and lab code (S 95 is a left join and the LabCode column is the dictionary's). CE has no dictionary, so each unmapped code keeps
 //     its own row with LabCode set and NULL in the other five columns (fixture SL3); only a blank testing code is in the NULL row.
@@ -988,7 +998,8 @@ ${finalSelect26(labels, [...Array(6).fill('text'), ...Array(16).fill('number')])
 //     where UTC says December 2025). A request with no registered stamp is in no year.
 //
 // CE gaps (spec ruling 7): the lab key. v1 uses the testing code, else the receiving code (M 39-43). CE has no receiving code, so the lab is the
-// report's performer (cdr writes OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401); a request with a blank testing code is out. v1's
+// report's performer (cdr writes OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401, so a blank DISA testing code is credited to the
+// pushing lab, not lost); a request whose report has a blank performer (not pushed by cdr) is out. v1's
 // inner join to the laboratory dictionary (which drops a lab missing from it) is not reproduced: every testing code is a laboratory. A request with
 // no report has no lab and is not counted.
 // Deviations (spec ruling 3): the default year of the function (2019) is the required parameter. MonthDescription is English month names
@@ -1203,8 +1214,8 @@ order by ${ssTextKey('g.facility')} collate "C" nulls first, g.facility collate 
 //
 // CE mapping and gaps (spec rulings 5, 6, 7 and 8):
 //   - The lab is the report's performer, which cdr writes from OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401). A request with no
-//     report, or a blank performer, has no lab: v1 would use the receiving code, which CE does not carry, so these requests are one row with
-//     a NULL name.
+//     report, or a blank performer (not pushed by cdr: a blank DISA testing code is credited to the pushing lab, v2-transform.ts:401), has no lab: v1 would
+//     use the receiving code, which CE does not carry, so these requests are one row with a NULL name.
 //   - CE has no Laboratories dictionary. The name is the report's (labNameSql: its display, else the register name of the mapped code, else the
 //     code) with ONE name per lab code, the Task 16 rule (labNamesCte): the rows never split on per-report names, and the code's name is the
 //     one among its listed rows that is not just the code, the smallest in byte order. A lab with no name anywhere is shown by its code
@@ -1479,8 +1490,10 @@ export const labAreaCompletenessSql = () => completenessSql({ level: 'labarea', 
 //   - LabList is not in the script. The lab is the report's performer (cdr: OPENLDR_LAB_CODE, v2-transform.ts:401); LabFacility is the lab's
 //     register name from the shared labNamesCte (one name per code, the Task 16 rule), chosen among the rows the view lists. A blank or
 //     missing performer, or a request with no report, is in no row. Two codes with one name are one row.
-//   - The VL views fall back to ReceivingFacilityCode when TestingFacilityCode is '' (TVL 42-46, TM 44-48). CE has no receiving code, so such
-//     a request has no lab and is left out. The lab views therefore lose those requests; v1 would count them for the receiving lab.
+//   - The VL views fall back to ReceivingFacilityCode when TestingFacilityCode is '' (TVL 42-46, TM 44-48). CE has no receiving code, but a
+//     blank DISA testing code is not lost: cdr writes the configured lab code (OPENLDR_LAB_CODE) for every push (cdr v2-transform.ts:401,
+//     site-config.ts:64-73), so those requests are credited to the pushing lab. The difference from v1 is which lab gets the credit, not lower
+//     counts. Only a report with a blank performer (data cdr did not push) has no lab and is left out.
 //
 // Window (ruling 5): v1 has none. `from` and `to` are optional (blank is all history), YYYY-MM-DD, on the local date of the view's bucket
 // date (optionalWindowSql); a request with no bucket date is out as soon as one side is given. The date parameters are validated (dateParamSql).

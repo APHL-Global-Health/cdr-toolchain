@@ -108,7 +108,8 @@ const sample = (expr) => `min(${expr} collate "C")`;
 // Deviations (spec ruling 3): v1's default window (last month, line 18-20) becomes the required `from` and `to`.
 //
 // CE gaps (spec ruling 7): none of its own. Everything comes from tbgnxCte, whose gaps carry over: a request whose report has a blank
-// testing code is dropped (CE does not carry the receiving facility), and the facility is the register name. This report reads none of
+// testing code is dropped (data cdr did not push; for cdr data a blank DISA testing code is credited to the pushing lab, which cdr writes as
+// the performer for every push, v2-transform.ts:401), and the facility is the register name. This report reads none of
 // the TBCOL answers.
 
 const GENDERS = [['m', "s.gender = 'Male'"], ['f', "s.gender = 'Female'"], ['i', "s.gender = 'Indeterminate'"],
@@ -364,7 +365,8 @@ export const tbTrendParams = () => [
 //     mapped code, else the code). LabName is NOT a group key. Ruling 8 note: the row shows ONE name per testing code, the same on every
 //     row of that code, chosen from the names of all the code's reports in the window: a name that is not just the code beats the bare
 //     code, then the smallest in byte order. So the answer is total and does not depend on row order or on the age or TBHIV group.
-//   - A report with no testing code has TestedAt NULL here (v1 falls back to ReceivingFacilityCode, which CE does not carry). Its LabName
+//   - A report with a blank performer has TestedAt NULL here (v1 falls back to ReceivingFacilityCode, which CE does not carry; for cdr data a
+//     blank DISA testing code is credited to the pushing lab, so only data cdr did not push is affected). Its LabName
 //     is NULL too, as v1's join finds no lab for a NULL code, whatever the report's display says. Such a row has no RIF (a NULL fact in
 //     geneXpertCte) and forms its own group.
 

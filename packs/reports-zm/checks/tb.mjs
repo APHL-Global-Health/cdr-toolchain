@@ -844,10 +844,10 @@ const suites15dash = [
   // Partial stamps (July): P1 is in no window; P2 has NULL hours, so AverageTAT averages P3 alone (24) and its flags are 0.
   // The window starts 06-15 and ends 07-31 so that '2026-07' sits inside it as text.
   dashSuite15('dash-partial-stamps', { ...none15, ...win15('2026-06-15', '2026-07-31') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-06-15', '2026-07-31'))]),
-  // Two register rows for one facility (case and a trailing space): one group, one row, whichever spelling it shows.
   // September: the one-sided rows (see SEPT15). The expected row is also pinned by hand in hand-totals.
   dashSuite15('dash-measure-rules', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-09-01', '2026-09-30') },
     [dashRow15(['Southern', 'Choma', 'Choma General Hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', '2026-09-01', '2026-09-30'))]),
+  // Two register rows for one facility (case and a trailing space): one group, one row, whichever spelling it shows.
   loose15(dashSuite15('dash-fold-facility', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-08-01', '2026-08-31') },
     [dashRow15(['southern', 'choma', 'choma general hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', '2026-08-01', '2026-08-31'))])),
   loose15(dashSuite15('dash-fold-province', { ...area15('southern', '', ''), ...win15('2026-08-01', '2026-08-31') },

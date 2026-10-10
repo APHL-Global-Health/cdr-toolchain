@@ -660,7 +660,7 @@ export const eidAnswersParams = () => [];
 //   - Referral stays NULL: CE holds no receiving facility (the eid builder's referral). Disalink reads the pre-registration attributes and
 //     is 0 until cdr-toolchain fills them.
 //   - v1 inner-joins its laboratory dictionary on TestedAt (lines 12-13): a test whose testing laboratory is not in it, or has no testing
-//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with no testing code is out and every other one stays.
+//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with a blank performer (data cdr did not push; a blank DISA testing code is credited to the pushing lab, v2-transform.ts:401) is out and every other one stays.
 //     LabName is the report's display, else the mapped register name, else the code (ruling 8). For a ZU code stored as ZUL (TestedAt),
 //     the name is that of the report's own code, where v1 names ZUL.
 //

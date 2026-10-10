@@ -1247,8 +1247,9 @@ export const uniqueClientsRatesParams = () => [
 // CE gaps (spec ruling 7 and 8):
 //   - Laboratory is diagnostic_reports.performer (the testing lab code), shown as stored (the smallest spelling in byte order when
 //     spellings differ by case or trailing spaces). CE has no Laboratories dictionary and no receiving facility code, so the inner join to the
-//     dictionary (which drops a request whose lab code is not in it) is not reproduced: a request with a blank testing lab is out (v1 falls to
-//     the receiving code, which CE lacks), and every other code is a laboratory.
+//     dictionary (which drops a request whose lab code is not in it) is not reproduced. v1 falls to the receiving code when the testing code is
+//     blank; CE lacks it, but cdr writes the configured lab code as the performer of every push (v2-transform.ts:401), so such a request is
+//     credited to the pushing lab and counted. A report with a blank performer (data cdr did not push) is out, and every other code is a laboratory.
 //   - A request with no report has no testing lab in CE, so it is not counted in Requests.
 //
 // Deviations (spec ruling 2): none.
@@ -1394,7 +1395,7 @@ export const resultBandsParams = () => dateParams(false);
 //   - Referral stays NULL: CE holds no receiving facility (the hivvl builder's referral). Disalink reads the pre-registration attributes and
 //     is 0 until cdr-toolchain fills them.
 //   - v1 inner-joins its laboratory dictionary on TestedAt (lines 11-12): a test whose testing laboratory is not in it, or has no testing
-//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with no testing code is out and every other one stays.
+//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with a blank performer (data cdr did not push; a blank DISA testing code is credited to the pushing lab, v2-transform.ts:401) is out and every other one stays.
 //     LabName is the report's display, else the mapped register name, else the code (ruling 8), taken from the report of the row the hivvl
 //     table kept. For a ZU code stored as ZUL (TestedAt), the name is that of the report's own code, where v1 names ZUL.
 //

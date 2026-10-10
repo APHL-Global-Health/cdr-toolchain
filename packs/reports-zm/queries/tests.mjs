@@ -1062,8 +1062,9 @@ function finalSelect21(labels, kinds) {
 //
 // CE gaps and choices (spec rulings 7 and 8):
 //   - FirstPrinted (LabResults.FirstPrinted) is not in CE: the column is NULL.
-//   - LabName falls back to the receiving lab when the testing code is blank (line 54). CE does not carry ReceivingFacilityCode, so a blank
-//     code gives no name.
+//   - LabName falls back to the receiving lab when the testing code is blank (line 54). CE does not carry ReceivingFacilityCode, but a
+//     blank DISA testing code is credited to the pushing lab (cdr writes OPENLDR_LAB_CODE as the performer of every push, v2-transform.ts:401),
+//     so the name is the pushing lab's, not empty. Only a report with a blank performer (data cdr did not push) gives no name.
 //   - TestingStatus is the text v1 reads from its status dictionary (line 30). The filter keeps final reports only, so it is the text of F:
 //     taken from the stock OpenLDRDict seed (v1.0.1); Zambia to confirm their row.
 //   - Age is lab_requests.age_years, Sex the patient's sex, ClinicalInfo lab_requests.clinical_info, SpecimenType the specimen's type text.
