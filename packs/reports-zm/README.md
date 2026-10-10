@@ -22,7 +22,7 @@ Read `QUESTIONS-FOR-ZM.md` for what we still need from the Zambia team.
 | `queries/tests.mjs` | The 10 queries for recency, DBS, CD4, HPV, culture, drug resistance, NMPDP and PHSIMS. |
 | `queries/covid.mjs` | The 10 COVID-19 and wastewater queries. |
 | `queries/lab-ops.mjs` | The 23 lab operations queries: lab performance, data quality, weekly stats, rejections, date completeness, turnaround, weekly requests. |
-| `check-reports-zm.mjs` | Runs every check suite against the dev Postgres. 12,908 checks. Run it by hand before a release. |
+| `check-reports-zm.mjs` | Runs every check suite against the dev Postgres. 13,049 checks. Run it by hand before a release. |
 | `checks/*.mjs` | The suites, one file per area, and `helpers.mjs` for the shared helpers. `epi-fixture.mjs` holds fixture helpers shared by the area files. |
 | `scan-sql.mjs` | Scans every query and option list the way CE's SQL check does. Prints `ok` or `BAD` for each. |
 | `INVENTORY.md` | What each of Zambia's 181 v1 objects became: port, merge, absorb, blocked or drop. |
@@ -56,24 +56,24 @@ stops the build. It prints the two steps: the register (3,788 rows) and the cust
     node packs/reports-zm/scan-sql.mjs
     node packs/vl-reports-mz/check-vl-functions.mjs
 
-The first runs 12,908 checks in the CE dev Postgres container, on temporary copies of the warehouse
+The first runs 13,049 checks in the CE dev Postgres container, on temporary copies of the warehouse
 tables, and rolls back. It reads no warehouse rows. It takes several minutes and exits 1 on any
 mismatch. The second prints `ok` for each of the 74 queries. The third is the Mozambique pack's check
 (76 checks). Run it too, because this pack imports helpers from `vl-queries.mjs`.
 
-Checks per file, with the 35 of slice 1 that sit in `check-reports-zm.mjs`:
+Checks per file, with the 40 of slice 1 that sit in `check-reports-zm.mjs`:
 
 | File | Checks |
 |---|---|
-| `check-reports-zm.mjs` (slice 1) | 35 |
-| `checks/helpers.mjs` | 1,055 |
-| `checks/vl.mjs` | 1,408 |
-| `checks/eid.mjs` | 922 |
+| `check-reports-zm.mjs` (slice 1) | 40 |
+| `checks/helpers.mjs` | 1,145 |
+| `checks/vl.mjs` | 1,438 |
+| `checks/eid.mjs` | 926 |
 | `checks/tb.mjs` | 2,039 |
-| `checks/tests.mjs` | 2,206 |
-| `checks/covid.mjs` | 1,478 |
-| `checks/lab-ops.mjs` | 3,765 |
-| Total | 12,908 |
+| `checks/tests.mjs` | 2,211 |
+| `checks/covid.mjs` | 1,487 |
+| `checks/lab-ops.mjs` | 3,763 |
+| Total | 13,049 |
 
 Each check has hand-worked expected rows, made from the v1 text with a comment naming the v1 file and
 line. Fixture ids start with the task number (`t14-`). Each suite group runs in its own transaction,
@@ -852,7 +852,7 @@ without defining them. It also calls functions of `OpenLDRDict` that Zambia has 
 
 What this pack has not shown:
 
-- **Parity with v1 on real data.** No Zambia result data is on this machine. Every one of the 12,908
+- **Parity with v1 on real data.** No Zambia result data is on this machine. Every one of the 13,049
   checks runs made-up cases in real Postgres, with expected rows worked out by hand from the v1
   text. They prove the SQL against those cases. They do not prove CE and v1 agree on real DISA data.
 - **What was run on SQL Server.** For "Turnaround times" and "Requests received by week", the v1 view
