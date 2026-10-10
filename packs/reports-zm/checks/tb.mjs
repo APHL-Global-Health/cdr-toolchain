@@ -7,6 +7,8 @@
 
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { geneXpertCte, tbgnxCte } from '../zm-sql.mjs';
+import { queries } from '../queries/tb.mjs';
+import { orderedSuite } from './epi-fixture.mjs';
 
 // ---- Columns ----
 
@@ -473,4 +475,639 @@ const suites = [
   shapeSuite('tbgnx-shape', tbgnxCte, 'tbgnxCte'),
 ];
 
-export const groups = [{ name: 't4', suites }];
+// ============================================================================================
+// Group t15: "TB GeneXpert dashboard summary" (v1 sp_dash_getTBGNX), "TB GeneXpert by facility, sex and age"
+// (v1 sp_dash_getTBGNX_List) and "TB GeneXpert monthly trend" (v1 sp_dash_getMonthlyTBTrend). Fixture ids start with
+// "t15-"; lab ids (lr.request_id) start with "T15-". "TBGNX line N" is a line of StoredProcedure__dbo_sp_dash_getTBGNX.sql,
+// "List line N" of ...getTBGNX_List.sql, "Trend line N" of ...getMonthlyTBTrend.sql, "proc line N" of sp_getTBsLastHour.
+//
+// Windows. TBGNX (line 21) and List (line 21) move the end date one day forward and compare cast(AuthorisedDateTime as date),
+// so the whole day after `to` counts, on the LOCAL date of the stamp. Trend (lines 20-22) is cast to date with no extra day.
+//
+// Where the expected rows come from. FACTS15 holds, for every row the TBGNX table would hold, the facts written out by hand from
+// sp_getTBsLastHour (gender, age group, cleaned MTB and RIF, hours, POC, the three flags, the local authorised date). The
+// aggregate formulas of v1 are then written once in JS (metrics15) and applied to the facts of each window. Two hand-worked
+// suites pin that JS: they compare it with totals worked out by hand on paper for the biggest groups (hand-totals, hand-groups).
+// The trend rows are all written by hand.
+// ============================================================================================
+
+const P15 = [];
+const R15 = [];
+const S15 = [];
+const D15 = [];
+const L15 = [];
+const FACTS15 = [];
+let n15 = 0;
+const nz15 = (v) => (v === null || v === undefined ? 'null' : String(v));
+
+// The areas: [province, district, facility] as the register rows spell them. UNM is a facility that is not in the register
+// (no province, no district, no description). MRG is a second register row for Choma General Hospital that differs in case and in
+// a trailing space: SQL Server groups it with the first.
+const AREA15 = {
+  CGH: ['Southern', 'Choma', 'Choma General Hospital'],
+  CCL: ['Southern', 'Choma', 'Choma Clinic'],
+  MAZ: ['Southern', 'Mazabuka', 'Mazabuka Hospital'],
+  CHI: ['Lusaka', 'Lusaka', 'Chilenje Clinic'],
+  KAF: ['Lusaka', 'Kafue', 'Kafue District Hospital'],
+  UNM: [null, null, null],
+  MRG: ['SOUTHERN', 'choma', 'CHOMA GENERAL HOSPITAL '],
+};
+// The facts of one TBGNX row: gender and age are the table's (null when missing), mtb and rif the cleaned texts, tat the hours
+// (null when a stamp is partial), poc 0 or 1, w the three flags, auth the LOCAL date of the authorised stamp.
+const fact15 = (area, gender, age, mtb, rif, tat, poc, w, auth) => {
+  const [province, district, facility] = AREA15[area];
+  return { province, district, facility, gender, age, mtb, rif, tat, poc, w24: w[0], w48: w[1], w72: w[2], auth };
+};
+
+// One request: `o` holds req (facility code), panel, sex (none: no patient), age (years), mtb (one GXMTB text per result), rif
+// (the GXRIF text), eff (specimen date), iss (authorised date), perf (testing code). Every request has a specimen with a received
+// time and a registered and an analysis time, so the RIF joins its MTB (a missing fact would lose the RIF, view lines 107-120).
+// `facts` is the list of TBGNX rows it gives (a request with two GXMTB results gives two).
+function tb15(labId, o, facts) {
+  const k = String(++n15).padStart(2, '0');
+  const qid = `t15-q${k}`;
+  let pid = null;
+  if (o.sex) {
+    pid = `t15-p${k}`;
+    P15.push(`(${lit(pid)}, ${lit('P' + k)}, ${lit(o.sex)})`);
+  }
+  R15.push(`(${lit(qid)}, ${lit(labId)}, ${lit(o.panel ?? 'TBGNX')}, '2026-04-01T08:00:00Z', '2026-04-01T09:00:00Z', ${lit(o.req)}, ${lit(pid)}, ${nz15(o.age)}, 10000)`);
+  const sid = `t15-s${k}`;
+  S15.push(`(${lit(sid)}, '2026-04-01T12:00:00Z')`);
+  D15.push(`(${lit(`t15-d${k}`)}, ${lit(qid)}, 'final', ${lit(o.eff)}, ${lit(o.iss)}, ${lit(o.perf ?? 'LUS')}, ${lit(sid)})`);
+  o.mtb.forEach((t, i) => L15.push(`(${lit(`t15-r${k}-m${i + 1}`)}, ${lit(qid)}, 'GXMTB', ${lit(t)})`));
+  if (o.rif !== undefined && o.rif !== null) L15.push(`(${lit(`t15-r${k}-r`)}, ${lit(qid)}, 'GXRIF', ${lit(o.rif)})`);
+  for (const f of facts) FACTS15.push({ id: labId, ...f });
+}
+
+// ---- The cases ----
+// Each comment gives what sp_getTBsLastHour makes of the row. tat is datediff(hh) on the specimen and authorised times (proc
+// line 77), the flags are "under 24, 48, 72" (lines 78-80), POC is the panel POCGT or a numeric testing code (line 76).
+
+// Choma General Hospital (ZSOUT): the 10 rows of the first ten in the hand totals below.
+tb15('T15-A1', { req: 'ZSOUT', sex: 'F', age: 0, mtb: ['Detected'], rif: 'Detected', eff: '2026-05-01T08:00:00Z', iss: '2026-05-02T08:00:00Z' },
+  [fact15('CGH', 'Female', '<01', 'MTB Detected', 'Detected', 24, 0, [0, 1, 1], '2026-05-02')]);                // 24 hours is not under 24
+tb15('T15-A2', { req: 'ZSOUT', sex: 'M', age: 3, mtb: ['Positive'], rif: 'IND', eff: '2026-05-03T00:00:00Z', iss: '2026-05-03T10:00:00Z' },
+  [fact15('CGH', 'Male', '01-04', 'MTB Detected', 'Indeterminate', 10, 0, [1, 1, 1], '2026-05-03')]);
+tb15('T15-A3', { req: 'ZSOUT', sex: 'F', age: 25, mtb: ['Negative'], rif: 'Not Detected', eff: '2026-05-05T08:00:00Z', iss: '2026-05-08T09:00:00Z', perf: '4567' },
+  [fact15('CGH', 'Female', '25-29', 'MTB Not Detected', 'Not Detected', 73, 1, [0, 0, 0], '2026-05-08')]);      // POC: numeric code
+tb15('T15-A4', { req: 'ZSOUT', panel: 'POCGT', sex: 'M', age: 60, mtb: ['Error'], rif: 'ERR', eff: '2026-05-10T12:00:00Z', iss: '2026-05-11T11:00:00Z' },
+  [fact15('CGH', 'Male', '50+', 'Error', 'Error', 23, 1, [1, 1, 1], '2026-05-11')]);                              // POC: panel POCGT
+tb15('T15-A5', { req: 'ZSOUT', sex: 'I', age: 12, mtb: ['Invalid'], rif: 'INV', eff: '2026-05-12T00:00:00Z', iss: '2026-05-12T05:00:00Z' },
+  [fact15('CGH', 'Indeterminate', '10-14', 'Invalid', 'Invalid', 5, 0, [1, 1, 1], '2026-05-12')]);
+tb15('T15-A6', { req: 'ZSOUT', sex: 'U', age: 33, mtb: ['NORES'], rif: 'NORES', eff: '2026-05-15T00:00:00Z', iss: '2026-05-17T00:00:00Z' },
+  [fact15('CGH', 'Unknown', '30-34', 'No Results', 'No Results', 48, 0, [0, 0, 1], '2026-05-17')]);
+// No patient and no age: gender and age group are NULL. The missing sex and age break the RIF join, so the RIF is NULL.
+tb15('T15-A7', { req: 'ZSOUT', mtb: ['Detected'], rif: 'Detected', eff: '2026-05-20T00:00:00Z', iss: '2026-05-20T06:00:00Z' },
+  [fact15('CGH', null, null, 'MTB Detected', null, 6, 0, [1, 1, 1], '2026-05-20')]);
+// 'Detected_Low' is on no list of the clean-up, so it stays as reported, and v1's RIF_Positive list has exactly that spelling.
+tb15('T15-A8', { req: 'ZSOUT', sex: 'F', age: 50, mtb: ['Detected'], rif: 'Detected_Low', eff: '2026-05-21T00:00:00Z', iss: '2026-05-21T01:00:00Z' },
+  [fact15('CGH', 'Female', '50+', 'MTB Detected', 'Detected_Low', 1, 0, [1, 1, 1], '2026-05-21')]);
+// Two GXMTB results on one request make two rows (no dedupe in v1): one MTB Detected, one MTB Not Detected, each with the RIF.
+tb15('T15-A9', { req: 'ZSOUT', sex: 'F', age: 5, mtb: ['Detected', 'Negative'], rif: 'Detected', eff: '2026-05-22T00:00:00Z', iss: '2026-05-23T00:00:00Z' }, [
+  fact15('CGH', 'Female', '05-09', 'MTB Detected', 'Detected', 24, 0, [0, 1, 1], '2026-05-23'),
+  fact15('CGH', 'Female', '05-09', 'MTB Not Detected', 'Detected', 24, 0, [0, 1, 1], '2026-05-23'),
+]);
+// Choma Clinic (ZCHO2).
+tb15('T15-B1', { req: 'ZCHO2', sex: 'M', age: 8, mtb: ['Detected _ High'], rif: 'Resistant', eff: '2026-05-02T00:00:00Z', iss: '2026-05-04T12:00:00Z' },
+  [fact15('CCL', 'Male', '05-09', 'MTB Detected', 'Detected', 60, 0, [0, 0, 1], '2026-05-04')]);
+// 'Detected _ Low' (with spaces) is not on the RIF list of the clean-up and not 'Detected_Low' either: it stays and is not positive.
+tb15('T15-B2', { req: 'ZCHO2', sex: 'F', age: 17, mtb: ['Detected'], rif: 'Detected _ Low', eff: '2026-05-06T00:00:00Z', iss: '2026-05-06T03:00:00Z', perf: '12' },
+  [fact15('CCL', 'Female', '15-19', 'MTB Detected', 'Detected _ Low', 3, 1, [1, 1, 1], '2026-05-06')]);
+tb15('T15-B3', { req: 'ZCHO2', panel: 'POCGT', sex: 'F', age: 44, mtb: ['Negative'], rif: 'S', eff: '2026-05-09T00:00:00Z', iss: '2026-05-10T00:00:00Z' },
+  [fact15('CCL', 'Female', '40-44', 'MTB Not Detected', 'Not Detected', 24, 1, [0, 1, 1], '2026-05-10')]);
+// Mazabuka Hospital (ZMAZA): no POC test.
+tb15('T15-C1', { req: 'ZMAZA', sex: 'M', age: 22, mtb: ['Detected'], rif: 'DETEC', eff: '2026-05-04T00:00:00Z', iss: '2026-05-05T00:00:00Z' },
+  [fact15('MAZ', 'Male', '20-24', 'MTB Detected', 'Detected', 24, 0, [0, 1, 1], '2026-05-05')]);
+tb15('T15-C2', { req: 'ZMAZA', sex: 'M', age: 22, mtb: ['Detected'], rif: 'Intermediate', eff: '2026-05-04T00:00:00Z', iss: '2026-05-04T20:00:00Z' },
+  [fact15('MAZ', 'Male', '20-24', 'MTB Detected', 'Indeterminate', 20, 0, [1, 1, 1], '2026-05-04')]);
+// Chilenje Clinic (ZLUSA): stamps with +02:00 near midnight. The local date decides the window, the UTC instant decides the hours.
+// D1: 05-31T23:30+02:00 is 21:30Z, 45 hours from 05-30T00:00Z. Local date 05-31.
+tb15('T15-D1', { req: 'ZLUSA', sex: 'F', age: 29, mtb: ['Detected'], rif: 'Detected', eff: '2026-05-30T00:00:00Z', iss: '2026-05-31T23:30:00+02:00' },
+  [fact15('CHI', 'Female', '25-29', 'MTB Detected', 'Detected', 45, 0, [0, 1, 1], '2026-05-31')]);
+// D2: 06-01T00:30+02:00 is 05-31T22:30Z (46 hours). Local date 06-01, the extra day of the dashboards; the UTC date would say 05-31.
+tb15('T15-D2', { req: 'ZLUSA', sex: 'M', age: 29, mtb: ['Negative'], rif: 'Not Detected', eff: '2026-05-30T00:00:00Z', iss: '2026-06-01T00:30:00+02:00' },
+  [fact15('CHI', 'Male', '25-29', 'MTB Not Detected', 'Not Detected', 46, 0, [0, 1, 1], '2026-06-01')]);
+// D3: 06-02T00:30+02:00 is 06-01T22:30Z (70 hours). Local date 06-02: past the extra day of a window that ends 05-31.
+tb15('T15-D3', { req: 'ZLUSA', sex: 'F', age: 29, mtb: ['Detected'], rif: 'Detected', eff: '2026-05-30T00:00:00Z', iss: '2026-06-02T00:30:00+02:00' },
+  [fact15('CHI', 'Female', '25-29', 'MTB Detected', 'Detected', 70, 0, [0, 0, 1], '2026-06-02')]);
+// D4: 05-01T00:30+02:00 is 04-30T22:30Z (46 hours from 04-29T00:00Z). Local date 05-01; the UTC date would say 04-30.
+tb15('T15-D4', { req: 'ZLUSA', sex: 'M', age: 40, mtb: ['Detected'], rif: 'Detected', eff: '2026-04-29T00:00:00Z', iss: '2026-05-01T00:30:00+02:00' },
+  [fact15('CHI', 'Male', '40-44', 'MTB Detected', 'Detected', 46, 0, [0, 1, 1], '2026-05-01')]);
+// D5: 04-30T23:30Z, local 04-30 (71 hours from 04-28T00:00Z).
+tb15('T15-D5', { req: 'ZLUSA', sex: 'F', age: 41, mtb: ['Negative'], rif: 'Negative', eff: '2026-04-28T00:00:00Z', iss: '2026-04-30T23:30:00Z' },
+  [fact15('CHI', 'Female', '40-44', 'MTB Not Detected', 'Not Detected', 71, 0, [0, 0, 1], '2026-04-30')]);
+// Kafue District Hospital (ZKAFU): a POC test (numeric code).
+tb15('T15-E1', { req: 'ZKAFU', sex: 'F', age: 36, mtb: ['Detected'], rif: 'Detected', eff: '2026-05-12T00:00:00Z', iss: '2026-05-14T00:00:00Z', perf: '5551' },
+  [fact15('KAF', 'Female', '35-39', 'MTB Detected', 'Detected', 48, 1, [0, 0, 1], '2026-05-14')]);
+// A facility that is not in the register: no province, district or description. The row stays (left join), the RIF is lost.
+tb15('T15-U1', { req: 'ZUNMP', sex: 'F', age: 30, mtb: ['Detected'], rif: 'Detected', eff: '2026-05-10T00:00:00Z', iss: '2026-05-10T12:00:00Z' },
+  [fact15('UNM', 'Female', '30-34', 'MTB Detected', null, 12, 0, [1, 1, 1], '2026-05-10')]);
+// Other months, for the trend. Y1: December. Y2: local 2026-01-01 (UTC 2025-12-31) is January.
+tb15('T15-Y1', { req: 'ZSOUT', sex: 'M', age: 70, mtb: ['Negative'], rif: 'Negative', eff: '2025-12-14T10:00:00Z', iss: '2025-12-15T10:00:00Z' },
+  [fact15('CGH', 'Male', '50+', 'MTB Not Detected', 'Not Detected', 24, 0, [0, 1, 1], '2025-12-15')]);
+tb15('T15-Y2', { req: 'ZSOUT', sex: 'F', age: 70, mtb: ['Detected'], rif: 'Detected', eff: '2025-12-31T00:00:00Z', iss: '2026-01-01T00:30:00+02:00' },
+  [fact15('CGH', 'Female', '50+', 'MTB Detected', 'Detected', 22, 0, [1, 1, 1], '2026-01-01')]);
+// Negative hours (authorised before the specimen): inside every "under" flag, and the average cuts toward zero. N1 -2, N2 -1.
+tb15('T15-N1', { req: 'ZKAFU', sex: 'F', age: 36, mtb: ['Detected'], rif: 'Detected', eff: '2026-06-10T10:00:00Z', iss: '2026-06-10T08:00:00Z' },
+  [fact15('KAF', 'Female', '35-39', 'MTB Detected', 'Detected', -2, 0, [1, 1, 1], '2026-06-10')]);
+tb15('T15-N2', { req: 'ZKAFU', sex: 'M', age: 36, mtb: ['Negative'], rif: 'Negative', eff: '2026-06-11T10:00:00Z', iss: '2026-06-11T09:00:00Z' },
+  [fact15('KAF', 'Male', '35-39', 'MTB Not Detected', 'Not Detected', -1, 0, [1, 1, 1], '2026-06-11')]);
+// Partial stamps (July). P1: the authorised date is '2026-07', which is not a date, so the row is in no window (as text it would
+// sit inside a window of 07-01 to 07-31). P2: a partial specimen date, so the hours are NULL and the three flags are 0. P3 is whole.
+tb15('T15-P1', { req: 'ZSOUT', sex: 'F', age: 30, mtb: ['Detected'], rif: 'Detected', eff: '2026-07-09T00:00:00Z', iss: '2026-07' }, []);
+tb15('T15-P2', { req: 'ZSOUT', sex: 'M', age: 30, mtb: ['Detected'], rif: 'Not Detected', eff: '2026-07', iss: '2026-07-10T10:00:00Z' },
+  [fact15('CGH', 'Male', '30-34', 'MTB Detected', 'Not Detected', null, 0, [0, 0, 0], '2026-07-10')]);
+tb15('T15-P3', { req: 'ZSOUT', sex: 'F', age: 30, mtb: ['Negative'], rif: 'Negative', eff: '2026-07-09T00:00:00Z', iss: '2026-07-10T00:00:00Z' },
+  [fact15('CGH', 'Female', '30-34', 'MTB Not Detected', 'Not Detected', 24, 0, [0, 1, 1], '2026-07-10')]);
+// August: one facility under two register rows that differ in case and a trailing space (ZSOUT and ZSOU2). SQL Server groups
+// them as one. Z1 and Z2 are both Female 30-34.
+tb15('T15-Z1', { req: 'ZSOUT', sex: 'F', age: 30, mtb: ['Detected'], rif: 'Detected', eff: '2026-08-09T10:00:00Z', iss: '2026-08-10T10:00:00Z' },
+  [fact15('CGH', 'Female', '30-34', 'MTB Detected', 'Detected', 24, 0, [0, 1, 1], '2026-08-10')]);
+tb15('T15-Z2', { req: 'ZSOU2', sex: 'F', age: 30, mtb: ['Negative'], rif: 'Negative', eff: '2026-08-11T10:00:00Z', iss: '2026-08-12T10:00:00Z' },
+  [fact15('MRG', 'Female', '30-34', 'MTB Not Detected', 'Not Detected', 24, 0, [0, 1, 1], '2026-08-12')]);
+
+const SETUP15 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t15-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t15-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
+  ('t15-fm3', '', '', 'ZMAZA', 'reg-m', 'Mazabuka Hospital', 'Southern', 'Mazabuka'),
+  ('t15-fm4', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t15-fm5', '', '', 'ZKAFU', 'reg-k', 'Kafue District Hospital', 'Lusaka', 'Kafue'),
+  ('t15-fm6', '', '', 'ZUNMP', null, null, null, null),
+  ('t15-fm7', '', '', 'ZSOU2', 'reg-s2', 'CHOMA GENERAL HOSPITAL ', 'SOUTHERN', 'choma');
+insert into patients (id, surname, sex) values ${P15.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, age_days) values ${R15.join(',\n  ')};
+insert into specimens (id, received_time) values ${S15.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id) values ${D15.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value) values ${L15.join(',\n  ')};`;
+
+// ---- v1's formulas, once, in JS ----
+
+// SQL Server compares text ignoring case and trailing spaces.
+const down15 = (s) => (s === null || s === undefined ? null : String(s).replace(/ +$/, '').toLowerCase());
+const same15 = (value, param) => param === '' || (down15(value) !== null && down15(value) === down15(param));
+const inList15 = (value, words) => down15(value) !== null && words.some((w) => down15(value) === down15(w));
+const plusDay15 = (day, n) => {
+  const t = new Date(`${day}T00:00:00Z`);
+  t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+};
+// The facts in a window of local authorised dates, and in an area. `extra` is the days added to the end (1 for the dashboards).
+const pick15 = (from, to, extra, province = '', district = '', facility = '') => FACTS15.filter((r) =>
+  r.auth >= from && r.auth <= plusDay15(to, extra)
+  && same15(r.province, province) && same15(r.district, district) && same15(r.facility, facility));
+
+const isMtb15 = (r) => inList15(r.mtb, ['MTB Detected']);
+const isRif15 = (r) => inList15(r.rif, ['Detected', 'DET', 'Detected_Low']);                      // TBGNX line 26
+const isInd15 = (r) => inList15(r.rif, ['Indeterminate']);
+const isErr15 = (r) => inList15(r.mtb, ['Error']) || inList15(r.rif, ['Error']);
+const isInv15 = (r) => inList15(r.mtb, ['Invalid']) || inList15(r.rif, ['Invalid']);
+const isNoRes15 = (r) => inList15(r.mtb, ['No Results', '']) || inList15(r.rif, ['No Results', '']);
+
+const METRICS15 = ['Tests', 'MTB_Positive', 'RIF_Positive', 'RIF_Indeterminate', 'Errors', 'Invalids', 'NoResults', 'MTB_Positivity',
+  'RIF_RES_Rate', 'RIF_IND_Rate', 'Error_Rate', 'Invalid_Rate', 'No_Result_Rate', 'AverageTAT', 'AverageTAT_POC', 'TATW24H', 'TATW48H',
+  'TATW72H', 'TATW24H_POC', 'TATW48H_POC', 'TATW72H_POC'];
+
+// TBGNX lines 24-48: the 21 measures of a set of rows. A sum over no rows is NULL; a rate over zero is NULL; AVG of an int
+// cuts toward zero.
+function metrics15(rows) {
+  const n = rows.length;
+  const sum = (f) => (n === 0 ? null : rows.reduce((a, r) => a + f(r), 0));
+  const one = (c) => (c ? 1 : 0);
+  const rate = (a, b) => (a === null || b === null || b === 0 ? null : a / b);
+  const avg = (xs) => (xs.length === 0 ? null : Math.trunc(xs.reduce((a, b) => a + b, 0) / xs.length));
+  const mtb = sum((r) => one(isMtb15(r)));
+  const poc = sum((r) => r.poc);
+  const pocSum = (f) => sum((r) => (r.poc === 1 ? f(r) : 0));
+  return {
+    Tests: n,
+    MTB_Positive: mtb,
+    RIF_Positive: sum((r) => one(isRif15(r))),
+    RIF_Indeterminate: sum((r) => one(isInd15(r))),
+    Errors: sum((r) => one(isErr15(r))),
+    Invalids: sum((r) => one(isInv15(r))),
+    NoResults: sum((r) => one(isNoRes15(r))),
+    MTB_Positivity: rate(mtb, n),
+    RIF_RES_Rate: rate(sum((r) => one(isMtb15(r) && isRif15(r))), mtb),
+    RIF_IND_Rate: rate(sum((r) => one(isMtb15(r) && isInd15(r))), mtb),
+    Error_Rate: rate(sum((r) => one(isErr15(r))), n),
+    Invalid_Rate: rate(sum((r) => one(isInv15(r))), n),
+    No_Result_Rate: rate(sum((r) => one(isNoRes15(r))), n),
+    AverageTAT: avg(rows.filter((r) => r.tat !== null).map((r) => r.tat)),
+    AverageTAT_POC: avg(rows.filter((r) => r.poc === 1 && r.tat !== null).map((r) => r.tat)),
+    TATW24H: rate(sum((r) => r.w24), n),
+    TATW48H: rate(sum((r) => r.w48), n),
+    TATW72H: rate(sum((r) => r.w72), n),
+    TATW24H_POC: rate(pocSum((r) => r.w24), poc),
+    TATW48H_POC: rate(pocSum((r) => r.w48), poc),
+    TATW72H_POC: rate(pocSum((r) => r.w72), poc),
+  };
+}
+
+// ---- The dashboard summary: columns and rows ----
+
+const AGES15 = [['lt01', '<01'], ['1to4', '01-04'], ['5to9', '05-09'], ['10to14', '10-14'], ['15to19', '15-19'], ['20to24', '20-24'],
+  ['25to29', '25-29'], ['30to34', '30-34'], ['35to39', '35-39'], ['40to44', '40-44'], ['45to49', '45-49'], ['50plus', '50+']];
+// The gender groups of the age columns (TBGNX lines 63-127): suffix and the gender (null: a missing gender).
+const SEXES15 = [['m', 'Male'], ['f', 'Female'], ['i', 'Indeterminate'], ['u', 'Unknown'], ['x', null]];
+const ageColumns15 = (suffix) => [...AGES15.map(([name]) => `${name}${suffix}`), `AgeMissing${suffix}`];
+const DASH15 = ['Province', 'District', 'Facility', ...METRICS15, 'Male', 'Female', 'IndeterminateGender', 'UnknownGender', 'MissingGender',
+  ...ageColumns15(''), ...SEXES15.flatMap(([suffix]) => ageColumns15(suffix))];
+
+// TBGNX lines 45-127: counts by gender and age group. Sums over no rows are NULL.
+function counts15(rows) {
+  const count = (c) => (rows.length === 0 ? null : rows.filter(c).length);
+  const out = {
+    Male: count((r) => r.gender === 'Male'),
+    Female: count((r) => r.gender === 'Female'),
+    IndeterminateGender: count((r) => r.gender === 'Indeterminate'),
+    UnknownGender: count((r) => r.gender === 'Unknown'),
+    MissingGender: count((r) => r.gender === null),
+  };
+  const ages = (suffix, sexTest) => {
+    for (const [name, label] of AGES15) out[`${name}${suffix}`] = count((r) => r.age === label && sexTest(r));
+    out[`AgeMissing${suffix}`] = count((r) => r.age === null && sexTest(r));
+  };
+  ages('', () => true);
+  for (const [suffix, gender] of SEXES15) ages(suffix, (r) => r.gender === gender);
+  return out;
+}
+const dashRow15 = (names, rows) => ({ Province: names[0], District: names[1], Facility: names[2], ...metrics15(rows), ...counts15(rows) });
+// The row of blanks and zeros of the facility branch (TBGNX line 579): every measure is 0. v1's row has a duplicate AgeMissing
+// column; a result keyed by name cannot, so the port has the one.
+const ZERO_DASH15 = Object.fromEntries(DASH15.map((c) => [c, ['Province', 'District', 'Facility'].includes(c) ? '' : 0]));
+
+const MAY15 = { from: '2026-05-01', to: '2026-05-31' };
+const win15 = (from, to) => ({ from, to });
+const area15 = (province, district, facility) => ({ province, district, facility });
+const none15 = area15('', '', '');
+
+const dashQuery15 = queries().find((q) => q.name === 'TB GeneXpert dashboard summary');
+const listQuery15 = queries().find((q) => q.name === 'TB GeneXpert by facility, sex and age');
+const trendQuery15 = queries().find((q) => q.name === 'TB GeneXpert monthly trend');
+const dashSuite15 = (name, params, rows, setup = '') => orderedSuite(name, dashQuery15?.sql ?? 'select 1', params, DASH15, rows, setup);
+
+// Names compare as SQL Server compares them, and a group shows one of its spellings. A suite built with `loose` compares the
+// name columns in lower case without trailing spaces.
+const NAME_COLUMNS15 = ['Province', 'District', 'Facility'];
+function loose15(suite) {
+  return {
+    ...suite,
+    check: (got) => suite.check(got.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) =>
+      [k, NAME_COLUMNS15.includes(k) && typeof v === 'string' ? v.trim().toLowerCase() : v])))),
+  };
+}
+
+const dayAll15 = (province, district, facility, from, to) => pick15(from, to, 1, province, district, facility);
+
+const suites15dash = [
+  // The four branches (TBGNX lines 22, 132, 244, 356). Names read 'All' above the level asked for. All of Zambia has the
+  // unmapped facility too (no filter on province); the other levels do not.
+  dashSuite15('dash-national', { ...none15, ...MAY15 }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', MAY15.from, MAY15.to))], SETUP15),
+  dashSuite15('dash-province', { ...area15('Southern', '', ''), ...MAY15 }, [dashRow15(['Southern', 'All', 'All'], dayAll15('Southern', '', '', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-district', { ...area15('Southern', 'Choma', ''), ...MAY15 }, [dashRow15(['Southern', 'Choma', 'All'], dayAll15('Southern', 'Choma', '', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-facility', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...MAY15 },
+    [dashRow15(['Southern', 'Choma', 'Choma General Hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', MAY15.from, MAY15.to))]),
+  // Names compare as SQL Server does (case and trailing spaces ignored); the row shows the stored names.
+  dashSuite15('dash-names-fold', { ...area15('SOUTHERN', 'choma', 'choma general hospital  '), ...MAY15 },
+    [dashRow15(['Southern', 'Choma', 'Choma General Hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-choma-clinic', { ...area15('Southern', 'Choma', 'Choma Clinic'), ...MAY15 },
+    [dashRow15(['Southern', 'Choma', 'Choma Clinic'], dayAll15('Southern', 'Choma', 'Choma Clinic', MAY15.from, MAY15.to))]),
+  // No POC test: the POC average and the three POC rates are NULL (nullif(sum(POC), 0)).
+  dashSuite15('dash-no-poc', { ...area15('Southern', 'Mazabuka', ''), ...MAY15 },
+    [dashRow15(['Southern', 'Mazabuka', 'All'], dayAll15('Southern', 'Mazabuka', '', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-lusaka', { ...area15('Lusaka', '', ''), ...MAY15 }, [dashRow15(['Lusaka', 'All', 'All'], dayAll15('Lusaka', '', '', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-lusaka-district', { ...area15('Lusaka', 'Lusaka', ''), ...MAY15 }, [dashRow15(['Lusaka', 'Lusaka', 'All'], dayAll15('Lusaka', 'Lusaka', '', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-lusaka-facility', { ...area15('Lusaka', 'Lusaka', 'Chilenje Clinic'), ...MAY15 },
+    [dashRow15(['Lusaka', 'Lusaka', 'Chilenje Clinic'], dayAll15('Lusaka', 'Lusaka', 'Chilenje Clinic', MAY15.from, MAY15.to))]),
+  dashSuite15('dash-kafue-facility', { ...area15('Lusaka', 'Kafue', 'Kafue District Hospital'), ...MAY15 },
+    [dashRow15(['Lusaka', 'Kafue', 'Kafue District Hospital'], dayAll15('Lusaka', 'Kafue', 'Kafue District Hospital', MAY15.from, MAY15.to))]),
+  // Nothing found. All of Zambia still returns its row (line 24: an aggregate over nothing): Tests is 0 and every other measure
+  // is NULL (sums and rates). A province or a district with nothing returns NO row (lines 132-242 and 244-354 have no fallback).
+  // A facility with nothing returns the row of blanks and zeros (line 579).
+  dashSuite15('dash-empty-national', { ...none15, ...win15('2026-10-01', '2026-10-31') }, [dashRow15(['All', 'All', 'All'], [])]),
+  dashSuite15('dash-empty-province', { ...area15('Western', '', ''), ...MAY15 }, []),
+  dashSuite15('dash-empty-province-window', { ...area15('Southern', '', ''), ...win15('2026-10-01', '2026-10-31') }, []),
+  dashSuite15('dash-empty-district', { ...area15('Southern', 'Kafue', ''), ...MAY15 }, []),
+  dashSuite15('dash-empty-district-other-province', { ...area15('Lusaka', 'Choma', ''), ...MAY15 }, []),
+  dashSuite15('dash-empty-facility', { ...area15('Southern', 'Choma', 'Nowhere'), ...MAY15 }, [ZERO_DASH15]),
+  dashSuite15('dash-empty-facility-window', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-10-01', '2026-10-31') }, [ZERO_DASH15]),
+  // The facility must be in that district (line 465 tests all three).
+  dashSuite15('dash-facility-wrong-district', { ...area15('Southern', 'Mazabuka', 'Choma General Hospital'), ...MAY15 }, [ZERO_DASH15]),
+  // A facility that is not in the register has no description, so no facility name matches it.
+  dashSuite15('dash-unmapped-facility', { ...area15('Southern', 'Choma', 'Unmapped Clinic'), ...MAY15 }, [ZERO_DASH15]),
+  // v1 has no branch for these (lines 22, 132, 244, 356): no result set at all, not even the zero row.
+  dashSuite15('dash-district-only', { ...area15('', 'Choma', ''), ...MAY15 }, []),
+  dashSuite15('dash-facility-only', { ...area15('', '', 'Choma General Hospital'), ...MAY15 }, []),
+  dashSuite15('dash-province-facility', { ...area15('Southern', '', 'Choma General Hospital'), ...MAY15 }, []),
+  dashSuite15('dash-district-facility', { ...area15('', 'Choma', 'Choma General Hospital'), ...MAY15 }, []),
+  // The window: the whole day after the end date is included (line 21), on the LOCAL date of the stamp.
+  // 05-31: window 05-31 to 06-01. D1 (local 05-31) and D2 (local 06-01) are in; D3 (local 06-02) is out.
+  dashSuite15('dash-window-0531', { ...none15, ...win15('2026-05-31', '2026-05-31') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-05-31', '2026-05-31'))]),
+  // 06-01: window 06-01 to 06-02. D2 and D3 are in; D1 (05-31) is out.
+  dashSuite15('dash-window-0601', { ...none15, ...win15('2026-06-01', '2026-06-01') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-06-01', '2026-06-01'))]),
+  // 04-30: window 04-30 to 05-01. D5 (local 04-30) and D4 (local 05-01; its UTC date is 04-30) are in.
+  dashSuite15('dash-window-0430', { ...none15, ...win15('2026-04-30', '2026-04-30') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-04-30', '2026-04-30'))]),
+  // 05-01: window 05-01 to 05-02. D4 (local 05-01) and A1 (local 05-02). A date taken in UTC would drop D4.
+  dashSuite15('dash-window-0501', { ...none15, ...win15('2026-05-01', '2026-05-01') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-05-01', '2026-05-01'))]),
+  // Negative hours: N1 -2 and N2 -1 average -1.5, and an int average cuts toward zero: -1 (not -2).
+  dashSuite15('dash-negative-tat', { ...area15('Lusaka', 'Kafue', 'Kafue District Hospital'), ...win15('2026-06-10', '2026-06-10') },
+    [dashRow15(['Lusaka', 'Kafue', 'Kafue District Hospital'], dayAll15('Lusaka', 'Kafue', 'Kafue District Hospital', '2026-06-10', '2026-06-10'))]),
+  // Partial stamps (July): P1 is in no window; P2 has NULL hours, so AverageTAT averages P3 alone (24) and its flags are 0.
+  // The window starts 06-15 and ends 07-31 so that '2026-07' sits inside it as text.
+  dashSuite15('dash-partial-stamps', { ...none15, ...win15('2026-06-15', '2026-07-31') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-06-15', '2026-07-31'))]),
+  // Two register rows for one facility (case and a trailing space): one group, one row, whichever spelling it shows.
+  loose15(dashSuite15('dash-fold-facility', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-08-01', '2026-08-31') },
+    [dashRow15(['southern', 'choma', 'choma general hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', '2026-08-01', '2026-08-31'))])),
+  loose15(dashSuite15('dash-fold-province', { ...area15('southern', '', ''), ...win15('2026-08-01', '2026-08-31') },
+    [dashRow15(['southern', 'all', 'all'], dayAll15('Southern', '', '', '2026-08-01', '2026-08-31'))])),
+];
+
+// ---- Hand totals: the JS above against numbers worked out on paper ----
+
+// The 20 rows of the May window (A1-A9 give 10 rows, B1-B3, C1-C2, D1, D2, D4, E1, U1) and the sums worked out by hand.
+// Hours: 24 10 73 23 5 48 6 1 24 24 | 60 3 24 | 24 20 | 45 46 46 | 48 | 12 = 566 over 20. POC rows (A3 A4 B2 B3 E1): 73 23 3 24 48 = 171 over 5.
+const HAND15 = [
+  ['national', ['', '', ''], {
+    Tests: 20, MTB_Positive: 13, RIF_Positive: 9, RIF_Indeterminate: 2, Errors: 1, Invalids: 1, NoResults: 1,
+    MTB_Positivity: 13 / 20, RIF_RES_Rate: 8 / 13, RIF_IND_Rate: 2 / 13, Error_Rate: 1 / 20, Invalid_Rate: 1 / 20, No_Result_Rate: 1 / 20,
+    AverageTAT: 28, AverageTAT_POC: 34, TATW24H: 8 / 20, TATW48H: 16 / 20, TATW72H: 19 / 20,
+    TATW24H_POC: 2 / 5, TATW48H_POC: 3 / 5, TATW72H_POC: 4 / 5,
+    Male: 7, Female: 10, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 1,
+    lt01: 1, '1to4': 1, '5to9': 3, '10to14': 1, '15to19': 1, '20to24': 2, '25to29': 3, '30to34': 2, '35to39': 1, '40to44': 2, '45to49': 0, '50plus': 2, AgeMissing: 1,
+    '1to4m': 1, '5to9m': 1, '20to24m': 2, '25to29m': 1, '40to44m': 1, '50plusm': 1,
+    lt01f: 1, '5to9f': 2, '15to19f': 1, '25to29f': 2, '30to34f': 1, '35to39f': 1, '40to44f': 1, '50plusf': 1,
+    '10to14i': 1, '30to34u': 1, AgeMissingx: 1,
+  }],
+  // Southern: rows 1-15 (hours 369 over 15 = 24.6; POC A3 A4 B2 B3 = 123 over 4 = 30.75).
+  ['Southern', ['Southern', '', ''], {
+    Tests: 15, MTB_Positive: 9, RIF_Positive: 6, RIF_Indeterminate: 2, Errors: 1, Invalids: 1, NoResults: 1,
+    MTB_Positivity: 9 / 15, RIF_RES_Rate: 5 / 9, RIF_IND_Rate: 2 / 9, Error_Rate: 1 / 15, Invalid_Rate: 1 / 15, No_Result_Rate: 1 / 15,
+    AverageTAT: 24, AverageTAT_POC: 30, TATW24H: 7 / 15, TATW48H: 12 / 15, TATW72H: 14 / 15,
+    TATW24H_POC: 2 / 4, TATW48H_POC: 3 / 4, TATW72H_POC: 3 / 4,
+    Male: 5, Female: 7, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 1,
+  }],
+  // Choma: rows 1-13 (hours 325 over 13 = 25).
+  ['Choma', ['Southern', 'Choma', ''], {
+    Tests: 13, MTB_Positive: 7, RIF_Positive: 5, RIF_Indeterminate: 1, Errors: 1, Invalids: 1, NoResults: 1,
+    MTB_Positivity: 7 / 13, RIF_RES_Rate: 4 / 7, RIF_IND_Rate: 1 / 7, Error_Rate: 1 / 13, Invalid_Rate: 1 / 13, No_Result_Rate: 1 / 13,
+    AverageTAT: 25, AverageTAT_POC: 30, TATW24H: 6 / 13, TATW48H: 10 / 13, TATW72H: 12 / 13,
+    TATW24H_POC: 2 / 4, TATW48H_POC: 3 / 4, TATW72H_POC: 3 / 4,
+    Male: 3, Female: 7, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 1,
+  }],
+  // Choma General Hospital: rows 1-10 (hours 238 over 10 = 23.8; POC A3 A4 = 96 over 2 = 48).
+  ['Choma General Hospital', ['Southern', 'Choma', 'Choma General Hospital'], {
+    Tests: 10, MTB_Positive: 5, RIF_Positive: 4, RIF_Indeterminate: 1, Errors: 1, Invalids: 1, NoResults: 1,
+    MTB_Positivity: 5 / 10, RIF_RES_Rate: 3 / 5, RIF_IND_Rate: 1 / 5, Error_Rate: 1 / 10, Invalid_Rate: 1 / 10, No_Result_Rate: 1 / 10,
+    AverageTAT: 23, AverageTAT_POC: 48, TATW24H: 5 / 10, TATW48H: 8 / 10, TATW72H: 9 / 10,
+    TATW24H_POC: 1 / 2, TATW48H_POC: 1 / 2, TATW72H_POC: 1 / 2,
+    Male: 2, Female: 5, IndeterminateGender: 1, UnknownGender: 1, MissingGender: 1,
+  }],
+  // Lusaka: D1 D2 D4 E1 (hours 185 over 4 = 46.25; one POC test, E1, 48 hours).
+  ['Lusaka', ['Lusaka', '', ''], {
+    Tests: 4, MTB_Positive: 3, RIF_Positive: 3, RIF_Indeterminate: 0, Errors: 0, Invalids: 0, NoResults: 0,
+    MTB_Positivity: 3 / 4, RIF_RES_Rate: 3 / 3, RIF_IND_Rate: 0 / 3, Error_Rate: 0, Invalid_Rate: 0, No_Result_Rate: 0,
+    AverageTAT: 46, AverageTAT_POC: 48, TATW24H: 0, TATW48H: 3 / 4, TATW72H: 1,
+    TATW24H_POC: 0, TATW48H_POC: 0, TATW72H_POC: 1,
+    Male: 2, Female: 2, IndeterminateGender: 0, UnknownGender: 0, MissingGender: 0,
+  }],
+];
+const handTotals15 = {
+  name: 'hand-totals',
+  count: HAND15.length,
+  check() {
+    return HAND15.flatMap(([label, [province, district, facility], want]) => {
+      const got = { ...metrics15(dayAll15(province, district, facility, MAY15.from, MAY15.to)), ...counts15(dayAll15(province, district, facility, MAY15.from, MAY15.to)) };
+      const bad = Object.entries(want).filter(([k, v]) => got[k] !== v).map(([k, v]) => `${k}: expected ${v}, got ${got[k]}`);
+      return bad.length ? [`${label}: ${bad.join('; ')}`] : [];
+    });
+  },
+};
+
+// ---- The list by facility, sex and age ----
+
+const LIST15 = ['Province', 'District', 'Facility', 'Gender', 'AgeGroup', ...METRICS15];
+const AGE_ORDER15 = ['<01', '01-04', '05-09', '10-14', '15-19', '20-24', '25-29', '30-34', '35-39', '40-44', '45-49', '50+', 'Missing'];
+const GENDER_ORDER15 = ['Female', 'Indeterminate', 'Male', 'Missing', 'Unknown'];
+
+// One row per province, district, facility, gender and age group; a missing gender or age is 'Missing' (List lines 25, 54, 91, 120).
+// Names group ignoring case and trailing spaces. Order: province, district, facility, gender, age group; NULL first.
+function listRows15(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const gender = r.gender ?? 'Missing';
+    const age = r.age ?? 'Missing';
+    const key = JSON.stringify([down15(r.province), down15(r.district), down15(r.facility), gender, age]);
+    if (!groups.has(key)) groups.set(key, { first: r, gender, age, rows: [] });
+    groups.get(key).rows.push(r);
+  }
+  const text = (v) => (v === null ? '' : down15(v));
+  const byName = (a, b) => {
+    if ((a === null) !== (b === null)) return a === null ? -1 : 1;
+    return text(a) < text(b) ? -1 : text(a) > text(b) ? 1 : 0;
+  };
+  return [...groups.values()]
+    .sort((a, b) => byName(a.first.province, b.first.province) || byName(a.first.district, b.first.district)
+      || byName(a.first.facility, b.first.facility) || GENDER_ORDER15.indexOf(a.gender) - GENDER_ORDER15.indexOf(b.gender)
+      || AGE_ORDER15.indexOf(a.age) - AGE_ORDER15.indexOf(b.age))
+    .map((g) => ({ Province: g.first.province, District: g.first.district, Facility: g.first.facility, Gender: g.gender, AgeGroup: g.age, ...metrics15(g.rows) }));
+}
+// The "nothing found" row (List lines 85, 151, 220): blanks and zeros. v1's row has no AverageTAT and AverageTAT_POC; the port gives
+// the main column names and 0 for those two.
+const ZERO_LIST15 = Object.fromEntries(LIST15.map((c) => [c, ['Province', 'District', 'Facility', 'Gender', 'AgeGroup'].includes(c) ? '' : 0]));
+const listSuite15 = (name, params, rows, setup = '') => orderedSuite(name, listQuery15?.sql ?? 'select 1', params, LIST15, rows, setup);
+const list2x15 = (province, district) => ({ province, district });
+const listDay15 = (province, district, from, to) => listRows15(pick15(from, to, 1, province, district));
+
+// The hand-worked order of the whole list (List lines 81-83): NULL names first, Lusaka before Southern, Kafue before Lusaka, Choma
+// Clinic before Choma General Hospital, genders Female, Indeterminate, Male, Missing, Unknown, age groups in band order.
+const NATIONAL_KEYS15 = [
+  'null|null|null|Female|30-34',
+  'Lusaka|Kafue|Kafue District Hospital|Female|35-39',
+  'Lusaka|Lusaka|Chilenje Clinic|Female|25-29',
+  'Lusaka|Lusaka|Chilenje Clinic|Male|25-29',
+  'Lusaka|Lusaka|Chilenje Clinic|Male|40-44',
+  'Southern|Choma|Choma Clinic|Female|15-19',
+  'Southern|Choma|Choma Clinic|Female|40-44',
+  'Southern|Choma|Choma Clinic|Male|05-09',
+  'Southern|Choma|Choma General Hospital|Female|<01',
+  'Southern|Choma|Choma General Hospital|Female|05-09',
+  'Southern|Choma|Choma General Hospital|Female|25-29',
+  'Southern|Choma|Choma General Hospital|Female|50+',
+  'Southern|Choma|Choma General Hospital|Indeterminate|10-14',
+  'Southern|Choma|Choma General Hospital|Male|01-04',
+  'Southern|Choma|Choma General Hospital|Male|50+',
+  'Southern|Choma|Choma General Hospital|Missing|Missing',
+  'Southern|Choma|Choma General Hospital|Unknown|30-34',
+  'Southern|Mazabuka|Mazabuka Hospital|Male|20-24',
+];
+// Two groups worked out by hand. CGH Female 05-09 is A9's two rows (24 hours each; one MTB Detected, one MTB Not Detected, both RIF
+// Detected). Mazabuka Male 20-24 is C1 (24 hours, RIF Detected) and C2 (20 hours, RIF Indeterminate).
+const HAND_GROUPS15 = [
+  ['Southern|Choma|Choma General Hospital|Female|05-09', {
+    Tests: 2, MTB_Positive: 1, RIF_Positive: 2, RIF_Indeterminate: 0, Errors: 0, Invalids: 0, NoResults: 0, MTB_Positivity: 0.5,
+    RIF_RES_Rate: 1, RIF_IND_Rate: 0, Error_Rate: 0, Invalid_Rate: 0, No_Result_Rate: 0, AverageTAT: 24, AverageTAT_POC: null,
+    TATW24H: 0, TATW48H: 1, TATW72H: 1, TATW24H_POC: null, TATW48H_POC: null, TATW72H_POC: null,
+  }],
+  ['Southern|Mazabuka|Mazabuka Hospital|Male|20-24', {
+    Tests: 2, MTB_Positive: 2, RIF_Positive: 1, RIF_Indeterminate: 1, Errors: 0, Invalids: 0, NoResults: 0, MTB_Positivity: 1,
+    RIF_RES_Rate: 1 / 2, RIF_IND_Rate: 1 / 2, Error_Rate: 0, Invalid_Rate: 0, No_Result_Rate: 0, AverageTAT: 22, AverageTAT_POC: null,
+    TATW24H: 1 / 2, TATW48H: 1, TATW72H: 1, TATW24H_POC: null, TATW48H_POC: null, TATW72H_POC: null,
+  }],
+];
+const keyOf15 = (r) => [r.Province, r.District, r.Facility, r.Gender, r.AgeGroup].map(String).join('|');
+const handGroups15 = {
+  name: 'hand-groups',
+  count: 1 + HAND_GROUPS15.length,
+  check() {
+    const rows = listDay15('', '', MAY15.from, MAY15.to);
+    const keys = rows.map(keyOf15);
+    const bad = JSON.stringify(keys) === JSON.stringify(NATIONAL_KEYS15) ? [] : [`order: expected ${NATIONAL_KEYS15.join(' / ')}, got ${keys.join(' / ')}`];
+    for (const [key, want] of HAND_GROUPS15) {
+      const got = rows.find((r) => keyOf15(r) === key);
+      if (!got) { bad.push(`${key}: missing`); continue; }
+      for (const [k, v] of Object.entries(want)) if (got[k] !== v) bad.push(`${key} ${k}: expected ${v}, got ${got[k]}`);
+    }
+    return bad;
+  },
+};
+
+const suites15list = [
+  listSuite15('list-national', { ...list2x15('', ''), ...MAY15 }, listDay15('', '', MAY15.from, MAY15.to)),
+  listSuite15('list-province', { ...list2x15('Southern', ''), ...MAY15 }, listDay15('Southern', '', MAY15.from, MAY15.to)),
+  listSuite15('list-district', { ...list2x15('Southern', 'Choma'), ...MAY15 }, listDay15('Southern', 'Choma', MAY15.from, MAY15.to)),
+  listSuite15('list-lusaka', { ...list2x15('Lusaka', ''), ...MAY15 }, listDay15('Lusaka', '', MAY15.from, MAY15.to)),
+  listSuite15('list-lusaka-district', { ...list2x15('Lusaka', 'Lusaka'), ...MAY15 }, listDay15('Lusaka', 'Lusaka', MAY15.from, MAY15.to)),
+  // Names compare as SQL Server does (case and trailing spaces ignored); the rows show the stored names.
+  listSuite15('list-names-fold', { ...list2x15('SOUTHERN ', 'choma  '), ...MAY15 }, listDay15('Southern', 'Choma', MAY15.from, MAY15.to)),
+  // Nothing found: only the blanks-and-zeros row, in every branch (lines 85, 151, 220).
+  listSuite15('list-empty-national', { ...list2x15('', ''), ...win15('2026-10-01', '2026-10-31') }, [ZERO_LIST15]),
+  listSuite15('list-empty-province', { ...list2x15('Western', ''), ...MAY15 }, [ZERO_LIST15]),
+  listSuite15('list-empty-district', { ...list2x15('Southern', 'Kafue'), ...MAY15 }, [ZERO_LIST15]),
+  listSuite15('list-wrong-district', { ...list2x15('Lusaka', 'Choma'), ...MAY15 }, [ZERO_LIST15]),
+  // A district without a province matches no branch (lines 22, 87, 154): no result set at all, not even the blanks row.
+  listSuite15('list-district-only', { ...list2x15('', 'Choma'), ...MAY15 }, []),
+  listSuite15('list-district-only-empty', { ...list2x15('', 'Kafue'), ...MAY15 }, []),
+  // The window is the whole local day after `to` (line 21 and the cast on lines 48, 76).
+  listSuite15('list-window-0531', { ...list2x15('', ''), ...win15('2026-05-31', '2026-05-31') }, listDay15('', '', '2026-05-31', '2026-05-31')),
+  listSuite15('list-window-0601', { ...list2x15('', ''), ...win15('2026-06-01', '2026-06-01') }, listDay15('', '', '2026-06-01', '2026-06-01')),
+  listSuite15('list-window-0430', { ...list2x15('', ''), ...win15('2026-04-30', '2026-04-30') }, listDay15('', '', '2026-04-30', '2026-04-30')),
+  listSuite15('list-window-0501', { ...list2x15('', ''), ...win15('2026-05-01', '2026-05-01') }, listDay15('', '', '2026-05-01', '2026-05-01')),
+  // Negative hours: the average cuts toward zero. N1 (-2) and N2 (-1) are two groups here (Female and Male).
+  listSuite15('list-negative-tat', { ...list2x15('', ''), ...win15('2026-06-10', '2026-06-10') }, listDay15('', '', '2026-06-10', '2026-06-10')),
+  // Partial stamps (July): P2's hours are NULL (AverageTAT NULL, flags 0), P1 is in no window.
+  listSuite15('list-partial-stamps', { ...list2x15('', ''), ...win15('2026-06-15', '2026-07-31') }, listDay15('', '', '2026-06-15', '2026-07-31')),
+  // Two register rows for one facility: one group per gender and age group, whichever spelling it shows.
+  loose15(listSuite15('list-fold-facility', { ...list2x15('', ''), ...win15('2026-08-01', '2026-08-31') },
+    listDay15('', '', '2026-08-01', '2026-08-31').map((r) => ({ ...r, Province: r.Province.toLowerCase(), District: r.District.toLowerCase(), Facility: r.Facility.trim().toLowerCase() })))),
+  handGroups15,
+];
+
+// ---- The monthly trend ----
+
+const TREND15 = ['MonthID', 'Tests', 'MTB_Positive', 'RIF_Positive', 'W24H', 'TATW48', 'W72H'];
+const tr15 = (month, tests, mtb, rif, w24, w48, w72) => Object.fromEntries(TREND15.map((c, i) => [c, [month, tests, mtb, rif, w24, w48, w72][i]]));
+const trendSuite15 = (name, params, rows) => orderedSuite(name, trendQuery15?.sql ?? 'select 1', params, TREND15, rows);
+const area3x15 = (province, district, facility) => ({ province, district, facility });
+// Tests is the number of distinct request numbers (A9 has two rows and counts once); the others are counts of rows and sums of the
+// 0/1 flags (W24H, TATW48 and W72H are counts, not rates). The month is the LOCAL month of the authorised stamp.
+const DEC15 = tr15('2025 - 12', 1, 0, 0, 0, 1, 1);        // Y1
+const JAN15 = tr15('2026 - 01', 1, 1, 1, 1, 1, 1);        // Y2: local 2026-01-01 (UTC 2025-12-31)
+const APR15 = tr15('2026 - 04', 1, 0, 0, 0, 0, 1);        // D5: 71 hours
+// May, all of Zambia without the dashboards' extra day: the 20 rows of the May window minus D2 (local 06-01) = 19 rows, 18 requests.
+// MTB Detected 13, RIF positive 9, W24H 8, W48 15 (16 minus D2), W72H 18 (19 minus D2).
+const MAY_ALL15 = tr15('2026 - 05', 18, 13, 9, 8, 15, 18);
+// June: D2 (06-01, MTB negative, 46 h), D3 (06-02, positive, 70 h), N1 (06-10, positive, -2 h), N2 (06-11, negative, -1 h).
+const JUN15 = tr15('2026 - 06', 4, 2, 2, 2, 3, 4);
+const JUL15 = tr15('2026 - 07', 2, 1, 0, 0, 1, 1);        // P2 and P3; P1 is in no month
+const ALL15 = win15('2025-12-01', '2026-07-31');
+
+const suites15trend = [
+  trendSuite15('trend-national', { ...area3x15('', '', ''), ...ALL15 }, [DEC15, JAN15, APR15, MAY_ALL15, JUN15, JUL15]),
+  // Southern (line 13): December, January, May rows 1-15 (14 requests; MTB 9, RIF 6, W24H 7, W48 12, W72H 14), July.
+  trendSuite15('trend-province', { ...area3x15('Southern', '', ''), ...ALL15 }, [DEC15, JAN15, tr15('2026 - 05', 14, 9, 6, 7, 12, 14), JUL15]),
+  // Southern / Choma (line 29): without Mazabuka. May rows 1-13: 12 requests; MTB 7, RIF 5, W24H 6, W48 10, W72H 12.
+  trendSuite15('trend-district', { ...area3x15('Southern', 'Choma', ''), ...ALL15 }, [DEC15, JAN15, tr15('2026 - 05', 12, 7, 5, 6, 10, 12), JUL15]),
+  // Choma Clinic (line 45): B1 B2 B3 in May.
+  trendSuite15('trend-facility', { ...area3x15('Southern', 'Choma', 'Choma Clinic'), ...ALL15 }, [tr15('2026 - 05', 3, 2, 1, 1, 2, 3)]),
+  trendSuite15('trend-names-fold', { ...area3x15('southern', 'CHOMA ', 'choma clinic  '), ...ALL15 }, [tr15('2026 - 05', 3, 2, 1, 1, 2, 3)]),
+  // Lusaka: D5 in April, D1 D4 E1 in May, D2 D3 N1 N2 in June.
+  trendSuite15('trend-lusaka', { ...area3x15('Lusaka', '', ''), ...ALL15 }, [APR15, tr15('2026 - 05', 3, 3, 3, 0, 2, 3), JUN15]),
+  trendSuite15('trend-lusaka-district', { ...area3x15('Lusaka', 'Lusaka', ''), ...ALL15 },
+    [APR15, tr15('2026 - 05', 2, 2, 2, 0, 2, 2), tr15('2026 - 06', 2, 1, 1, 0, 1, 2)]),
+  trendSuite15('trend-kafue', { ...area3x15('Lusaka', 'Kafue', ''), ...ALL15 }, [tr15('2026 - 05', 1, 1, 1, 0, 0, 1), tr15('2026 - 06', 2, 1, 1, 2, 2, 2)]),
+  // Any other combination falls to v1's last branch (line 63): nothing is filtered. In April the only test is D5 (Lusaka), so a
+  // wrongly applied filter on Choma or Southern would leave nothing.
+  trendSuite15('trend-district-only', { ...area3x15('', 'Choma', ''), ...win15('2026-04-01', '2026-04-30') }, [APR15]),
+  trendSuite15('trend-facility-only', { ...area3x15('', '', 'Choma Clinic'), ...win15('2026-04-01', '2026-04-30') }, [APR15]),
+  trendSuite15('trend-province-facility', { ...area3x15('Southern', '', 'Choma Clinic'), ...win15('2026-04-01', '2026-04-30') }, [APR15]),
+  trendSuite15('trend-district-facility', { ...area3x15('', 'Choma', 'Choma Clinic'), ...win15('2026-04-01', '2026-04-30') }, [APR15]),
+  // The month is the local month, and there is no extra day (lines 20-22). D1 (local 05-31) is May; D2 (local 06-01, UTC 05-31) is
+  // June; D4 (local 05-01, UTC 04-30) is May; D5 (local 04-30) is April.
+  trendSuite15('trend-edge-0531', { ...area3x15('', '', ''), ...win15('2026-05-31', '2026-05-31') }, [tr15('2026 - 05', 1, 1, 1, 0, 1, 1)]),
+  trendSuite15('trend-edge-0601', { ...area3x15('', '', ''), ...win15('2026-06-01', '2026-06-01') }, [tr15('2026 - 06', 1, 0, 0, 0, 1, 1)]),
+  trendSuite15('trend-edge-0501', { ...area3x15('', '', ''), ...win15('2026-05-01', '2026-05-01') }, [tr15('2026 - 05', 1, 1, 1, 0, 1, 1)]),
+  trendSuite15('trend-edge-0430', { ...area3x15('', '', ''), ...win15('2026-04-30', '2026-04-30') }, [APR15]),
+  // The year turns: MonthID sorts 2025 - 12 before 2026 - 01. Y2 is local 2026-01-01 (UTC 2025-12-31).
+  trendSuite15('trend-year-turn', { ...area3x15('', '', ''), ...win15('2025-12-01', '2026-01-31') }, [DEC15, JAN15]),
+  trendSuite15('trend-year-edge', { ...area3x15('', '', ''), ...win15('2026-01-01', '2026-01-01') }, [JAN15]),
+  // Partial stamps: P2 and P3 are July; P1's authorised date is not a date, so it is in no month (Tests is 2, not 3).
+  trendSuite15('trend-partial-stamps', { ...area3x15('', '', ''), ...win15('2026-07-01', '2026-07-31') }, [JUL15]),
+  // No test in the window: no row (a group by over no rows).
+  trendSuite15('trend-empty', { ...area3x15('', '', ''), ...win15('2026-10-01', '2026-10-31') }, []),
+  trendSuite15('trend-empty-province', { ...area3x15('Western', '', ''), ...ALL15 }, []),
+];
+
+// ---- Shape, and the builder option ----
+
+const shape15 = (query, label, wantIds, wantTypes, wantRequired) => ({
+  name: `${label}-shape`,
+  count: 4 + wantIds.length,
+  check() {
+    if (!query) return [`query for ${label} is missing`];
+    const bad = [];
+    const ids = query.params.map((p) => p.id);
+    if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}, got ${ids}`);
+    query.params.forEach((p, i) => {
+      if (p.type !== wantTypes[i]) bad.push(`${p.id}: expected type ${wantTypes[i]}, got ${p.type}`);
+      if (p.required !== wantRequired[i]) bad.push(`${p.id}: expected required ${wantRequired[i]}, got ${p.required}`);
+    });
+    if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(query.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+    if (!/^\s*with\b/i.test(query.sql)) bad.push('does not start with "with"');
+    return bad;
+  },
+});
+
+// tbgnxCte takes extraDays for the dashboards that add a day to the end date; without it the output is unchanged.
+const extraDaysSuite15 = {
+  name: 'tbgnx-extra-days',
+  count: 4,
+  check() {
+    const bad = [];
+    const plain = tbgnxCte('x', { from: 'a', to: 'b' });
+    if (plain !== tbgnxCte('x', { from: 'a', to: 'b', extraDays: 0 })) bad.push('extraDays 0 must give the same text as no option');
+    const moved = tbgnxCte('x', { from: 'a', to: 'b', extraDays: 1 });
+    if (!moved.includes("::date + 1, 'YYYY-MM-DD')")) bad.push('extraDays 1 must move the end of the window by one day');
+    if (plain.includes('::date + 1')) bad.push('the default window must not move');
+    try { tbgnxCte('x', { from: 'a', to: 'b', extraDays: -1 }); bad.push('a negative extraDays must throw'); } catch { /* expected */ }
+    return bad;
+  },
+};
+
+const suites15 = [
+  ...suites15dash,
+  handTotals15,
+  ...suites15list,
+  ...suites15trend,
+  shape15(dashQuery15, 'dash', ['province', 'district', 'facility', 'from', 'to'], ['select', 'select', 'text', 'text', 'text'], [false, false, false, true, true]),
+  shape15(listQuery15, 'list', ['province', 'district', 'from', 'to'], ['select', 'select', 'text', 'text'], [false, false, true, true]),
+  shape15(trendQuery15, 'trend', ['province', 'district', 'facility', 'from', 'to'], ['select', 'select', 'text', 'text', 'text'], [false, false, false, true, true]),
+  {
+    name: 'dash-columns',
+    count: 1,
+    check: () => (DASH15.length === 107 && new Set(DASH15).size === 107 ? [] : [`expected 107 distinct columns, got ${DASH15.length} (${new Set(DASH15).size} distinct)`]),
+  },
+  extraDaysSuite15,
+];
+
+export const groups = [{ name: 't4', suites }, { name: 't15', suites: suites15 }];

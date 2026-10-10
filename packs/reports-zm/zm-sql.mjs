@@ -1085,9 +1085,9 @@ const gxSourceSql = (obsCode, resultAlias, finalRange) => `select lr.request_id 
 
 // The with-list shared by both builders: the view's rows (x joined to y, a, b and id) with the extra
 // columns province, district and lab_name that the table needs. `<name>_rows` is the last item.
-function geneXpertRows(who, name, from, to, on = 'issued') {
+function geneXpertRows(who, name, from, to, on = 'issued', extraDays = 0) {
   if (on !== 'issued' && on !== 'analysis_at') throw new Error(`${who}: on must be 'issued' or 'analysis_at'`);
-  const { finalRange } = copyWindow(who, from, to, on === 'issued' ? 'dr.issued' : 'lr.analysis_at');
+  const { finalRange } = copyWindow(who, from, to, on === 'issued' ? 'dr.issued' : 'lr.analysis_at', extraDays);
   // View lines 107-120: a GXRIF row joins a GXMTB row when the request number and eleven request facts are
   // equal. Text compares ignore case and trailing spaces. A NULL fact equals nothing, so the RIF is lost.
   const sameText = (c) => `${foldSql(`x.${c}`)} = ${foldSql(`y.${c}`)}`;
@@ -1205,6 +1205,9 @@ export function geneXpertCte(name, { from, to, on = 'issued', labName = false } 
 //   tbgnxCte('tb')                              all rows
 //   tbgnxCte('tb', { from: 'from', to: 'to' })  only rows whose authorised date is in the window; the two
 //                                               values are parameter names, compared as in inRange
+//   tbgnxCte('tb', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many days (see
+//                                               inRange), for sp_dash_getTBGNX and sp_dash_getTBGNX_List, which add a day to
+//                                               @EDate. The default is 0, and then the output is unchanged.
 // v1 sp_getTBsLastHour drops the table and fills it again from v_GeneXpert on every run. Its name says
 // "last hour", but the code reads the whole view. The CTE returns what the table holds after a run.
 //
@@ -1243,9 +1246,9 @@ export function geneXpertCte(name, { from, to, on = 'issued', labName = false } 
 //
 // CE gaps: those of geneXpertCte. Also lab_name differs from v1 where Zambia's lab dictionary names a lab
 // differently from the report's display or the register (ruling 8).
-export function tbgnxCte(name, { from, to } = {}) {
+export function tbgnxCte(name, { from, to, extraDays = 0 } = {}) {
   return `${name} as (
-  with ${geneXpertRows('tbgnxCte', name, from, to)}
+  with ${geneXpertRows('tbgnxCte', name, from, to, 'issued', extraDays)}
   select r.province, r.district, r.requestid, r.lims_facility_code, r.description, r.tested_at, r.lab_name,
     r.specimen_date_time, r.registered_date_time, r.received_date_time, r.analysis_date_time,
     r.authorised_date_time, r.hl7_sex_code, r.age_in_years,
