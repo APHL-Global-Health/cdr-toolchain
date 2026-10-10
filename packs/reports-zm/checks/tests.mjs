@@ -502,6 +502,21 @@ const survSuites = [
     rows: wantedSurv.filter((r) => r.facility === 'Choma General Hospital'), where: "where facility = 'Choma General Hospital'" }),
   builderSuite({ name: 'surveillance-year-boundary', setup: '', cteSql: bind(recencySurveillanceCte('rs', { from: 'start', to: 'end' }), { start: '2026-12-01', end: '2027-01-31' }), columns: SURV_COLUMNS, alias: 'rs', rows: yearRows }),
   shapeSuite('surveillance-shape', recencySurveillanceCte),
+  // Block I's merged group, with its names as stored (the suites above compare names folded). The three names come from ONE register row
+  // (final review minor 2): the row first in byte order of province, district, facility, ZLUS2's. Per-column min() gave 'Lusaka', 'Lusaka',
+  // 'Chilenje Clinic' here, which is the ZLUSA row only because of how the database sorts case; with other spellings it mixed rows.
+  {
+    name: 'surveillance-names-one-row',
+    sql: `with ${bind(recencySurveillanceCte('rs', { from: 'from', to: 'to' }), WINDOW)}
+select 'surveillance-names-one-row' || chr(9) || json_build_object('p', rs.province, 'd', rs.district, 'f', rs.facility)::text
+from rs where lower(rtrim(rs.facility)) = 'chilenje clinic' and rs.age_group = '15 - 19' and lower(rtrim(rs.modality)) = 'vct';`,
+    count: 1,
+    check(rows) {
+      const got = JSON.stringify(rows);
+      const want = JSON.stringify([{ p: 'LUSAKA', d: 'lusaka ', f: 'CHILENJE CLINIC ' }]);
+      return got === want ? [] : [`expected ${want}, got ${got}`];
+    },
+  },
 ];
 
 // ======================================================================
@@ -1607,8 +1622,10 @@ const MAY = (place, age, sex, absRange, absTests, pctRange, pctTests) => cdRow(2
 const CHOMA = ['Southern', 'Choma', 'Choma General Hospital'];
 const KAFUE = ['Lusaka', 'Kafue', 'Kafue District Hospital'];
 const CHILENJE = ['Lusaka', 'Lusaka', 'Chilenje Clinic'];
-// The merged Chilenje group shows the smallest spelling of each name in byte order (v1 shows whichever it meets first).
-const CHILENJE_MERGED = ['LUSAKA', 'Lusaka', 'CHILENJE CLINIC '];
+// The merged Chilenje group shows the names of ONE register row (v1 shows whichever row it meets first): the row first in byte order
+// of province, district, facility, so ZLUS2's 'LUSAKA', 'lusaka ', 'CHILENJE CLINIC '. Final review minor 2: it showed the smallest
+// spelling of each name on its own, 'LUSAKA', 'Lusaka', 'CHILENJE CLINIC ', which no row holds.
+const CHILENJE_MERGED = ['LUSAKA', 'lusaka ', 'CHILENJE CLINIC '];
 const CHILENJE_ZLUS2 = ['LUSAKA', 'lusaka ', 'CHILENJE CLINIC '];
 
 const want19 = [
@@ -1803,7 +1820,7 @@ const want19Hpv = [
   hpvRow(['Eastern', 'Twin', 'Twin Clinic'], 'Twin Lab', CV, 2026, 5, 1),
   hpvRow(['Western', 'Twin', 'Twin Clinic'], 'Twin Lab', CV, 2026, 5, 1, 1, 0, 0, 0, 1),
   // HF
-  hpvRow(['LUSAKA', 'Lusaka', 'CHILENJE CLINIC '], 'Alpha Lab', CV, 2026, 5, 3, 2, 0, 0, 0, 2),
+  hpvRow(CHILENJE_MERGED, 'Alpha Lab', CV, 2026, 5, 3, 2, 0, 0, 0, 2),
   hpvRow(CHOMA, 'Alpha Lab', CV, 2026, 4, 1),
   hpvRow(CHOMA, 'Bare Lab', CV, 2026, 5, 1),
   hpvRow(CHOMA, 'Bare Lab', CV, 2026, 6, 1),

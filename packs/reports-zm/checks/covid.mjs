@@ -1745,6 +1745,33 @@ const suites24 = [
 const suites30c = [];
 suites30c.push(...dateErrorSuites('t30c-covid', queries(), { skip: ['COVID-19 daily line list'] }));
 
+// ============================================================================================
+// Group fx (final review, minor 2): names that differ only in case or trailing spaces. Four register rows, two places:
+//   ZFXA 'Choma Clinic' / Southern / Choma        ZFXB 'CHOMA CLINIC ' / 'SOUTHERN ' / CHOMA
+//   ZFXC 'ALPHA CLINIC' / Southern / Choma        ZFXD 'Alpha Clinic ' / southern / CHOMA
+// "COVID-19 by source facility" merges the places on the names (line 270). A merged row shows the names of ONE of its rows, the first in
+// byte order of province, district, facility: Choma Clinic shows ZFXB's names and Alpha Clinic ZFXC's. Per-column min() showed 'Southern',
+// 'CHOMA', 'ALPHA CLINIC', which no row holds. One positive COVID request per register row, tested at UTH (ZUA), all in May: 1, 1, 1, 1.
+// Fixture ids start with "fx-"; lab ids with "FX-".
+// ============================================================================================
+
+const FX_FACILITIES = [['ZFXA', 'Choma Clinic', 'Southern', 'Choma'], ['ZFXB', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
+  ['ZFXC', 'ALPHA CLINIC', 'Southern', 'Choma'], ['ZFXD', 'Alpha Clinic ', 'southern', 'CHOMA']];
+const SETUP_FX = `${facilityRows('fx', FX_FACILITIES)}
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code) values
+  ${FX_FACILITIES.map(([code], i) => `('fx-q${i + 1}', 'FX-${i + 1}', 'COVID', ${lit(DEFAULTS.auth)}, ${lit(DEFAULTS.ana)}, ${lit(code)})`).join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values
+  ${FX_FACILITIES.map((_, i) => `('fx-d${i + 1}', 'fx-q${i + 1}', 'final', ${lit(DEFAULTS.eff)}, ${lit(DEFAULTS.iss)}, 'ZUA')`).join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
+  ${FX_FACILITIES.map((_, i) => `('fx-r${i + 1}', 'fx-q${i + 1}', 'COV2', ${lit(POS_TEXT)}, null, null, null)`).join(',\n  ')};`;
+const suitesFx = [
+  setSuite('fx-source-names', SOURCE_STATS, { ...W, laboratory: 'UTH', show: '' }, SOURCE_COLUMNS, [
+    src('Southern', 'Choma', 'ALPHA CLINIC', 2, 2, 2, 2),
+    src('SOUTHERN ', 'CHOMA', 'CHOMA CLINIC ', 2, 2, 2, 2),
+  ], SETUP_FX),
+];
+
 export const groups = [{ name: 't22', suites }, { name: 't23', suites: suites23 }, { name: 't24', suites: suites24 },
-  { name: 't30c', suites: suites30c }
+  { name: 't30c', suites: suites30c },
+  { name: 'fx', suites: suitesFx },
 ];

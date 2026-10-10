@@ -3080,10 +3080,49 @@ const suitesC1 = [
     ['ARTNumber'], [{ ARTNumber: 'C102' }, { ARTNumber: 'C103' }, { ARTNumber: 'C104' }], 'q."ARTNumber"'),
 ];
 
+// ============================================================================================
+// Group fx (final review, minors 1 and 2): names that differ only in case or trailing spaces. Four register rows, two places:
+//   ZFXA 'Choma Clinic' / Southern / Choma        ZFXB 'CHOMA CLINIC ' / 'SOUTHERN ' / CHOMA
+//   ZFXC 'ALPHA CLINIC' / Southern / Choma        ZFXD 'Alpha Clinic ' / southern / CHOMA
+// v1 groups and matches names as SQL Server compares text, so ZFXA and ZFXB are one place, and ZFXC and ZFXD another. A group shows
+// the names of ONE of its rows (v1: whichever it meets first; the port: the row first in byte order of province, district, facility,
+// where 'SOUTHERN ' < 'Southern' < 'southern'). So Choma Clinic shows ZFXB's names and Alpha Clinic ZFXC's. Per-column min() would show
+// 'Southern', 'CHOMA', 'ALPHA CLINIC' for Alpha Clinic, which no row holds. One request per register row: female, 30, 540 copies,
+// collected 05-01, authorised 05-10 (TAT 9). Fixture ids start with "fx-"; lab ids with "FX-".
+// ============================================================================================
+
+const FX_FACILITIES = [['ZFXA', 'Choma Clinic', 'Southern', 'Choma'], ['ZFXB', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
+  ['ZFXC', 'ALPHA CLINIC', 'Southern', 'Choma'], ['ZFXD', 'Alpha Clinic ', 'southern', 'CHOMA']];
+const SETUP_FX = `${facilityRows('fx', FX_FACILITIES)}
+insert into patients (id, surname, sex) values ${FX_FACILITIES.map((_, i) => `('fx-p${i + 1}', 'FX', 'F')`).join(', ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years) values
+  ${FX_FACILITIES.map(([code], i) => `('fx-q${i + 1}', 'FX-${i + 1}', 'HIVVL', '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(code)}, 'fx-p${i + 1}', 30)`).join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer) values
+  ${FX_FACILITIES.map((_, i) => `('fx-d${i + 1}', 'fx-q${i + 1}', 'final', '2026-05-01T07:00:00Z', '2026-05-10T10:00:00Z', 'LUS')`).join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values
+  ${FX_FACILITIES.map((_, i) => `('fx-r${i + 1}', 'fx-q${i + 1}', 'HIVVL', null, 540, null)`).join(',\n  ')};`;
+const FX_MAY = { from: '2026-05-01', to: '2026-05-31' };
+const FX_TWO = [2, 2, 0, 0, 2, 0, 0, 0, 0];   // Tests, Suppressed, UnSuppressed, Undetectable, TATWithin14, then four flags at 0
+const suitesFx = [
+  // Minor 1: by facility, the two places, each one group, ordered by the names as SQL Server orders them (alpha before choma).
+  listSuite('fx-sexage-province', { province: 'Southern', district: '', ...FX_MAY }, [
+    sx('Southern', 'Choma', 'ALPHA CLINIC', 'Female', '30-34', FX_TWO),
+    sx('SOUTHERN ', 'CHOMA', 'CHOMA CLINIC ', 'Female', '30-34', FX_TWO),
+  ], SETUP_FX),
+  // All of Zambia: one province group of four tests, named from ZFXB's row.
+  listSuite('fx-sexage-national', { province: '', district: '', ...FX_MAY }, [
+    sx('SOUTHERN ', 'All', 'All', 'Female', '30-34', [4, 4, 0, 0, 4, 0, 0, 0, 0]),
+  ]),
+  // Minor 2: the dashboard summary at facility level, for Alpha Clinic in any spelling: the names of ZFXC's row.
+  pickSuite('fx-dashboard-facility', '', bind(dashQuery?.sql ?? 'select 1', { province: 'southern', district: 'choma ', facility: 'ALPHA clinic', ...FX_MAY }),
+    ['Province', 'District', 'Facility', 'Tests'], [{ Province: 'Southern', District: 'Choma', Facility: 'ALPHA CLINIC', Tests: 2 }], 'q."Facility"'),
+];
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
   { name: 't16', suites: suitesV16 },
   { name: 't30c', suites: suites30c },
   { name: 'c1', suites: suitesC1 },
+  { name: 'fx', suites: suitesFx },
 ];

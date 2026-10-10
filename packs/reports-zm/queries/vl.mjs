@@ -6,6 +6,7 @@ import {
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswersCte, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
   dateParamSql, dateTextParamSql, optionsListSql,
+  oneRowSql,
 } from '../zm-sql.mjs';
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
@@ -140,7 +141,7 @@ sc as (
     and ${same('hv.facility', 'facility')}
 ),
 agg as (
-  select max(s.province) as province, max(s.district) as district, max(s.facility) as facility, count(*) as n,
+  select ${oneRowSql('s.province', ['s.province', 's.district', 's.facility'])} as province, ${oneRowSql('s.district', ['s.province', 's.district', 's.facility'])} as district, ${oneRowSql('s.facility', ['s.province', 's.district', 's.facility'])} as facility, count(*) as n,
     ${cols.map(([name, expr]) => `${expr} as "${name}"`).join(',\n    ')}
   from sc s
 )
@@ -178,7 +179,9 @@ export const vlDashboardParams = () => [
 //   province                         Province, District, Facility, Gender, AgeGroup   one group per facility (lines 65-78)
 //   province and district            the same, for the districts that match (lines 97-110)
 // Gender and AgeGroup are 'Missing' when the hivvl value is NULL. The names in a row are the stored ones; the
-// parameters match ignoring case and trailing spaces, as SQL Server does. Rows are ordered as v1 orders them:
+// parameters match ignoring case and trailing spaces, as SQL Server does, and so does the grouping (as the EID twin):
+// names that differ only in case or trailing spaces are one group. The three names of a group come from one row, the
+// first in byte order of province, district, facility. Rows are ordered as v1 orders them:
 // Province, District, Facility, Gender, AgeGroup. SQL Server's collation is case-blind; the port compares names
 // lower-cased by byte, orders age groups by their label ('<01' first, '50+' last) and puts 'Missing' last.
 //
@@ -240,7 +243,8 @@ export function vlSexAgeSql() {
   const national = `(${blank('province')} and ${blank('district')})`;
   // A district without a province: no branch in v1.
   const supported = `not (${blank('province')} and ${given('district')})`;
-  const label = (column) => `lower(rtrim(${column})) collate "C" nulls first, ${column} collate "C" nulls first`;
+  const folded = (column) => `lower(rtrim(${column})) collate "C" nulls first`;
+  const area = ['s.province', 's.district', 's.facility'];
   return `with ${hivvlCte('hv', { from: 'from', to: 'to', extraDays: 1 })},
 sc as (
   select hv.province, case when ${national} then null else hv.district end as district,
@@ -254,12 +258,12 @@ sc as (
     and ${same('hv.district', 'district')}
 ),
 agg as (
-  select s.province, s.district, s.facility, s.gender, s.age_group,
+  select ${area.map((c) => `${oneRowSql(c, area)} as ${c.slice(2)}`).join(', ')}, s.gender, s.age_group,
     count(s.lab_id) as tests, sum(s.suppressed) as supp, sum(s.uu) as uu, sum(s.tat_within14) as w14,
     sum(coalesce(s.pregnant, 0)) as preg, sum(coalesce(s.breastfeeding, 0)) as bf,
     sum(coalesce(s.baseline_vl, 0)) as base, sum(coalesce(s.three_m_post_unsuppressed, 0)) as m3
   from sc s
-  group by s.province, s.district, s.facility, s.gender, s.age_group
+  group by ${area.map((c) => foldSql(c)).join(', ')}, s.gender, s.age_group
 )
 select ${SEX_AGE_COLUMNS.map((c) => `u."${c}"`).join(', ')}
 from (
@@ -276,8 +280,9 @@ from (
     0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint, 0::bigint
   where ${supported} and not exists (select 1 from agg)
 ) u
-order by ${label('u.k1')}, ${label('u.k2')}, ${label('u.k3')}, u.k4 collate "C",
-  array_position(array[${sqlList(AGE_ORDER)}], u.k5), u.k5 collate "C"`;
+order by ${folded('u.k1')}, ${folded('u.k2')}, ${folded('u.k3')}, u.k4 collate "C",
+  array_position(array[${sqlList(AGE_ORDER)}], u.k5), u.k5 collate "C",
+  u.k1 collate "C" nulls first, u.k2 collate "C" nulls first, u.k3 collate "C" nulls first`;
 }
 
 export const vlSexAgeParams = () => [
@@ -632,8 +637,8 @@ ${cohortRowsCte((result) => `${isNumericSql(result)} and length(btrim(${result})
 select g.province as "Province", g.district as "District", g.facility as "Facility", g.art_no as "ARTNumber",
   ${visits.map((n) => `g.v${n} as "${n}"`).join(', ')}
 from (
-  select min(x.province collate "C") as province, min(x.district collate "C") as district, min(x.facility collate "C") as facility,
-    min(x.art_no collate "C") as art_no,
+  select ${oneRowSql('x.province', ['x.province', 'x.district', 'x.facility', 'x.art_no'])} as province, ${oneRowSql('x.district', ['x.province', 'x.district', 'x.facility', 'x.art_no'])} as district, ${oneRowSql('x.facility', ['x.province', 'x.district', 'x.facility', 'x.art_no'])} as facility,
+    ${oneRowSql('x.art_no', ['x.province', 'x.district', 'x.facility', 'x.art_no'])} as art_no,
     ${visits.map(pick).join(',\n    ')}
   from x
   where exists (select 1 from z where ${sameClient('z', 'x')})
@@ -1028,7 +1033,7 @@ pick as (
 )
 select g.*
 from (
-  select min(p.l_province collate "C") as "Province", min(p.l_district collate "C") as "District", min(p.l_facility collate "C") as "Facility",
+  select ${oneRowSql('p.l_province', ['p.l_province', 'p.l_district', 'p.l_facility'])} as "Province", ${oneRowSql('p.l_district', ['p.l_province', 'p.l_district', 'p.l_facility'])} as "District", ${oneRowSql('p.l_facility', ['p.l_province', 'p.l_district', 'p.l_facility'])} as "Facility",
     sum(p.c) ${live} as "Clients",
     sum(p.s_flag) ${live} as "SuppressedC",
     sum(p.c) ${live} - sum(p.s_flag) ${live} as "UnsuppressedC",
@@ -1097,7 +1102,7 @@ x as (
 )
 select g.*
 from (
-  select min(x.province collate "C") as "Province", min(x.district collate "C") as "District", min(x.facility collate "C") as "Facility",
+  select ${oneRowSql('x.province', ['x.province', 'x.district', 'x.facility'])} as "Province", ${oneRowSql('x.district', ['x.province', 'x.district', 'x.facility'])} as "District", ${oneRowSql('x.facility', ['x.province', 'x.district', 'x.facility'])} as "Facility",
     count(*) as "Clients", sum(x.suppressed_flag) as "Suppressed", count(*) - sum(x.suppressed_flag) as "UnSuppressed"
   from x
   where x.rk = 1 and x.province is not null and x.not_baseline and ${provinceTest}

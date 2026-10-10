@@ -5,6 +5,7 @@ import {
   sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey,
   inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql, likeVarcharSql,
   dateParamSql, optionsListSql,
+  oneRowSql,
 } from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
@@ -203,7 +204,7 @@ sc as (
     and ${same('ed.facility', 'facility')}
 ),
 agg as (
-  select max(s.province) as province, max(s.district) as district, max(s.facility) as facility, count(*) as n,
+  select ${oneRowSql('s.province', ['s.province', 's.district', 's.facility'])} as province, ${oneRowSql('s.district', ['s.province', 's.district', 's.facility'])} as district, ${oneRowSql('s.facility', ['s.province', 's.district', 's.facility'])} as facility, count(*) as n,
     ${cols.map(([name, expr]) => `${expr} as "${name}"`).join(',\n    ')}
   from sc s
 )
@@ -300,7 +301,7 @@ sc as (
     and ${same('ed.district', 'district')}
 ),
 agg as (
-  select min(s.province) as province, min(s.district) as district, min(s.facility) as facility, s.gender, s.age_group,
+  select ${oneRowSql('s.province', ['s.province', 's.district', 's.facility'])} as province, ${oneRowSql('s.district', ['s.province', 's.district', 's.facility'])} as district, ${oneRowSql('s.facility', ['s.province', 's.district', 's.facility'])} as facility, s.gender, s.age_group,
     count(s.lab_id) as tests, sum(s.positive) as positive, sum(s.negative) as negative, sum(s.indeterminate) as indeterminate,
     sum(s.error) as error, sum(s.invalid) as invalid, ${count1('s.recieved_date is not null')} as rdate,
     ${within(1)} as w1, ${within(2)} as w2, ${within(3)} as w3, ${within(7)} as w7, ${within(14)} as w14,

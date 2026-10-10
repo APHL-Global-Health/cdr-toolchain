@@ -1449,8 +1449,52 @@ suites30c.push(
   orderedSuite10('t30c-facility-fold', facE?.sql ?? 'select 1', { province: 'SOUTHERN', district: 'choma', ...MAY_E }, colsE('Facility'), [fE('CHOMA CLINIC ', 2, 2, 2, null, 2, 18)]),
 );
 
+// ============================================================================================
+// Group fx (final review, minor 2): names that differ only in case or trailing spaces. The four register rows of checks/vl.mjs group fx:
+//   ZFXA 'Choma Clinic' / Southern / Choma        ZFXB 'CHOMA CLINIC ' / 'SOUTHERN ' / CHOMA
+//   ZFXC 'ALPHA CLINIC' / Southern / Choma        ZFXD 'Alpha Clinic ' / southern / CHOMA
+// A group shows the names of ONE of its rows, the first in byte order of province, district, facility: Choma Clinic shows ZFXB's names and
+// Alpha Clinic ZFXC's. One EID request per register row: female, 3 days old (At Birth), Positive, collected 05-01, received 05-02 (8 days
+// before the result), authorised 05-10 (tat 9). Fixture ids start with "fx-"; lab ids with "FX-".
+// ============================================================================================
+
+const FX_FACILITIES = [['ZFXA', 'Choma Clinic', 'Southern', 'Choma'], ['ZFXB', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
+  ['ZFXC', 'ALPHA CLINIC', 'Southern', 'Choma'], ['ZFXD', 'Alpha Clinic ', 'southern', 'CHOMA']];
+const SETUP_FX = `${facilityRows('fx', FX_FACILITIES)}
+insert into patients (id, surname, sex) values ${FX_FACILITIES.map((_, i) => `('fx-p${i + 1}', 'FX', 'F')`).join(', ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_days) values
+  ${FX_FACILITIES.map(([code], i) => `('fx-q${i + 1}', 'FX-${i + 1}', 'HIVPC', '2026-05-02T08:00:00Z', '2026-05-02T09:00:00Z', ${lit(code)}, 'fx-p${i + 1}', 3)`).join(',\n  ')};
+insert into specimens (id, received_time) values ${FX_FACILITIES.map((_, i) => `('fx-s${i + 1}', '2026-05-02T09:00:00Z')`).join(', ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id) values
+  ${FX_FACILITIES.map((_, i) => `('fx-d${i + 1}', 'fx-q${i + 1}', 'final', '2026-05-01T07:00:00Z', '2026-05-10T10:00:00Z', 'LUS', 'fx-s${i + 1}')`).join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values
+  ${FX_FACILITIES.map((_, i) => `('fx-r${i + 1}', 'fx-q${i + 1}', 'HIVPR', 'Positive', null, null)`).join(',\n  ')};`;
+const FX_MAY = { from: '2026-05-01', to: '2026-05-31' };
+// Tests, Positive, Negative, Indeterminate, Error, Invalid, RDateCompleted, LabTATWithin 1, 2, 3, 7, 14 (8 days: only 14), TATWithin14.
+const FX_TWO = [2, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 2];
+const suitesFx = [
+  // The province's facilities: two groups, Alpha Clinic first (Facility breaks the tie, List lines 101-103).
+  listSuite13('fx-list-province', { province: 'Southern', district: '', ...FX_MAY }, [
+    ls13('Southern', 'Choma', 'ALPHA CLINIC', 'Female', 'At Birth', FX_TWO),
+    ls13('SOUTHERN ', 'CHOMA', 'CHOMA CLINIC ', 'Female', 'At Birth', FX_TWO),
+  ], SETUP_FX),
+  // The dashboard summary at facility level, for Alpha Clinic in any spelling: the names of ZFXC's row.
+  {
+    name: 'fx-dashboard-facility',
+    sql: `select 'fx-dashboard-facility' || chr(9) || json_build_object('p', q."Province", 'd', q."District", 'f', q."Facility", 'n', q."Tests")::text
+from (${bind(dashQuery13?.sql ?? 'select 1', { province: 'southern', district: 'choma ', facility: 'ALPHA clinic', ...FX_MAY })}) q;`,
+    count: 1,
+    check(rows) {
+      const got = JSON.stringify(rows);
+      const want = JSON.stringify([{ p: 'Southern', d: 'Choma', f: 'ALPHA CLINIC', n: 2 }]);
+      return got === want ? [] : [`expected ${want}, got ${got}`];
+    },
+  },
+];
+
 export const groups = [{ name: 't3', suites }, { name: 't10-eid', suites: suites10e },
   { name: 't13', suites: [...suites13dash, ...suites13list, ...suites13trend] },
   { name: 't14', suites: suites14 },
-  { name: 't30c', suites: suites30c }
+  { name: 't30c', suites: suites30c },
+  { name: 'fx', suites: suitesFx },
 ];

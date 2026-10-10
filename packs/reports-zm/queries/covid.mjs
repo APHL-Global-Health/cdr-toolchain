@@ -5,6 +5,7 @@ import {
   ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
   requesterJoin, sqlLit, ssTextKey, testingCodeSql, hmisCodeSql, registryRowJoin, optionsListSql,
   dateParamSql,
+  oneRowSql,
 } from '../zm-sql.mjs';
 
 // ---- The COVID-19 counts (Task 22) -----------------------------------------------------------------------------------------------
@@ -118,8 +119,8 @@ export function covidCountsCte(name, { panels, onlyLab = false }) {
     and rtrim(dr.performer) <> ''
 ),
 ${name} as (
-  select min(s.lab_desc collate "C") as lab_desc, min(s.province collate "C") as province, min(s.district collate "C") as district,
-    min(s.facility collate "C") as facility,
+  select ${oneRowSql('s.lab_desc', ['s.lab_desc', 's.province', 's.district', 's.facility'])} as lab_desc, ${oneRowSql('s.province', ['s.lab_desc', 's.province', 's.district', 's.facility'])} as province, ${oneRowSql('s.district', ['s.lab_desc', 's.province', 's.district', 's.facility'])} as district,
+    ${oneRowSql('s.facility', ['s.lab_desc', 's.province', 's.district', 's.facility'])} as facility,
     count(distinct s.req_key) filter (where s.is_registered) as registered,
     case when min(s.facility) is not null then nullif(count(distinct s.req_key) filter (where s.is_tested), 0) end as tested,
     case when min(s.facility) is not null then nullif(count(distinct s.req_key) filter (where s.is_authorised), 0) end as authorised,
@@ -185,7 +186,7 @@ order by ${textOrder('res.lab_desc')}, res.registered, res.tested nulls first, r
 export function sourceStatsSql() {
   return `with ${covidCountsCte('cv', { panels: ['COVID'], onlyLab: true })},
 res as (
-  select min(c.province collate "C") as province, min(c.district collate "C") as district, min(c.facility collate "C") as facility,
+  select ${oneRowSql('c.province', ['c.province', 'c.district', 'c.facility'])} as province, ${oneRowSql('c.district', ['c.province', 'c.district', 'c.facility'])} as district, ${oneRowSql('c.facility', ['c.province', 'c.district', 'c.facility'])} as facility,
     coalesce(sum(c.registered), 0)::bigint as registered, coalesce(sum(c.tested), 0)::bigint as tested,
     coalesce(sum(c.authorised), 0)::bigint as authorised, coalesce(sum(c.positive), 0)::bigint as positive
   from cv c

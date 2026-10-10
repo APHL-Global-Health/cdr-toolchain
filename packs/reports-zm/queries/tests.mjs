@@ -5,6 +5,7 @@ import {
   dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, optionalWindowSql, provinceParam, recencyCte,
   recencySurveillanceCte, requesterJoin, requestAttrSql, sqlLit, ssTextKey, testingCodeSql, tndCte,
   dateParamSql, optionsListSql,
+  oneRowSql,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -456,8 +457,8 @@ export function cd4Sql() {
   const cell = 's.yr, s.mo, s.kp, s.kd, s.kf, s.age_group, s.ks';
   const group = (name, obsWord, rangeColumn) => `${name} as (
   select s.yr, s.mo, s.kp, s.kd, s.kf, s.age_group, s.ks, s.${rangeColumn} as rng,
-    min(s.province collate "C") as province, min(s.district collate "C") as district, min(s.facility collate "C") as facility,
-    min(s.sex collate "C") as sex, count(distinct s.req_key) as cnt
+    ${oneRowSql('s.province', ['s.province', 's.district', 's.facility', 's.sex'])} as province, ${oneRowSql('s.district', ['s.province', 's.district', 's.facility', 's.sex'])} as district, ${oneRowSql('s.facility', ['s.province', 's.district', 's.facility', 's.sex'])} as facility,
+    ${oneRowSql('s.sex', ['s.province', 's.district', 's.facility', 's.sex'])} as sex, count(distinct s.req_key) as cnt
   from src s
   where ${inListSql('s.obs', [obsWord])}
   group by ${cell}, s.${rangeColumn}
@@ -611,7 +612,7 @@ names as (
 ),
 tests as (
   select s.kp, s.kd, s.kf, s.lab_key, s.lab_type, s.yr, s.mo,
-    min(s.province collate "C") as province, min(s.district collate "C") as district, min(s.description collate "C") as description,
+    ${oneRowSql('s.province', ['s.province', 's.district', 's.description'])} as province, ${oneRowSql('s.district', ['s.province', 's.district', 's.description'])} as district, ${oneRowSql('s.description', ['s.province', 's.district', 's.description'])} as description,
     min(nm.lab_name) as lab_name, count(distinct s.req_key) as cnt
   from src s
   left join names nm on nm.lab_key = s.lab_key
@@ -970,8 +971,8 @@ names as (
   group by ${foldSql('p.code')}
 ),
 res as (
-  select min(s.province collate "C") as c01, min(s.district collate "C") as c02, min(s.facility collate "C") as c03,
-    min(s.lab_id collate "C") as c04, min(n.lab_name collate "C") as c05,
+  select ${oneRowSql('s.province', ['s.province', 's.district', 's.facility', 's.lab_id'])} as c01, ${oneRowSql('s.district', ['s.province', 's.district', 's.facility', 's.lab_id'])} as c02, ${oneRowSql('s.facility', ['s.province', 's.district', 's.facility', 's.lab_id'])} as c03,
+    ${oneRowSql('s.lab_id', ['s.province', 's.district', 's.facility', 's.lab_id'])} as c04, min(n.lab_name collate "C") as c05,
     s.collected as c06, s.received as c07, s.analysis as c08, s.authorised as c09,
     ${pivot}
   from src s

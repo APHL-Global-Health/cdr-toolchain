@@ -283,6 +283,11 @@ export const labNameSql = (drAlias) => `coalesce(
       order by zfm.id limit 1),
     ${drAlias}.performer)`;
 
+// One column of a group, taken from ONE row of the group: the row that comes first when the rows are sorted on `orderExprs`, byte
+// by byte, a NULL last. Give every name column of a group the same `orderExprs`, so the names shown together come from one row and
+// never mix spellings from two rows (per-column min() could show 'SOUTHERN ' with 'Choma' when no row has both).
+export const oneRowSql = (expr, orderExprs) => `(array_agg(${expr} order by ${orderExprs.map((e) => `${e} collate "C" nulls last`).join(', ')}))[1]`;
+
 // ---- Text order like SQL Server ----
 
 // SQL_Latin1_General_CP1_CI_AS (the server default, option sqlCollation): the order of the 191 Latin-1 characters (32 to 126 and 160 to
@@ -1729,7 +1734,7 @@ export function recencySurveillanceCte(name, { from, to } = {}) {
     left join ${name}_xb xb on ${foldSql('xb.lab_id')} = ${foldSql('y.lab_id')}
     left join ${name}_z z on ${foldSql('z.lab_id')} = ${foldSql('y.lab_id')}
   )
-  select min(a.province) as province, min(a.district) as district, min(a.facility) as facility,
+  select ${oneRowSql('a.province', ['a.province', 'a.district', 'a.facility'])} as province, ${oneRowSql('a.district', ['a.province', 'a.district', 'a.facility'])} as district, ${oneRowSql('a.facility', ['a.province', 'a.district', 'a.facility'])} as facility,
     null::text as implementing_partner, a.age_group, a.gender, min(a.recency_result) as recency_result,
     a.suppression_status, ${reportingStatusSql('a.recency_result', 'a.suppression_status')} as reporting_status,
     min(a.modality) as modality, a.reg_year, a.reg_quarter, a.month, a.week,
