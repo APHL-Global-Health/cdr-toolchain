@@ -306,6 +306,18 @@ sits.
   in scope, and the hivvl builder and "VL results history by client" join that. We recommend an
   index on `questionnaire_responses (based_on_id)` in CE. It is a CE change and is not part of this
   pack.
+- **Disalink.** `disalinkSql` runs an EXISTS over `facility_map` for each row, on folded codes, which
+  no index serves. The table is small (one row per mapped code), but it is still a scan of it for
+  each request row of the hivvl and eid builders.
+- **The 12-month rates.** "Unique VL clients, 12-month rates" numbers each client's visits with
+  `tndCte` rank mode, which reads every VL and RTRI result since 2017-01-01, whatever the window.
+- **Client by ART number** builds the ART number of every request in the warehouse and then
+  filters on it. The number is computed, so no index can serve the filter.
+- **ART number attributes.** `zmIdsCte` groups every `reference-numbers` and `unique-id` attribute
+  in the warehouse by request, before the join to the requests in the window.
+- **EID request answers** has no window. It reads the answers of every HIVST request.
+- **Paging.** The Query page calls `/api/query/run` once per page, and each call runs the query
+  twice: once for the page, once as `count(*)` for the total. A slow query costs double per page.
 
 ## Shared builders
 
@@ -707,6 +719,10 @@ No Zambian name is that long.
   - CE lacks: Methodology, LocationCode, Gram Results (NULL). HOSPID. The AST row is a result with an
     S, I or R flag. The organism link is cdr-toolchain's rule re-run on the OBR set. The `laboratory`
     pick list has the four v1 procedures by name.
+  - Ruled (Task 20): an organism result that cdr-toolchain calls no growth is not an isolate, so an
+    AST never goes to it. The test copies cdr's own rule (`organismCategory`, `codebook.ts:290-300`):
+    a no-finding, no-growth, normal flora or sterile text, or a no-growth code. Only `ORGS` results
+    with a text are isolates.
 - **HIV drug resistance.**
   - Kept: no status filter. A drug off the 26 names is dropped but its request stays. Two results
     for one drug show the larger text.
@@ -784,6 +800,10 @@ No Zambian name is that long.
     the lab query.
   - Differs: `test_type` VL switches the panels and the bucket date together. Windows are optional
     and use the bucket date.
+  - Ruled (Task 28): "VL rejections by facility (total)" is its own query, with no `grain`
+    parameter. `vVLTotalRejectionsByFacility` returns only FacilityName and Rejections, of panel
+    HIVVL, grouped by facility name. The period query has 37 columns, so a parameter could not switch
+    between them (rule 9).
 - **Date completeness (six queries).** Kept: `count(RequestID)` counts rows. Two facilities with one
   name are one row. NULL names are one row.
   - Differs: a group with no request number gives Requests 0 and NULL rates, where v1 stops with a
