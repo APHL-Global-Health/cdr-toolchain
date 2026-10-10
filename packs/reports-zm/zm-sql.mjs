@@ -1392,15 +1392,17 @@ const RECENCY_LAB_PREFIXES = [['ZAP', 'Arthur Davison Childrens Hospital Lab'], 
   ['ZLR', 'Livingstone Teaching Hospital Lab'], ['ZLP', 'Livingstone Teaching Hospital Lab']];
 
 // The lab numbers that have an RTRI request registered in the window (sp_getTestLevelRecency_CIDRZ lines 59-62,
-// sp_recency_surveillance lines 65-69). `finalRange` is the window on lr.authored_at ('' without a window).
-const recencyIdsSql = (finalRange) => `select distinct lr.request_id as lab_id
+// sp_recency_surveillance lines 65-69). `finalRange` is the window on lr.authored_at ('' without a window). A lab number is its folded
+// text (lab_key): v1 compares lab numbers with SQL Server's default collation, so 'ABC123' and 'abc123 ' are one lab number (lines 59,
+// 111, 130-148 of the recency procedure join and filter on RequestID that way).
+const recencyIdsSql = (finalRange) => `select distinct ${foldSql('lr.request_id')} as lab_key
     from lab_requests lr
     where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
       ${finalRange}`;
 
 // A request row is used when its lab number has such an RTRI request and the row itself is registered in the window
 // (sp_getTestLevelRecency_CIDRZ lines 59-63).
-const recencyScopeSql = (ids, finalRange) => `lr.request_id in (select i.lab_id from ${ids} i)
+const recencyScopeSql = (ids, finalRange) => `${foldSql('lr.request_id')} in (select i.lab_key from ${ids} i)
       ${finalRange}`;
 
 // The suppression status of a baseline viral load text. `words` is the suppressed list and `unsuppressedText` the SQL
@@ -1463,6 +1465,10 @@ const reportingStatusSql = (recency, suppression) => `case
 //   - testing_laboratory: the first three characters of the lab number name 13 labs (lines 85-100). Any other prefix
 //     takes the name of ruling 8: the report's display, else the mapped register name, else the performer's code.
 //
+// Lab numbers compare the way SQL Server compares text (case and trailing spaces ignored): the scope, the baseline join and the answer
+// joins use the folded lab number, so 'ABC123' on the RTRI request and 'abc123 ' on the HIVVL request are one lab number. The lab_id
+// column shows the RTRI row's own spelling.
+//
 // Kept v1 quirks (spec ruling 1):
 //   - Rows multiply. A lab number with two HIVVL results gives one row per baseline result. Two answers to one question
 //     (VPREG and ARTPR together, or two OBR sets) give one row each.
@@ -1493,7 +1499,7 @@ export function recencyCte(name, { from, to } = {}) {
   const { finalRange } = copyWindow('recencyCte', from, to, 'lr.authored_at');
   const scope = recencyScopeSql(`${name}_ids`, finalRange);
   const result = rpt('l');
-  const answerJoin = (alias, test) => `left join ${name}_ans ${alias} on ${alias}.lab_id = s.lab_id and ${alias}.obs ${test}`;
+  const answerJoin = (alias, test) => `left join ${name}_ans ${alias} on ${foldSql(`${alias}.lab_id`)} = ${foldSql('s.lab_id')} and ${alias}.obs ${test}`;
   return `${name} as (
   with ${name}_ids as (
     ${recencyIdsSql(finalRange)}
@@ -1532,13 +1538,13 @@ export function recencyCte(name, { from, to } = {}) {
     join lab_results l on l.request_id = lr.id
     where ${inListSql('lr.panel_code', [RECENCY_PANEL])}
       and ${inListSql('l.observation_code', ['RTMOD', 'VPREG', 'ARTPR', 'VBREA', 'RTRTD'])}
-      and lr.request_id in (select i.lab_id from ${name}_ids i)
+      and ${foldSql('lr.request_id')} in (select i.lab_key from ${name}_ids i)
   ),
   ${name}_s as (
     select a.*, b.baseline_vl_result,
       ${suppressionSql('b.baseline_vl_result', RECENCY_SUPPRESSED, `${foldSql('b.baseline_vl_result')} = '> 10000000'`)} as suppression_status
     from ${name}_a a
-    left join ${name}_b b on b.lab_id = a.lab_id
+    left join ${name}_b b on ${foldSql('b.lab_id')} = ${foldSql('a.lab_id')}
   )
   select s.province, s.district, s.facility, s.moh_facility_code, null::text as ip, s.lab_id, s.gender, s.age_in_years,
     s.recency_result, s.baseline_vl_result, s.suppression_status, s.testing_laboratory,
@@ -1667,8 +1673,8 @@ export function recencySurveillanceCte(name, { from, to } = {}) {
       extract(year from y.reg_date)::int as reg_year, extract(quarter from y.reg_date)::int as reg_quarter,
       extract(month from y.reg_date)::int as month, ${dateWeekSql('y.reg_date')} as week
     from ${name}_y y
-    left join ${name}_xb xb on xb.lab_id = y.lab_id
-    left join ${name}_z z on z.lab_id = y.lab_id
+    left join ${name}_xb xb on ${foldSql('xb.lab_id')} = ${foldSql('y.lab_id')}
+    left join ${name}_z z on ${foldSql('z.lab_id')} = ${foldSql('y.lab_id')}
   )
   select min(a.province) as province, min(a.district) as district, min(a.facility) as facility,
     null::text as implementing_partner, a.age_group, a.gender, min(a.recency_result) as recency_result,

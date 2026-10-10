@@ -2971,8 +2971,35 @@ lab30('T30C-B-NOKEY', [{ req: 'ZNOHM' }], [{ ...NOHIMS, moh_facility_code: null 
 lab30('T30C-B-BLANK', [{ req: 'ZBLHM' }], [{ province: 'Southern', district: 'Choma', facility: 'Blank Hims Clinic', moh_facility_code: '' }]); // a blank code stays blank
 lab30('T30C-B-GHOST', [{ req: 'ZGHRG' }], [{ province: 'Southern', district: 'Choma', facility: 'Ghost Register Clinic', moh_facility_code: null }]); // registry id, no register row
 lab30('T30C-B-NOEXTRAS', [{ req: 'ZPERF' }], [{ province: 'Southern', district: 'Choma', facility: 'Perf Lab Register', moh_facility_code: null }]); // extras is NULL
+// Item E: lab numbers compare the way SQL Server compares text (case and trailing spaces ignored) in the scope, the baseline join and the
+// answer joins of the recency builders. The RTRI row shows its own spelling; the baseline and the answers sit on requests spelled another way.
+// A baseline on a request spelled 't30c-e-one ' belongs to lab number 'T30C-E-ONE' (before: no baseline, and the request was out of scope).
+rc30.add('t30c-e-one ', [vlNum(500)]);
+lab30('T30C-E-ONE', [{}], [sup('500')]);
+// A lab number that only looks alike is another lab number: 'T30C-E-ONEX' (an HIVVL request, no RTRI) gives no baseline to 'T30C-E-ONE'.
+rc30.add('T30C-E-ONEX', [vlNum(700)]);
+// The answers (RTMOD, VPREG) sit on a second RTRI-panel request spelled 'T30C-E-TWO  ', the date answer (RTRTD) on 't30c-e-two', the baseline on
+// a request of the first spelling. Those requests have no recency observation, so they give no rows of their own.
+rc30.add('T30C-E-TWO  ', [{ results: [{ obs: 'RTMOD', text: 'VCT' }, { obs: 'VPREG', text: 'Yes' }] }, { ...vlNum(1500), authored: '2026-05-03T08:00:00Z' }]);
+rc30.add('t30c-e-two', [{ results: [{ obs: 'RTRTD', text: '01/03/2026' }] }]);
+lab30('T30C-E-TWO', [{}], [{ ...uns('1500'), modality: 'VCT', pregnant: 'Yes', recency_test_date: '2026-03-01' }]);
+// The same spelling still works.
+lab30('T30C-E-THREE', [{}, vlNum(300)], [sup('300')]);
+// A request of the lab number registered in June is outside the May window: it gives no baseline (the row itself must be in the window).
+rc30.add('t30c-e-four ', [{ ...vlNum(800), authored: '2026-06-10T08:00:00Z' }]);
+lab30('T30C-E-FOUR', [{}], [{}]);
+// The surveillance builder: the same rule. Registered in August 2026 (a Tuesday, week 32 by datepart(wk)), so its own window holds only these.
+const AUG_30 = '2026-08-04T08:00:00Z';
+rc30.add('T30C-E-SURV', [{ authored: AUG_30 }]);
+rc30.add('t30c-e-surv ', [{ ...vlNum(500), authored: AUG_30 }, { authored: AUG_30, results: [{ obs: 'RTMOD', text: 'VCT' }] }]);
+const wantedSurv30 = [{
+  province: 'Southern', district: 'Choma', facility: 'Choma General Hospital', implementing_partner: null, age_group: '30 - 34', gender: 'Female',
+  recency_result: 'Recent', suppression_status: 'Suppressed', reporting_status: 'Confirmed Long-Term', modality: 'VCT', reg_year: 2026, reg_quarter: 3,
+  month: 8, week: 32, count: 1,
+}];
 suites30c.push(
   builderSuite({ name: 't30c-recency-hmis', setup: rc30.setup(), cteSql: bind(recencyCte('rc', { from: 'from', to: 'to' }), WINDOW), columns: RECENCY_COLUMNS, alias: 'rc', rows: wanted30 }),
+  builderSuite({ name: 't30c-surveillance-labs', setup: '', cteSql: bind(recencySurveillanceCte('rs', { from: 'from', to: 'to' }), { from: '2026-08-01', to: '2026-08-31' }), columns: SURV_COLUMNS, alias: 'rs', rows: wantedSurv30 }),
 );
 
 // Item D: "Recency tests with client names" groups a lab number's patients the way SQL Server compares text (case and trailing spaces
