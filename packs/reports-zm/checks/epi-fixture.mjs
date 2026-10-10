@@ -130,8 +130,7 @@ export const badDate = (id, value) => `${id} must be YYYY-MM-DD, got ${value}`;
 //     other side, and a bad date beside a blank one still raises.
 // The other parameters are blank, except those in DATE_ERROR_OTHER (a required choice). The line list validates date-times itself (Task 23).
 const DATE_ERROR_OTHER = { test_type: 'VL', art_number: '', year: '2026' };
-// `blankOk` lists queries whose required date still reads a blank value as no limit (the weekly W query's `from`, an old floor).
-export function dateErrorSuites(prefix, queryList, { skip = [], blankOk = [] } = {}) {
+export function dateErrorSuites(prefix, queryList, { skip = [] } = {}) {
   const out = [];
   for (const q of queryList) {
     if (skip.includes(q.name)) continue;
@@ -139,13 +138,12 @@ export function dateErrorSuites(prefix, queryList, { skip = [], blankOk = [] } =
     const from = ps.find((p) => p.id === 'from');
     const to = ps.find((p) => p.id === 'to');
     if (!from) continue;
-    const open = blankOk.includes(q.name);
     const base = { ...Object.fromEntries(ps.map((p) => [p.id, DATE_ERROR_OTHER[p.id] ?? ''])) };
     const win = { ...base, from: '2026-05-01', ...(to ? { to: '2026-05-31' } : {}) };
     const id = (k) => `${prefix}: ${q.name}: ${k}`;
     out.push(errorSuite(id('valid window'), q, win, null));
     out.push(errorSuite(id('from 09/10/2026'), q, { ...win, from: '09/10/2026' }, badDate('from', '09/10/2026')));
-    if (from.required && !open) out.push(errorSuite(id('from blank (required)'), q, { ...win, from: '' }, badDate('from', '')));
+    if (from.required) out.push(errorSuite(id('from blank (required)'), q, { ...win, from: '' }, badDate('from', '')));
     else {
       out.push(errorSuite(id('both blank'), q, { ...win, from: '', to: '' }, null));
       out.push(errorSuite(id('from blank, to given'), q, { ...win, from: '' }, null));

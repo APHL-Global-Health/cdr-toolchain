@@ -4323,18 +4323,22 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
   }
 
   // ---- Suites ----
+  // W's `from` is required (final review minor 12: a blank one raises). Its default here is a floor before every fixture stamp, 1900-01-01,
+  // which keeps every request with a date, as v1's view without its 2018 floor would. V's window is optional: blank both is all history.
   const NONE = { from: '', to: '' };
+  const NO_FLOOR_W = { from: '1900-01-01', to: '' };
+  const defaults = (kind) => (kind === 'w' ? NO_FLOOR_W : NONE);
   function listSuite(name, kind, params, wanted, where) {
     const q = t30query(kind);
     const text = q && where ? `select z.* from (${q.sql}) z where ${where}` : (q?.sql ?? 'select null::text as "x"');
-    const s = orderedSuite(name, text, { ...NONE, ...params }, T30_COLUMNS[kind], wanted);
+    const s = orderedSuite(name, text, { ...defaults(kind), ...params }, T30_COLUMNS[kind], wanted);
     if (!q) {
       const check = s.check;
       s.check = (got) => [`query "${Q30[kind]}" is missing`, ...check(got)];
     }
     return s;
   }
-  const modelSuite = (name, kind, params = {}) => listSuite(name, kind, params, modelRows(kind, params));
+  const modelSuite = (name, kind, params = {}) => listSuite(name, kind, params, modelRows(kind, { ...defaults(kind), ...params }));
   function valueSuite(name, kind, selectExpr, want) {
     const q = t30query(kind);
     if (!q) return { name, count: 1, check: () => [`query "${Q30[kind]}" is missing`] };
@@ -4404,7 +4408,7 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
     orderHas('t30-order-w', 'w', ['g.code', 'g.nm', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.tot', 'g.pcr', 'g.vl', 'g.oth']),
     orderHas('t30-order-v', 'v', ['g.code', 'g.nm', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.tot', 'g.pcr', 'g.vl', 'g.oth']),
     // -- Types: the year, quarter, month, week and the four counts are integers (v1: datepart and count) --
-    valueSuite('t30-types-w', 'w', (s) => `select json_build_object(${T30_COLUMNS.w.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+    valueSuite('t30-types-w', 'w', (s) => `select json_build_object(${T30_COLUMNS.w.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NO_FLOOR_W)}) q limit 1`,
       Object.fromEntries(T30_COLUMNS.w.map((c, i) => [c, i < 2 ? 'text' : 'integer']))),
     valueSuite('t30-types-v', 'v', (s) => `select json_build_object(${T30_COLUMNS.v.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
       Object.fromEntries(T30_COLUMNS.v.map((c, i) => [c, i < 3 ? 'text' : 'integer']))),
@@ -4446,7 +4450,8 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
     W('week', {}, weekRows(wW), 'week lab'),
     W('off', {}, [wr('ZOF', 'Off Lab', 2026, 2, 5, 19, 1, 1, 0, 0), wr('ZOF', 'Off Lab', 2026, 2, 5, 20, 1, 0, 1, 0)], 'off lab'),
     // The floor edge (W line 47: `> '2018-05-31'`): a datetime compared with a date. Exactly 00:00:00 of the day is out, one second later in.
-    // The sub-selects have no floor: PCR counts all five HIVPC requests of the week, more than Total (the three that pass).
+    // The sub-selects have no floor: PCR counts all five HIVPC requests of the week, more than Total (the three that pass). 'floor-none' and
+    // 'old-none' use the 1900-01-01 floor (NO_FLOOR_W above), which every fixture stamp passes.
     W('floor-none', {}, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 7, 5, 2, 0)], 'floor lab'),
     W('floor-10', W10, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 3, 5, 2, 0)], 'floor lab'),
     W('floor-09', { from: '2026-06-09' }, [wr('ZFL', 'Floor Lab', 2026, 2, 6, 24, 7, 5, 2, 0)], 'floor lab'),
@@ -4554,7 +4559,7 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
 // ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
 // Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
 const suites30c = [];
-suites30c.push(...dateErrorSuites('t30c-lab-ops', queries(), { blankOk: ['Requests received by week'] }));
+suites30c.push(...dateErrorSuites('t30c-lab-ops', queries()));
 
 export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b(), group30(),
   { name: 't30c', suites: suites30c }

@@ -1665,7 +1665,7 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 // becomes the parameter `from`, and keeps that compare: a stamp at exactly 00:00:00 of the day (also a stamp that is a date alone) is out, one
 // second later is in; the time is the stamp's own local wall time (a +02:00 stamp stays on its local day). A stamp with a fraction of a second
 // is read to the second (v1's datetime would keep the fraction), so one at 00:00:00.5 is out here and in v1. `from` is required (2018-05-31
-// gives v1's output; the SQL still reads a blank `from` as no floor, for callers that bypass the form). `to` is
+// gives v1's output); a blank `from` raises the date error, as every required date does. `to` is
 // a whole local day, inclusive. V has no floor in v1: its `from` and `to` are the usual inclusive local-date window on the bucket date, and
 // blank both is all history (the NULL-date group stays; as soon as one side is given it goes, as in Task 29b). W drops a NULL bucket date always.
 //
@@ -1726,7 +1726,7 @@ rq as (
   const window = copy
     ? optionalWindowSql("to_char(c.b, 'YYYY-MM-DD')")
     : `c.b is not null
-    and ({{param.from}} = '' or c.b > ${dateParamSql('from', { optional: true })}::timestamp)
+    and c.b > ${dateParamSql('from')}::timestamp
     and ({{param.to}} = '' or c.b::date <= ${dateParamSql('to', { optional: true })})`;
   const distinctIds = (cond) => `count(distinct ${foldSql('c.request_id')})${cond === undefined ? '' : ` filter (where ${cond})`}`;
   const lead = copy ? ['"LabPrefix"', '"labFacility"', '"LabName"'] : ['"Labprefix"', '"LabName"'];
