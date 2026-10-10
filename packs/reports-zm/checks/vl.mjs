@@ -2305,6 +2305,13 @@ cl12('T12-F01', '2016-12-31T23:30:00+02:00', { first: 'Old', last: 'Timer', art:
 cl12('T12-F02', '2099-01-01T08:00:00Z', { first: 'Future', last: 'Self', art: 'F200', num: 5000 });     // after the ceiling: never her newest result
 cl12('T12-F03', '2026-03-10T08:00:00Z', { first: 'Future', last: 'Self', art: 'F200', num: 100 });      // so this is her newest
 cl12('T12-F04', '2017-01-01T00:30:00+02:00', { first: 'New', last: 'Year', art: 'F300', num: 100 });    // local Jan 1 2017 (UTC Dec 31 2016): on the floor, in
+// One hour ago, stamped +02:00 (wall time is UTC + 2 hours, so the wall time is an hour AHEAD of a UTC server's clock). The ceiling compares
+// instants, so it counts whatever the server's time zone. Built from the clock when the check starts.
+const HOUR_AGO = new Date(Date.now() - 3600 * 1000);
+const HOUR_AGO_WALL = new Date(HOUR_AGO.getTime() + 2 * 3600 * 1000).toISOString().slice(0, 19);
+const HOUR_AGO_STAMP = `${HOUR_AGO_WALL}+02:00`;
+const HOUR_AGO_DAY = HOUR_AGO_WALL.slice(0, 10);
+cl12('T12-F05', HOUR_AGO_STAMP, { first: 'Hour', last: 'Ago', art: 'F400', num: 100 });
 
 // ---- M: lab X (testing lab code 'T12X') and lab Y ('T12Y') ----
 // No requesting facility, rejected; so only the lab-by-month query sees them. Authored = registration; issued = authorised.
@@ -2441,6 +2448,8 @@ const suitesRates = [
   // her newest would be 2099 and March would hold no client.
   rSuite('rates-march-ceiling', r12('', '', '', { from: '2026-03-01', to: '2026-03-31' }), rate(1, 1, 1, 100, 100)),
   rSuite('rates-future-window', r12('', '', '', { from: '2099-01-01', to: '2099-12-31' }), NULLS),
+  // The ceiling compares instants: a result stamped one hour ago with +02:00 counts (Hour Ago), on any server time zone.
+  rSuite('rates-hour-ago', r12('', '', '', { from: HOUR_AGO_DAY, to: HOUR_AGO_DAY }), rate(1, 1, 1, 100, 100)),
   {
     name: 'rates-shape',
     count: 8,
@@ -2563,8 +2572,8 @@ const suitesBd = [
 // ---- The builder option: tndCte with rank: true (v1 TND.Rank, sp_GetPreviousVLResultforCohort2x lines 20-30) ----
 
 // Every result of the R clients, with no window, and its visit number: row_number() over province, district, facility, panel, sex code,
-// surname, first name and ART number (compared as SQL Server compares text), newest first. 44 results: A 28, B 7, C 2 (the partial stamp
-// has no date and is out), D 5, F 2 (F03 and F04; F01 is before the 2017 floor and F02 is after the ceiling); the unmapped facility is out. Visit is 1 unless listed; ties (Tom Zulu) go to the smaller lab number.
+// surname, first name and ART number (compared as SQL Server compares text), newest first. 45 results: A 28, B 7, C 2 (the partial stamp
+// has no date and is out), D 5, F 3 (F03, F04 and F05; F01 is before the 2017 floor and F02 is after the ceiling); the unmapped facility is out. Visit is 1 unless listed; ties (Tom Zulu) go to the smaller lab number.
 const VISIT_NOT_1 = {
   'T12-A01a': 2, 'T12-A02a': 2, 'T12-A03a': 2, 'T12-A05a': 2, 'T12-A08b': 2, 'T12-A09a': 2, 'T12-A13a': 2, 'T12-B06a': 2,
 };
@@ -2574,7 +2583,7 @@ const RANK_LABS = [
   ...['01', '02', '03', '04', '05', '06a', '06b'].map((s) => `T12-B${s}`),
   ...['01', '03'].map((s) => `T12-C${s}`),
   ...['01', '02', '03', '04', '05'].map((s) => `T12-D${s}`),
-  'T12-F03', 'T12-F04',
+  'T12-F03', 'T12-F04', 'T12-F05',
 ];
 const rankSuite = {
   name: 'tnd-rank-builder',
