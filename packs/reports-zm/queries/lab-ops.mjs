@@ -1238,7 +1238,207 @@ from g
 order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls first, g.rejections`;
 }
 
+// ---- Date completeness (Task 29a) ----
+//
+// Replaces nine views, all one body: for each group of requests, how many requests have each of five dates, as a percentage.
+//   vDatesCompletionRatesByFacility (target), ByFacilityEID, ByFacilityVL   FacilityName                 (F, FE, FV)
+//   vDatesCompletionRatesByProvince                                         ProvinceName                 (P)
+//   vDatesCompletionRatesByDistrict                                         DistrictName                 (D)
+//   vDatesCompletionRatesByLab                                              LabPrefix, LabFacility       (L)
+//   vDatesCompletionRatesByLabEID, ByLabVL                                  LabFacility                  (LE, LV)
+//   vDatesCompletionRatesByLabArea                                          LabName                      (A)
+//
+// One SQL statement cannot rename its grouping column by parameter, so the column sets decide the queries (the Task 10 and 24 ruling).
+// Six queries, one helper (completenessSql) that holds the shared logic:
+//   Date completeness by province      ProvinceName                    from, to
+//   Date completeness by district      DistrictName                    from, to
+//   Date completeness by facility      FacilityName                    test_type (all, EID, VL), from, to
+//   Date completeness by lab           LabPrefix, LabFacility          from, to              (L: its column set has LabPrefix, LE and LV do not)
+//   Date completeness by lab facility  LabFacility                     test_type (EID, VL), from, to
+//   Date completeness by lab area      LabName                         from, to
+// Every query ends in the same six v1 columns: Requests, SampleCollectionDate, SampleReceivedDate, RegisteredDate, AnalyzedDate,
+// AuthorisedDate (F lines 7-11). test_type is only on the two levels where v1 has the variants.
+//
+// What v1 does (F lines 6-23 and the others):
+//   - From Requests (OBR rows), joined to FacilityList (RequestingFacilityCode = DisaCodes; F, FE, FV, P, D) or LabList (TestingFacilityCode =
+//     LabPrefix; A, LE, LV; L is a right join from LabList but its WHERE clause on Requests columns makes it an inner join). Grouped by the
+//     name column. FacilityList and LabList are not in the script.
+//   - Requests = count(RequestID); each rate = convert(Double precision, round(cast(count(date) as Decimal) / cast(count(RequestId) as
+//     decimal) * 100, 1)). count() skips NULL.
+//   - FE, LE: LIMSPanelCode = 'HIVPC'. FV, LV: 'HIVVL' or 'VIRAL'. L: 'HIVVL', 'HIVPC', 'VIRAL' or 'HIVST'. The others have no panel filter.
+//   - L (line 23) also has a window: the first of SpecimenDateTime, ReceivedDateTime, RegisteredDateTime is after 2017-10-31 and before
+//     2018-04-01. No other view has a window.
+//
+// CE mapping (global constraints):
+//   SpecimenDateTime = diagnostic_reports.effective, ReceivedDateTime = specimens.received_time (the report's specimen), RegisteredDateTime =
+//   lab_requests.authored_at, AnalysisDateTime = lab_requests.analysis_at, AuthorisedDateTime = diagnostic_reports.issued.
+//   Request rows are lab_requests rows (one per OBR). Facilities come from the register mapping (requesterJoin, an inner join), with the
+//   register's region, district and name for FacilityList's ProvinceName, DistrictName and FacilityName. Labs come from the report's performer
+//   (the testing lab, cdr's OPENLDR_LAB_CODE per push, cdr v2-transform.ts:401), named by labNamesCte (the Task 16 rule: one name per code).
+//
+// Rates (measured on the local SQL Server, all (count, requests) pairs up to 600 requests):
+//   - cast(x as Decimal) is decimal(18,0). The division, the * 100 and the round run in exact decimal arithmetic (the result is decimal(38,16)),
+//     round() takes half away from zero (6.25 -> 6.3, 28.75 -> 28.8). Postgres numeric does the same, so the port divides numerics and rounds
+//     with round(numeric, 1). A float computation would round 28.75 down (23 / 80 * 100 is 28.749999 in floating point).
+//   - The result is float, so the port casts to double precision. 180,899 pairs gave the same value as SQL Server, digit for digit.
+//   - count(date) counts the NOT NULL dates. A CE stamp is text: '' is not NULL, and neither is a partial FHIR dateTime like '2026-07'. A v1
+//     datetime column cannot hold either, so a stamp counts only when it starts with a full date (YYYY-MM-DD, with or without a time). The
+//     same rule the other Task 25 to 28 reports use for a collection date.
+//   - count(RequestID) is a ROW count: a RequestID on two OBR rows counts twice, a spelling in another case counts again, and a NULL RequestID
+//     is not counted (its dates still count, so a rate can pass 100). The port counts the request_id column the same way.
+//   - Division by zero: a group whose RequestIDs are all NULL has count(RequestId) = 0, and v1 raises "Divide by zero error encountered"
+//     for the whole view. Postgres raises "division by zero" on numeric / 0 as well, so the port raises too, for the whole query. Nothing
+//     hides it. CE's request_id column allows NULL, but cdr always sends one, so this does not happen on real data.
+//
+// Rows. A facility level counts one row per lab_requests row (a request with two reports is still one request row, as in v1, which holds
+// one set of dates per row): its dates are the earliest valid date among the reports, so a request has a date when any report has it. A lab
+// level counts one row per (request, report), because the lab is the report's performer: v1 holds one testing code per request row, so a
+// request with reports from two labs counts for each lab. A report with no performer (blank or NULL) or a request with no report has no lab and is
+// in no row: LabList cannot match a blank code (inner join).
+//
+// Joins and names (CE gaps, ruling 7):
+//   - FacilityList is the ZMFAC register mapping. A request whose requester code is not mapped to a register row is out (v1's inner join),
+//     including a NULL code. A facility with a NULL region or district is a row with a NULL name.
+//   - LabList (LabPrefix, LabFacility, LabName) is not defined anywhere in the script. LabPrefix is the performer code. LabFacility and LabName
+//     are both the lab's register name (the report's name, else the register's, else the code; labNamesCte). v1's LabName is likely a
+//     different name (a lab area), which Zambia has not sent (QUESTIONS-FOR-ZM). CE lists every performer code it has; v1 lists only the codes
+//     in LabList. The name of a lab is chosen among the rows the view lists (after the panel and window filter), as in the Task 16 rule.
+//
+// Kept v1 quirks (ruling 1):
+//   - The facility, province, district and lab name rows group on the NAME, in SQL Server's collation (case and trailing spaces ignored). Two
+//     facilities with one name are one row. The same district name in two provinces is one row. The shown spelling is the smaller in byte
+//     order (v1's choice is not defined). The lab view groups on the code (LabPrefix, LabFacility).
+//   - A group of facilities with a NULL name is one NULL row.
+//   - Panel codes compare as SQL Server does: case and trailing spaces ignored. F, P, D, A have no panel filter, so requests with a NULL
+//     or other panel are in.
+//
+// Window (ruling 3: a fixed window becomes parameters; the views scan all history). `from` and `to` are optional (blank is all history),
+// YYYY-MM-DD, on the local date (the stamp's own first ten characters, so a +02:00 stamp stays on its day). The date is v1's own window date, from
+// L line 23: the first of the collection date, the received date and the registered date. Why that date and not the registered date alone:
+// it is the date v1's one window used, so the window v1 computed (2017-11-01 to 2018-03-31 for L) gives the same requests; and a window on the
+// registered date alone would force RegisteredDate to 100% in every windowed row. A request with none of the three dates is out as soon as one
+// side is given. L's v1 window was exclusive at both ends of a datetime (after 2017-10-31 00:00:00, before 2018-04-01 00:00:00), so
+// from = 2017-10-31 and to = 2018-03-31 gives the same rows except a stamp at exactly 2017-10-31 00:00:00.
+// The date parameters are not validated here (a final wave adds one check).
+//
+// Order. v1 has no ORDER BY; the port orders by every output column (the name in SQL Server's text order, then the rest), so CE can page.
+const DATE_START = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}'";
+// The date part of a stamp (YYYY-MM-DD text) when the stamp starts with a full date, else NULL. v1 datetime columns have no ''.
+const dateOfStamp = (x) => `(case when ${x} ~ ${DATE_START} then left(${x}, 10) end)`;
+// The five rate columns: [v1 name, column of the row source].
+const RATE_COLUMNS = [
+  ['SampleCollectionDate', 'spec_d'],
+  ['SampleReceivedDate', 'recv_d'],
+  ['RegisteredDate', 'reg_d'],
+  ['AnalyzedDate', 'ana_d'],
+  ['AuthorisedDate', 'auth_d'],
+];
+const COMPLETENESS_EID = ['HIVPC'];
+const COMPLETENESS_VL = ['HIVVL', 'VIRAL'];
+const COMPLETENESS_LAB = ['HIVVL', 'HIVPC', 'VIRAL', 'HIVST'];
+
+// The panel condition. `testType`: 'optional' (blank or 'all' is every panel: facility), 'required' (EID or VL only: lab facility),
+// or a list of panels (the lab view), or null (no filter). An unknown test_type gives no rows.
+function panelCondition(testType) {
+  if (testType === null) return 'true';
+  if (Array.isArray(testType)) return inListSql('lr.panel_code', testType);
+  const t = foldSql('{{param.test_type}}');
+  const kinds = `(${t} = 'eid' and ${inListSql('lr.panel_code', COMPLETENESS_EID)}) or (${t} = 'vl' and ${inListSql('lr.panel_code', COMPLETENESS_VL)})`;
+  return testType === 'optional' ? `(${t} in ('', 'all') or ${kinds})` : `(${kinds})`;
+}
+
+// The shared helper. `level`: 'province', 'district', 'facility' (a key from the register row), 'lab' (code and name), 'labfacility' or
+// 'labarea' (the lab name). `panels`: see panelCondition. `labels`: the v1 column names of the key columns.
+function completenessSql({ level, panels, labels }) {
+  const isLab = level === 'lab' || level === 'labfacility' || level === 'labarea';
+  const dates = isLab
+    ? `${dateOfStamp('dr.effective')} as spec_d, ${dateOfStamp('s.received_time')} as recv_d, ${dateOfStamp('dr.issued')} as auth_d`
+    : `(select min(${dateOfStamp('d.effective')}) from diagnostic_reports d where d.based_on_id = lr.id) as spec_d,
+    (select min(${dateOfStamp('x.received_time')}) from diagnostic_reports d join specimens x on x.id = d.specimen_id where d.based_on_id = lr.id) as recv_d,
+    (select min(${dateOfStamp('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth_d`;
+  const keyColumns = { province: 'fmr.region as k', district: 'fmr.district as k', facility: 'fmr.name as k' };
+  // The request rows of the view (before its window). A facility level is one row per request; a lab level one row per (request, report).
+  const rows = isLab
+    ? `rq as (
+  select lr.request_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, ${dates},
+    ${dateOfStamp('lr.authored_at')} as reg_d, ${dateOfStamp('lr.analysis_at')} as ana_d
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${panelCondition(panels)}
+)`
+    : `rq as (
+  select lr.request_id, ${keyColumns[level]}, ${dates},
+    ${dateOfStamp('lr.authored_at')} as reg_d, ${dateOfStamp('lr.analysis_at')} as ana_d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  where ${panelCondition(panels)}
+)`;
+  const windowed = `sel as (
+  select q.*
+  from rq q
+  where ${isLab ? 'q.code is not null and ' : ''}${optionalWindowSql('coalesce(q.spec_d, q.recv_d, q.reg_d)')}
+)`;
+  const rates = RATE_COLUMNS.map(([, c], i) => `(round(count(q.${c})::numeric / count(q.request_id) * 100, 1))::float8 as r${i + 1}`).join(',\n    ');
+  const nameCtes = isLab ? `,
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()}` : '';
+  const order = (cols) => cols.map((c) => `${ssTextKey(c)} collate "C" nulls first, ${c} collate "C" nulls first`);
+  const tailOrder = ['g.requests', 'g.r1', 'g.r2', 'g.r3', 'g.r4', 'g.r5'];
+  let group;
+  let select;
+  let sortBy;
+  if (level === 'lab') {
+    group = `select min(q.code collate "C") as prefix, min(n.lab_name collate "C") as facility, count(q.request_id) as requests,
+    ${rates}
+  from sel q
+  join names n on n.code_key = ${foldSql('q.code')}
+  group by ${foldSql('q.code')}`;
+    select = `g.prefix as "${labels[0]}", g.facility as "${labels[1]}"`;
+    sortBy = [...order(['g.prefix', 'g.facility']), ...tailOrder];
+  } else {
+    const keyExpr = isLab ? 'n.lab_name' : 'q.k';
+    group = `select min(${keyExpr} collate "C") as k, count(q.request_id) as requests,
+    ${rates}
+  from sel q${isLab ? `\n  join names n on n.code_key = ${foldSql('q.code')}` : ''}
+  group by ${foldSql(keyExpr)}`;
+    select = `g.k as "${labels[0]}"`;
+    sortBy = [...order(['g.k']), ...tailOrder];
+  }
+  const tailSelect = ['Requests', ...RATE_COLUMNS.map(([name]) => name)].map((name, i) => `g.${i === 0 ? 'requests' : `r${i}`} as "${name}"`).join(', ');
+  return `with ${rows},
+${windowed}${nameCtes},
+g as (
+  ${group}
+)
+select ${select}, ${tailSelect}
+from g
+order by ${sortBy.join(',\n  ')}`;
+}
+
+export const provinceCompletenessSql = () => completenessSql({ level: 'province', panels: null, labels: ['ProvinceName'] });
+export const districtCompletenessSql = () => completenessSql({ level: 'district', panels: null, labels: ['DistrictName'] });
+export const facilityCompletenessSql = () => completenessSql({ level: 'facility', panels: 'optional', labels: ['FacilityName'] });
+export const labCompletenessSql = () => completenessSql({ level: 'lab', panels: COMPLETENESS_LAB, labels: ['LabPrefix', 'LabFacility'] });
+export const labFacilityCompletenessSql = () => completenessSql({ level: 'labfacility', panels: 'required', labels: ['LabFacility'] });
+export const labAreaCompletenessSql = () => completenessSql({ level: 'labarea', panels: null, labels: ['LabName'] });
+
 const windowParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
+
+// The test type of the two completeness queries that have v1 variants. Facility: v1 has the all view, so blank is all. Lab facility: v1 has
+// the EID and VL views only, so the choice is required.
+const completenessTypeParam = (withAll) => ({
+  id: 'test_type',
+  label: withAll
+    ? 'Test type: all (blank), EID (panel HIVPC) or VL (panels HIVVL and VIRAL)'
+    : 'Test type: EID (panel HIVPC) or VL (panels HIVVL and VIRAL)',
+  type: 'select',
+  required: !withAll,
+  optionsSql: withAll ? "select 'all' as test_type union all select 'EID' union all select 'VL'" : "select 'EID' as test_type union all select 'VL'",
+});
 
 export function queries() {
   return [
@@ -1254,5 +1454,11 @@ export function queries() {
     { name: 'Rejections by facility and reason', sql: rejectionsByReasonSql(), params: rejectionsByReasonParams() },
     { name: 'VL rejections by facility (total)', sql: vlRejectionsTotalSql(), params: windowParams() },
     { name: 'VL rejections by lab', sql: vlRejectionsByLabSql(), params: windowParams() },
+    { name: 'Date completeness by province', sql: provinceCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by district', sql: districtCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by facility', sql: facilityCompletenessSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'Date completeness by lab', sql: labCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by lab facility', sql: labFacilityCompletenessSql(), params: [completenessTypeParam(false), ...windowParams()] },
+    { name: 'Date completeness by lab area', sql: labAreaCompletenessSql(), params: windowParams() },
   ];
 }

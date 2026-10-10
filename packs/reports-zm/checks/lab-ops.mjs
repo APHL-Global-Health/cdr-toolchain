@@ -2690,4 +2690,665 @@ insert into diagnostic_reports (id, based_on_id, effective, performer, performer
   return { name: 't28', suites: suites28 };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28()];
+// ==========================================================================================================================
+// Group t29a: Date completeness (v1 views vDatesCompletionRatesByFacility <= ByFacilityEID, ByFacilityVL; ByProvince; ByDistrict; ByLab;
+// ByLabEID <= ByLabVL; ByLabArea). Fixture ids start with "t29a-f" (facility world), "t29a-l" (lab world), "t29a-r" (rounding world) and
+// "t29a-z" (division by zero); request numbers with "T29A-". The six queries read the same tables, so every suite first deletes the rows of
+// the other worlds (isolate) and runs inside a savepoint.
+// "F line N", "FE line N", "FV line N", "P line N", "D line N", "L line N", "LE line N", "LV line N" and "A line N" mean a line of
+// View__dbo_vDatesCompletionRatesByFacility.sql, ...FacilityEID, ...FacilityVL, ...Province, ...District, ...Lab, ...LabEID, ...LabVL and
+// ...LabArea.
+// Expected rows come from a small model of the v1 text (modelRows below) and from rows worked out by hand ("by hand").
+
+const Q29 = {
+  prov: 'Date completeness by province',
+  dist: 'Date completeness by district',
+  fac: 'Date completeness by facility',
+  lab: 'Date completeness by lab',
+  labfac: 'Date completeness by lab facility',
+  area: 'Date completeness by lab area',
+};
+const t29query = (name) => queries().find((x) => x.name === name);
+// Every view ends in the same six columns (F lines 7-11): Requests, then the five rates.
+const T29_TAIL = ['Requests', 'SampleCollectionDate', 'SampleReceivedDate', 'RegisteredDate', 'AnalyzedDate', 'AuthorisedDate'];
+const T29_COLUMNS = {
+  prov: ['ProvinceName', ...T29_TAIL],
+  dist: ['DistrictName', ...T29_TAIL],
+  fac: ['FacilityName', ...T29_TAIL],
+  lab: ['LabPrefix', 'LabFacility', ...T29_TAIL],
+  labfac: ['LabFacility', ...T29_TAIL],
+  area: ['LabName', ...T29_TAIL],
+};
+
+// ---- The v1 model ----
+// A v1 datetime is a real date, so a text counts as a date only when it starts with YYYY-MM-DD (not '', not '2026-07', not 'garbage').
+const t29valid = (x) => typeof x === 'string' && /^\d{4}-\d{2}-\d{2}/.test(x);
+const t29day = (x) => (t29valid(x) ? x.slice(0, 10) : null);
+const t29min = (list) => list.map(t29day).filter((x) => x !== null).sort()[0] ?? null;
+const t29fold = (x) => (x === null || x === undefined ? null : x.replace(/ +$/, '').toLowerCase());
+// round((count(col) as decimal) / (count(id) as decimal) * 100, 1): half away from zero, in whole tenths (integer maths, no float).
+// A count of 0 requests raises in v1 (Divide by zero error encountered); the model throws too.
+function t29rate(c, n) {
+  if (n === 0) throw new Error('division by zero');
+  return Math.floor((2000 * c + n) / (2 * n)) / 10;
+}
+const t29byteCmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// SQL Server's text order for the plain names of this fixture (letters, digits, spaces): case and trailing spaces ignored, then bytes.
+const t29textCmp = (a, b) => {
+  if (a === null || b === null) return (a === null ? 0 : 1) - (b === null ? 0 : 1);
+  return t29byteCmp(a.replace(/ +$/, '').toLowerCase(), b.replace(/ +$/, '').toLowerCase()) || t29byteCmp(a, b);
+};
+const T29_PANELS = { eid: ['hivpc'], vl: ['hivvl', 'viral'], lab: ['hivvl', 'hivpc', 'viral', 'hivst'] };
+// The window date: the first date of the specimen collection, the received time and the registered time (L line 23).
+const t29windowDay = (row) => row.spec ?? row.recv ?? row.reg;
+function t29inWindow(row, from, to) {
+  if (from === '' && to === '') return true;
+  const d = t29windowDay(row);
+  return d !== null && (from === '' || d >= from) && (to === '' || d <= to);
+}
+
+function group29a() {
+  const P = 't29a-';
+  let n = 0;
+  const fm = []; // facility_map rows of every world
+  const reqRows = [];
+  const repRows = [];
+  const specRows = [];
+  const regs = { f: [], l: [], z: [], r: [] }; // the register rows of each world
+  const recs = { f: [], l: [], z: [], r: [] };
+
+  // A register row (facility_map). A row with `mapped` false has no register id: the code is not in the register.
+  function fmap(w, code, region, district, name, mapped = true) {
+    const i = fm.length + 1;
+    fm.push(`(${lit(`${P}${w}-fm${i}`)}, '', '', ${lit(code)}, ${lit(mapped ? `reg-${P}${w}-${i}` : null)}, ${lit(name)}, ${lit(region)}, ${lit(district)})`);
+    if (mapped) regs[w].push({ code, region, district, name });
+  }
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+  // One request row. Dates: spec (the report's effective), recv (the specimen's received time), reg (authored_at), ana (analysis_at),
+  // auth (the report's issued). `report: false`: no report (so no spec, recv, auth). `reports`: several reports as { spec, recv, auth, perf,
+  // display }. `fac`: the requester code. `perf`, `display`: the report's performer and name.
+  function add(w, o) {
+    const r = { panel: 'HIVVL', rid: undefined, reg: null, spec: null, recv: null, ana: null, auth: null, report: true, fac: null, perf: null, display: null, obr: null, ...o };
+    n += 1;
+    r.id = `${P}${w}-q${n}`;
+    if (r.rid === undefined) r.rid = `T29A-${w.toUpperCase()}${n}`;
+    r.reps = r.reports ?? (r.report === false ? [] : [{ spec: r.spec, recv: r.recv, auth: r.auth, perf: r.perf, display: r.display }]);
+    reqRows.push(`(${lit(r.id)}, ${lit(r.rid)}, ${lit(r.panel)}, ${lit(r.reg)}, ${lit(r.ana)}, ${lit(r.fac)}, ${num(r.obr)})`);
+    r.reps.forEach((rep, i) => {
+      let specimenId = null;
+      if (rep.recv !== null && rep.recv !== undefined) {
+        specimenId = `${r.id}-s${i + 1}`;
+        specRows.push(`(${lit(specimenId)}, ${lit(rep.recv)})`);
+      }
+      repRows.push(`(${lit(`${r.id}-d${i + 1}`)}, ${lit(r.id)}, ${lit(rep.spec ?? null)}, ${lit(rep.auth ?? null)}, ${lit(rep.perf ?? null)}, ${lit(rep.display ?? null)}, ${lit(specimenId)})`);
+    });
+    recs[w].push(r);
+    return r;
+  }
+
+  // The five dates by letter: S collection, V received, R registered, A analysed, U authorised. Different forms of a real date on purpose
+  // (offset, Z, date only, fraction).
+  const STAMPS = { S: '2026-05-04T09:30:00+02:00', V: '2026-05-05T10:00:00Z', R: '2026-05-06', A: '2026-05-07T11:00:00.000+02:00', U: '2026-05-08T23:50:00+02:00' };
+  const KEYS = { S: 'spec', V: 'recv', R: 'reg', A: 'ana', U: 'auth' };
+  const dates = (letters) => Object.fromEntries([...letters].map((c) => [KEYS[c], STAMPS[c]]));
+  // Every date column holds `text`.
+  const allDates = (text) => Object.fromEntries(Object.values(KEYS).map((k) => [k, text]));
+
+  // ===========================================================================================================================
+  // World f: the facility levels (province, district, facility)
+  // ===========================================================================================================================
+  const f = (o) => add('f', o);
+  // F line 21: inner join FacilityList on RequestingFacilityCode = DisaCodes. The register mapping stands in for FacilityList.
+  fmap('f', 'ZF1', 'Lusaka', 'Lusaka', 'Alpha Clinic');
+  fmap('f', 'ZF2', 'Lusaka', 'Lusaka', 'Beta Clinic');
+  fmap('f', 'ZF3', 'Lusaka', 'Kafue', 'Gamma Clinic');
+  fmap('f', 'ZF4', 'Southern', 'Kafue', 'Delta Clinic');       // district Kafue again, in another province: the district view has one row for both
+  fmap('f', 'ZF5', 'Lusaka', 'Lusaka', 'Merge Clinic');
+  fmap('f', 'ZF6', 'LUSAKA ', 'lusaka', 'merge clinic ');       // the same names in other spellings: one row at every level
+  fmap('f', 'ZF7', null, null, 'Nowhere Clinic');               // no province, no district: a NULL group
+  fmap('f', 'ZF8', 'Western', 'Mongu', 'Panel Clinic');
+  fmap('f', 'ZF9', 'Eastern', 'Chipata', 'Window Clinic');
+  fmap('f', 'ZFA', 'Copperbelt', 'Ndola', 'Multi Clinic');
+  fmap('f', 'ZFB', 'Northern', 'Kasama', 'Multi Window Clinic');
+  fmap('f', 'ZUNMAP', 'Ghost', 'Ghost', 'Unmapped Clinic', false); // a map row with no register row: not in FacilityList
+
+  // -- Alpha (ZF1): one date column per count, 1 to 5 of 10 requests; every column has a row where it is the only date --
+  f({ fac: 'ZF1', ...dates('S') });       // a1
+  f({ fac: 'ZF1', ...dates('V') });       // a2
+  f({ fac: 'ZF1', ...dates('VR') });      // a3
+  f({ fac: 'ZF1', ...dates('R') });       // a4
+  f({ fac: 'ZF1', ...dates('RAU') });     // a5
+  f({ fac: 'ZF1', ...dates('A') });       // a6
+  f({ fac: 'ZF1', ...dates('AU') });      // a7
+  f({ fac: 'ZF1', ...dates('AU') });      // a8
+  f({ fac: 'ZF1', ...dates('U') });       // a9
+  f({ fac: 'ZF1', ...dates('U') });       // a10
+  // -- Beta (ZF2): a v1 datetime cannot hold '' or a partial date, so none of these count (2 of 6 do) --
+  f({ fac: 'ZF2', ...dates('SVRAU') });                                                      // b1 counts
+  f({ fac: 'ZF2', ...allDates('') });                                                        // b2 blank text
+  f({ fac: 'ZF2', ...allDates('2026-07') });                                                 // b3 a month only
+  f({ fac: 'ZF2', report: false });                                                          // b4 no report, nothing else
+  f({ fac: 'ZF2', ...allDates('2026-5-1') });                                                // b5 not a date
+  f({ fac: 'ZF2', ...allDates('2026-05-01') });                                              // b6 a date without a time counts
+  // -- Gamma (ZF3): Count(RequestID) counts rows (F line 8): the same RequestID on several OBR rows counts each time; a NULL RequestID is not
+  // counted, but its dates are (so a rate can pass 100) --
+  f({ fac: 'ZF3', rid: 'T29A-DUP', obr: 1, ...dates('S') });                                // g1
+  f({ fac: 'ZF3', rid: 'T29A-DUP', obr: 2, ...dates('SV') });                               // g2
+  f({ fac: 'ZF3', rid: 'T29A-DUP', obr: 3 });                                               // g3
+  f({ fac: 'ZF3', rid: 't29a-dup ', obr: 4, ...dates('V') });                               // g4 same id, other case and a trailing space
+  f({ fac: 'ZF3', rid: null, ...dates('S') });                                              // g5
+  f({ fac: 'ZF3', rid: null, ...dates('S') });                                              // g6
+  f({ fac: 'ZF3', rid: null, ...dates('S') });                                              // g7
+  // -- Delta (ZF4, Southern): and the only EID request here --
+  f({ fac: 'ZF4', ...dates('SVRAU') });                                                     // d1
+  f({ fac: 'ZF4', ...dates('S') });                                                         // d2
+  f({ fac: 'ZF4' });                                                                        // d3
+  f({ fac: 'ZF4', panel: 'HIVPC', ...dates('S') });                                         // d4
+  // -- Merge (ZF5 and ZF6): one facility under two register rows and spellings --
+  f({ fac: 'ZF5', ...dates('SVRAU') });                                                     // m1
+  f({ fac: 'ZF5' });                                                                        // m2
+  f({ fac: 'ZF6', ...dates('S') });                                                         // m3
+  f({ fac: 'ZF6' });                                                                        // m4
+  f({ fac: 'ZF6', ...dates('VR') });                                                        // m5
+  // -- Nowhere (ZF7): register fields NULL --
+  f({ fac: 'ZF7', ...dates('SVRAU') });                                                     // n1
+  f({ fac: 'ZF7' });                                                                        // n2
+  // -- Multi (ZFA): a request with two reports is one request row in v1 --
+  f({ fac: 'ZFA', reg: STAMPS.R, ana: STAMPS.A, reports: [{ spec: STAMPS.S }, { spec: '2026-05-03T09:00:00+02:00', recv: STAMPS.V, auth: STAMPS.U }] }); // x1
+  f({ fac: 'ZFA', reports: [{}, {}] });                                                      // x2 two reports, no dates
+  // -- Multi Window (ZFB): reports with different dates. The request has the earliest, whatever the report order. --
+  f({ fac: 'ZFB', reports: [{ spec: '2026-06-10T09:00:00+02:00' }, { spec: '2026-06-20T09:00:00+02:00' }] });   // y1
+  f({ fac: 'ZFB', reports: [{ spec: '2026-06-20T09:00:00+02:00' }, { spec: '2026-06-10T09:00:00+02:00' }] });   // y2
+  // -- Not in FacilityList: none of these is in any result (F line 21, inner join) --
+  f({ fac: 'ZUNMAP', ...dates('SVRAU') });                                                  // u1 map row without a register row
+  f({ fac: 'ZNOMAP', ...dates('SVRAU') });                                                  // u2 no map row
+  f({ fac: null, ...dates('SVRAU') });                                                      // u3 no requester code
+  // -- Panel (ZF8): one date per request, so each panel filter shows in the counts. FE line 21: HIVPC. FV line 21: HIVVL, VIRAL. --
+  const pan = (panel, letters) => f({ fac: 'ZF8', panel, ...dates(letters) });
+  pan('HIVVL', 'S');         // p1
+  pan('VIRAL', 'V');         // p2
+  pan('HIVPC', 'R');         // p3
+  pan('hivpc ', 'A');        // p4 SQL Server ignores case and trailing spaces
+  pan('hivvl', 'U');         // p5
+  pan('HIVST', 'SVRAU');     // p6 in no EID or VL view
+  pan('TBGNX', 'S');         // p7
+  pan(null, 'V');            // p8 no panel: only the all view
+  pan('viral ', 'R');        // p9
+  // -- Window: the window date is the first date of collection, received and registered (L line 23). All stamps are local June 2026. --
+  const windowRows = (w, extra) => {
+    add(w, { ...extra, spec: '2026-06-10T00:30:00+02:00', ana: '2026-06-10T01:00:00+02:00' });             // w1 local 10 June (UTC 9 June)
+    add(w, { ...extra, spec: '2026-06-11T00:30:00+02:00' });                                               // w2 local 11 June (UTC 10 June)
+    add(w, { ...extra, recv: '2026-06-10T22:30:00Z' });                                                    // w3 no collection date: the received date
+    add(w, { ...extra, spec: '', reg: '2026-06-10' });                                                     // w4 blank collection stamp: the registered date
+    add(w, { ...extra, spec: '2026-06', reg: '2026-06-12' });                                              // w5 a month is not a date
+    add(w, { ...extra, spec: '2026-06-20T09:00:00+02:00', reg: '2026-06-10T09:00:00+02:00' });             // w6 the collection date wins over the registered date
+    add(w, { ...extra, ana: '2026-06-10T09:00:00+02:00', auth: '2026-06-10T09:00:00+02:00' });             // w7 no window date: only without a window
+    add(w, { ...extra, spec: '2026-06-10T23:59:59.999Z' });                                                // w8 local 10 June, last millisecond
+    add(w, { ...extra, spec: '2026-06-09T23:59:59+02:00' });                                               // w9 local 9 June
+    add(w, { ...extra, recv: '2026-06-12T09:00:00+02:00' });                                               // w10
+  };
+  windowRows('f', { fac: 'ZF9' });
+
+  // ===========================================================================================================================
+  // World l: the lab levels (lab, lab facility, lab area). The lab is the report's performer; the name is the report's.
+  // ===========================================================================================================================
+  fmap('l', 'ZMP', 'Lusaka', 'Lusaka', 'Mapped Lab Name');  // a lab with no display name takes its register name (ruling 8)
+  const l = (o) => add('l', o);
+  const who = (perf, display) => ({ perf, display });
+  // -- Lab Alpha: the Alpha design again, over two spellings of one code --
+  ['S', 'V', 'VR', 'R', 'RAU', 'A', 'AU', 'AU', 'U', 'U'].forEach((letters, i) =>
+    l({ ...who(i % 2 === 0 ? 'ZAB' : 'zab ', i % 3 === 0 ? 'Lab Alpha' : null), ...dates(letters) }));
+  // -- Lab Shared: two codes, one name (case and trailing spaces ignored): two rows in the lab view, one in the lab facility and area views --
+  l({ ...who('ZGH', 'Lab Shared'), ...dates('SVRAU') });
+  l({ ...who('ZGH', 'Lab Shared'), ...dates('S') });
+  l({ ...who('ZGH', 'Lab Shared') });
+  l({ ...who('ZEF', 'lab shared '), ...dates('VR') });
+  l({ ...who('ZEF', 'lab shared '), ...dates('SVRAU') });
+  // -- A lab with no display name takes the register name; a lab named nowhere is shown by its code --
+  l({ ...who('ZMP', null), ...dates('S') });
+  l({ ...who('ZMP', null) });
+  l({ ...who('ZXX', null), ...dates('SVRAU') });
+  // -- One lab, three names on its reports: one name for the lab (not the code, then the smallest in byte order) --
+  l({ ...who('ZNC', 'Name B'), ...dates('S') });
+  l({ ...who('ZNC', 'Name A'), ...dates('S') });
+  l({ ...who('ZNC', null), ...dates('S') });
+  // -- A code that sorts before its name: the lab is named by the report's name, not by the smaller of the names and the code --
+  l({ ...who('AAB', 'Zulu Lab'), ...dates('S') });
+  l({ ...who('AAB', null), ...dates('V') });
+  // -- No testing lab: no report, a blank code, no code. LabList cannot match these (inner join): none is in any result. --
+  l({ report: false, ...dates('SVRAU') });
+  l({ ...who('   ', 'Blank Lab'), ...dates('SVRAU') });
+  l({ ...who(null, 'No Code Lab'), ...dates('SVRAU') });
+  // -- Panel Lab: the panel rows again (L line 24: HIVVL, HIVPC, VIRAL, HIVST; LE: HIVPC; LV: HIVVL, VIRAL) --
+  const lp = (panel, letters) => l({ ...who('ZPN', 'Panel Lab'), panel, ...dates(letters) });
+  lp('HIVVL', 'S'); lp('VIRAL', 'V'); lp('HIVPC', 'R'); lp('hivpc ', 'A'); lp('hivvl', 'U'); lp('HIVST', 'SVRAU'); lp('TBGNX', 'S'); lp(null, 'V'); lp('viral ', 'R');
+  // -- Window Lab --
+  windowRows('l', { ...who('ZWL', 'Window Lab') });
+  // -- One request, two reports from two labs: v1 has one testing code per request row; CE counts the request for each lab --
+  l({ reports: [{ perf: 'ZTW1', display: 'Two One', spec: STAMPS.S }, { perf: 'ZTW2', display: 'Two Two', recv: STAMPS.V }] });
+
+  // ===========================================================================================================================
+  // World z: a group whose RequestIDs are all NULL. Count(RequestID) is 0, and v1 raises "Divide by zero error encountered".
+  // ===========================================================================================================================
+  fmap('z', 'ZZ1', 'Zero', 'Zero', 'Zero Clinic');
+  add('z', { fac: 'ZZ1', rid: null, perf: 'ZZL', display: 'Zero Lab', ...dates('S') });
+  add('z', { fac: 'ZZ1', rid: null, perf: 'ZZL', display: 'Zero Lab', ...dates('V') });
+
+  // ===========================================================================================================================
+  // World r: rounding. One facility per rule: n requests, of which the first c_k have the k-th date (S, V, R, A, U).
+  // v1: round(c / n * 100, 1), half away from zero, on exact decimals.
+  // ===========================================================================================================================
+  const rounding = [
+    // [name, n, [cS, cV, cR, cA, cU], wanted rates]
+    ['Tie Sixteen', 16, [1, 3, 5, 7, 9], [6.3, 18.8, 31.3, 43.8, 56.3]],        // x.25 and x.75 round up (half away from zero)
+    ['Tie Eighty', 80, [1, 23, 41, 51, 79], [1.3, 28.8, 51.3, 63.8, 98.8]],     // 23/80 and 41/80, 51/80: ties that a float product puts just below
+    ['Third', 3, [1, 2, 3, 0, 1], [33.3, 66.7, 100.0, 0.0, 33.3]],            // repeating fractions: 66.67 rounds up, 33.33 down
+    ['Seventh', 7, [1, 3, 5, 6, 7], [14.3, 42.9, 71.4, 85.7, 100.0]],
+    ['Ninth', 9, [1, 8, 4, 5, 2], [11.1, 88.9, 44.4, 55.6, 22.2]],
+  ];
+  rounding.forEach(([name], i) => fmap('r', `ZR${i + 1}`, 'Rounding', 'Rounding', name));
+  rounding.forEach(([, count, counts], i) => {
+    for (let k = 0; k < count; k += 1) {
+      add('r', { fac: `ZR${i + 1}`, ...Object.fromEntries(Object.keys(KEYS).map((letter, j) => [KEYS[letter], k < counts[j] ? STAMPS[letter] : null])) });
+    }
+  });
+
+  const setup = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ${fm.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, obr_set_id) values
+  ${reqRows.join(',\n  ')};
+insert into specimens (id, received_time) values
+  ${specRows.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, effective, issued, performer, performer_display, specimen_id) values
+  ${repRows.join(',\n  ')};`;
+
+  // ---- The model: v1's result for the rows of a world ----
+  // The rows v1 reads (Requests joined to FacilityList or LabList), as { rid, panel, spec, recv, reg, ana, auth, ... }.
+  function facilityRowsOf(w) {
+    const out = [];
+    for (const r of recs[w]) {
+      const reg = regs[w].find((x) => x.code === r.fac); // FacilityList: an exact code
+      if (!reg) continue;
+      out.push({
+        rid: r.rid, panel: r.panel, province: reg.region, district: reg.district, facility: reg.name,
+        spec: t29min(r.reps.map((x) => x.spec)), recv: t29min(r.reps.map((x) => x.recv)), reg: t29day(r.reg), ana: t29day(r.ana), auth: t29min(r.reps.map((x) => x.auth)),
+      });
+    }
+    return out;
+  }
+  function labRowsOf(w) {
+    const out = [];
+    for (const r of recs[w]) {
+      for (const x of r.reps) {
+        if (x.perf === null || x.perf === undefined || x.perf.replace(/ +$/, '') === '') continue; // no testing code: LabList cannot match
+        const mapped = regs[w].find((m) => m.code === x.perf);
+        const display = x.display !== null && x.display !== undefined && x.display.trim() !== '' ? x.display : null;
+        out.push({
+          rid: r.rid, panel: r.panel, code: x.perf, name: display ?? mapped?.name ?? x.perf,
+          spec: t29day(x.spec), recv: t29day(x.recv), reg: t29day(r.reg), ana: t29day(r.ana), auth: t29day(x.auth),
+        });
+      }
+    }
+    return out;
+  }
+  // The panel filter of each query, by test type ('' and 'all' are no filter where the view exists).
+  function panelOk(row, level, type) {
+    const p = t29fold(row.panel);
+    if (level === 'lab') return T29_PANELS.lab.includes(p);
+    if (level === 'area' || level === 'prov' || level === 'dist') return true;
+    const t = t29fold(type);
+    const kind = (t === 'eid' && T29_PANELS.eid.includes(p)) || (t === 'vl' && T29_PANELS.vl.includes(p));
+    return level === 'labfac' ? kind : (t === '' || t === 'all' || kind);
+  }
+  // One name per lab code from the listed rows: a name that is not just the code first, then the smallest in byte order.
+  function labNames(rows) {
+    const byCode = new Map();
+    for (const r of rows) {
+      const k = t29fold(r.code);
+      if (!byCode.has(k)) byCode.set(k, []);
+      byCode.get(k).push(r);
+    }
+    const names = new Map();
+    for (const [k, list] of byCode) {
+      const sorted = list.map((r) => r.name).sort((a, b) => ((t29fold(a) === k) - (t29fold(b) === k)) || t29byteCmp(a, b));
+      names.set(k, sorted[0]);
+    }
+    return names;
+  }
+  // The rows of a query as the model sees them: filter, group, count, rate, order.
+  function modelRows(level, { test_type = '', from = '', to = '' } = {}) {
+    const isLab = level === 'lab' || level === 'labfac' || level === 'area';
+    const rows = (isLab ? labRowsOf('l') : facilityRowsOf('f')).filter((r) => panelOk(r, level, test_type) && t29inWindow(r, from, to));
+    const names = isLab ? labNames(rows) : null;
+    const keyOf = (r) => {
+      if (level === 'prov') return r.province;
+      if (level === 'dist') return r.district;
+      if (level === 'fac') return r.facility;
+      return names.get(t29fold(r.code));
+    };
+    // The lab view groups on the code (the name follows from it); the others on the key text.
+    const groupKey = (r) => (level === 'lab' ? t29fold(r.code) : t29fold(keyOf(r)));
+    const groups = new Map();
+    for (const r of rows) {
+      const k = groupKey(r);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(r);
+    }
+    const out = [];
+    for (const list of groups.values()) {
+      const counted = list.filter((r) => r.rid !== null).length; // Count(RequestID) skips NULL
+      const rates = ['spec', 'recv', 'reg', 'ana', 'auth'].map((c) => t29rate(list.filter((r) => r[c] !== null).length, counted));
+      const tail = Object.fromEntries(T29_TAIL.map((c, i) => [c, i === 0 ? counted : rates[i - 1]]));
+      if (level === 'lab') {
+        const spellings = list.map((r) => r.code).sort(t29byteCmp);
+        out.push({ LabPrefix: spellings[0], LabFacility: names.get(t29fold(list[0].code)), ...tail });
+      } else {
+        const spellings = list.map((r) => keyOf(r)).sort((a, b) => (a === null ? -1 : b === null ? 1 : t29byteCmp(a, b)));
+        out.push({ [T29_COLUMNS[level][0]]: spellings[0], ...tail });
+      }
+    }
+    const lead = T29_COLUMNS[level].length - T29_TAIL.length;
+    return out.sort((a, b) => {
+      for (let i = 0; i < lead; i += 1) {
+        const c = T29_COLUMNS[level][i];
+        const d = t29textCmp(a[c], b[c]);
+        if (d !== 0) return d;
+      }
+      for (const c of T29_TAIL) if (a[c] !== b[c]) return a[c] - b[c];
+      return 0;
+    });
+  }
+
+  // ---- Suites ----
+  // Remove the rows of the other worlds, so a suite sees only its own fixture (ids start with the prefix and the world letter).
+  const isolate = (w) => ['diagnostic_reports', 'specimens', 'lab_requests', 'facility_map'].map((t) => `delete from ${t} where id not like '${P}${w}-%';`).join('\n');
+  const WORLD = { prov: 'f', dist: 'f', fac: 'f', lab: 'l', labfac: 'l', area: 'l' };
+  let sp = 0;
+  const NONE = { test_type: '', from: '', to: '' };
+  // The exact rows in order. `where` is a condition on the query's own columns (z); `w` picks the world.
+  function listSuite(name, level, params, wanted, { where, w = WORLD[level] } = {}) {
+    const q = t29query(Q29[level]);
+    const text = q && where ? `select z.* from (${q.sql}) z where ${where}` : (q?.sql ?? 'select null::text as "x"');
+    const s = orderedSuite(name, text, { ...NONE, ...params }, T29_COLUMNS[level], wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${Q29[level]}" is missing`, ...check(got)];
+    }
+    sp += 1;
+    s.sql = `savepoint t29sp${sp};\n${isolate(w)}\n${s.sql}\nrollback to savepoint t29sp${sp};`;
+    return s;
+  }
+  // The whole result against the model.
+  const modelSuite = (name, level, params = {}) => {
+    let want;
+    try { want = modelRows(level, params); } catch (e) { return { name, count: 1, check: () => [`model: ${e.message}`] }; }
+    return listSuite(name, level, params, want);
+  };
+  // One JSON value, compared whole.
+  function valueSuite(name, level, w, selectExpr, want) {
+    const q = t29query(Q29[level]);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${Q29[level]}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t29sp${sp};\n${isolate(w)}\nselect ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;\nrollback to savepoint t29sp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  const typesOf = (columns, params) => (sqlText) => `select json_build_object(${columns.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(sqlText, { ...NONE, ...params })}) q limit 1`;
+  const rateTypes = (level) => Object.fromEntries(T29_COLUMNS[level].slice(-5).map((c) => [c, 'double precision']));
+  // v1 raises on a group with no RequestID: so does the port. The suite catches the error and reports its name.
+  function raisesSuite(name, level) {
+    const q = t29query(Q29[level]);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${Q29[level]}" is missing`] };
+    const text = bind(q.sql, { ...NONE, test_type: level === 'labfac' ? 'VL' : '' });
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t29sp${sp};\n${isolate('z')}\ncreate temp table t29_err (msg text);
+do $do$ begin
+  begin
+    perform 1 from (${text}) q;
+    insert into t29_err values ('no error');
+  exception when division_by_zero then
+    insert into t29_err values ('division by zero');
+  end;
+end $do$;
+select ${lit(name)} || chr(9) || to_json((select msg from t29_err))::text;\nrollback to savepoint t29sp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify(['division by zero']) ? [] : [`expected ["division by zero"], got ${JSON.stringify(got)}`]),
+    };
+  }
+
+  const BANNED29 = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
+  // The declared parameters: ids in order, types, which are required; the SQL a plain read-only SELECT.
+  const shape29 = (name, level, wantIds, wantTypes, wantRequired) => ({
+    name,
+    count: 2 + 2 * wantIds.length,
+    check() {
+      const q = t29query(Q29[level]);
+      if (!q) return [`query "${Q29[level]}" is missing`];
+      const bad = [];
+      const ids = q.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}, got ${ids}`);
+      q.params.forEach((p, i) => {
+        if (p.required !== wantRequired[i]) bad.push(`${p.id}: required should be ${wantRequired[i]}`);
+        if (p.type !== wantTypes[i]) bad.push(`${p.id}: expected type ${wantTypes[i]}, got ${p.type}`);
+      });
+      if (BANNED29.test(q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(q.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  });
+  // CE pages a result with LIMIT and OFFSET, so the ORDER BY must be total (v1 has none): it must name every output column.
+  const orderHas = (name, level, needles) => ({
+    name,
+    count: needles.length,
+    check() {
+      const q = t29query(Q29[level]);
+      if (!q) return [`query "${Q29[level]}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      return needles.filter((x) => !tail.includes(x)).map((x) => `ORDER BY must list ${x}`);
+    },
+  });
+  const optionsAre = (name, level, words) => ({
+    name,
+    count: 1,
+    check() {
+      const p = t29query(Q29[level])?.params.find((x) => x.id === 'test_type');
+      if (!p || !p.optionsSql) return ['test_type has no optionsSql'];
+      const got = [...p.optionsSql.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+      return JSON.stringify(got) === JSON.stringify(words) ? [] : [`expected options ${JSON.stringify(words)}, got ${JSON.stringify(got)}`];
+    },
+  });
+
+  const W10 = { from: '2026-06-10', to: '2026-06-10' };
+  const W11 = { from: '2026-06-11' };
+  const W09 = { to: '2026-06-09' };
+  const WMAY = { from: '2026-05-01', to: '2026-05-31' };
+  const WMAY5 = { from: '2026-05-05', to: '2026-05-05' };
+  const row = (first, tail) => ({ ...first, ...Object.fromEntries(T29_TAIL.map((c, i) => [c, tail[i]])) });
+  const onlyName = (level, name) => `z."${T29_COLUMNS[level][0]}" = ${lit(name)}`;
+  const ORDER_TAIL = ['g.requests', 'g.r1', 'g.r2', 'g.r3', 'g.r4', 'g.r5'];
+  const suites29 = [
+    { name: 't29a-setup', setup, count: 0, check: () => [] },
+
+    // ---- Declared shape ----
+    shape29('t29a-shape-prov', 'prov', ['from', 'to'], ['text', 'text'], [false, false]),
+    shape29('t29a-shape-dist', 'dist', ['from', 'to'], ['text', 'text'], [false, false]),
+    shape29('t29a-shape-fac', 'fac', ['test_type', 'from', 'to'], ['select', 'text', 'text'], [false, false, false]),
+    shape29('t29a-shape-lab', 'lab', ['from', 'to'], ['text', 'text'], [false, false]),
+    shape29('t29a-shape-labfac', 'labfac', ['test_type', 'from', 'to'], ['select', 'text', 'text'], [true, false, false]),
+    shape29('t29a-shape-area', 'area', ['from', 'to'], ['text', 'text'], [false, false]),
+    optionsAre('t29a-options-fac', 'fac', ['all', 'EID', 'VL']),
+    optionsAre('t29a-options-labfac', 'labfac', ['EID', 'VL']),
+    orderHas('t29a-order-prov', 'prov', ['g.k', ...ORDER_TAIL]),
+    orderHas('t29a-order-dist', 'dist', ['g.k', ...ORDER_TAIL]),
+    orderHas('t29a-order-fac', 'fac', ['g.k', ...ORDER_TAIL]),
+    orderHas('t29a-order-lab', 'lab', ['g.prefix', 'g.facility', ...ORDER_TAIL]),
+    orderHas('t29a-order-labfac', 'labfac', ['g.k', ...ORDER_TAIL]),
+    orderHas('t29a-order-area', 'area', ['g.k', ...ORDER_TAIL]),
+
+    // ---- By hand: the facility rows (F lines 7-23) ----
+    // Alpha: S1 V2 R3 A4 U5 of 10 requests (the rates are 10, 20, 30, 40, 50). Every column has a row where it is the only date.
+    listSuite('t29a-hand-alpha', 'fac', {}, [row({ FacilityName: 'Alpha Clinic' }, [10, 10.0, 20.0, 30.0, 40.0, 50.0])], { where: onlyName('fac', 'Alpha Clinic') }),
+    // Beta: '', '2026-07', 'no date', no report, '2026-5-1' do not count; a full stamp and a date-only stamp do: 2 of 6 in every column.
+    listSuite('t29a-hand-beta', 'fac', {}, [row({ FacilityName: 'Beta Clinic' }, [6, 33.3, 33.3, 33.3, 33.3, 33.3])], { where: onlyName('fac', 'Beta Clinic') }),
+    // Gamma: g1-g4 are 4 rows (one RequestID on 3 OBR rows, plus its other spelling); g5-g7 have no RequestID (not counted) but their dates
+    // are: S = g1 g2 g5 g6 g7 = 5 of 4. V = g2 g4 = 2 of 4.
+    listSuite('t29a-hand-gamma', 'fac', {}, [row({ FacilityName: 'Gamma Clinic' }, [4, 125.0, 50.0, 0.0, 0.0, 0.0])], { where: onlyName('fac', 'Gamma Clinic') }),
+    // Delta: d1 d2 d4 have a collection date; the other columns only d1. 4 requests.
+    listSuite('t29a-hand-delta', 'fac', {}, [row({ FacilityName: 'Delta Clinic' }, [4, 75.0, 25.0, 25.0, 25.0, 25.0])], { where: onlyName('fac', 'Delta Clinic') }),
+    // Merge: two register rows (and two spellings of the name) are one group (group by FacilityName, SQL Server's collation); the shown
+    // spelling is the smaller in byte order. S = m1 m3 = 2, V = m1 m5 = 2, R = m1 m5 = 2, A = m1, U = m1 of 5.
+    listSuite('t29a-hand-merge', 'fac', {}, [row({ FacilityName: 'Merge Clinic' }, [5, 40.0, 40.0, 40.0, 20.0, 20.0])], { where: `lower(rtrim(z."FacilityName")) = 'merge clinic'` }),
+    // Multi: a request with two reports is one request row; x2 has two reports and no date.
+    listSuite('t29a-hand-multi', 'fac', {}, [row({ FacilityName: 'Multi Clinic' }, [2, 50.0, 50.0, 50.0, 50.0, 50.0])], { where: onlyName('fac', 'Multi Clinic') }),
+    // Nowhere: the register row has no province and no district.
+    listSuite('t29a-hand-nowhere', 'fac', {}, [row({ FacilityName: 'Nowhere Clinic' }, [2, 50.0, 50.0, 50.0, 50.0, 50.0])], { where: onlyName('fac', 'Nowhere Clinic') }),
+    // Panel Clinic over the three views (F, FE line 21, FV line 21). p1..p9 as marked above.
+    // All nine: S = p1 p6 p7 = 3, V = p2 p6 p8 = 3, R = p3 p6 p9 = 3, A = p4 p6 = 2, U = p5 p6 = 2.
+    listSuite('t29a-hand-panel-blank', 'fac', {}, [row({ FacilityName: 'Panel Clinic' }, [9, 33.3, 33.3, 33.3, 22.2, 22.2])], { where: onlyName('fac', 'Panel Clinic') }),
+    listSuite('t29a-hand-panel-all', 'fac', { test_type: 'all' }, [row({ FacilityName: 'Panel Clinic' }, [9, 33.3, 33.3, 33.3, 22.2, 22.2])], { where: onlyName('fac', 'Panel Clinic') }),
+    // EID: HIVPC, and 'hivpc ' (p3 R, p4 A): 2 requests.
+    listSuite('t29a-hand-panel-eid', 'fac', { test_type: 'EID' }, [row({ FacilityName: 'Panel Clinic' }, [2, 0.0, 0.0, 50.0, 50.0, 0.0])], { where: onlyName('fac', 'Panel Clinic') }),
+    // VL: HIVVL, VIRAL, 'hivvl', 'viral ' (p1 S, p2 V, p5 U, p9 R): 4 requests.
+    listSuite('t29a-hand-panel-vl', 'fac', { test_type: 'VL' }, [row({ FacilityName: 'Panel Clinic' }, [4, 25.0, 25.0, 25.0, 0.0, 25.0])], { where: onlyName('fac', 'Panel Clinic') }),
+    // Delta has one EID request (d4, collection date only) and three VL requests (d1, d2, d3).
+    listSuite('t29a-hand-delta-eid', 'fac', { test_type: 'EID' }, [row({ FacilityName: 'Delta Clinic' }, [1, 100.0, 0.0, 0.0, 0.0, 0.0])], { where: onlyName('fac', 'Delta Clinic') }),
+    listSuite('t29a-hand-delta-vl', 'fac', { test_type: 'VL' }, [row({ FacilityName: 'Delta Clinic' }, [3, 66.7, 33.3, 33.3, 33.3, 33.3])], { where: onlyName('fac', 'Delta Clinic') }),
+
+    // A request with two reports takes the earliest report date (the window date), whatever the report order: 10 June, not 20 June.
+    listSuite('t29a-hand-multi-win10', 'fac', W10, [row({ FacilityName: 'Multi Window Clinic' }, [2, 100.0, 0.0, 0.0, 0.0, 0.0])], { where: onlyName('fac', 'Multi Window Clinic') }),
+    listSuite('t29a-hand-multi-win11', 'fac', W11, [], { where: onlyName('fac', 'Multi Window Clinic') }),
+    listSuite('t29a-hand-multi-win-none', 'fac', {}, [row({ FacilityName: 'Multi Window Clinic' }, [2, 100.0, 0.0, 0.0, 0.0, 0.0])], { where: onlyName('fac', 'Multi Window Clinic') }),
+
+    // ---- By hand: province and district rows (P lines 6-22, D lines 6-22) ----
+    // Southern is Delta alone; Western is the Panel Clinic alone; the NULL province is Nowhere alone.
+    listSuite('t29a-hand-prov-southern', 'prov', {}, [row({ ProvinceName: 'Southern' }, [4, 75.0, 25.0, 25.0, 25.0, 25.0])], { where: onlyName('prov', 'Southern') }),
+    listSuite('t29a-hand-prov-western', 'prov', {}, [row({ ProvinceName: 'Western' }, [9, 33.3, 33.3, 33.3, 22.2, 22.2])], { where: onlyName('prov', 'Western') }),
+    listSuite('t29a-hand-prov-null', 'prov', {}, [row({ ProvinceName: null }, [2, 50.0, 50.0, 50.0, 50.0, 50.0])], { where: 'z."ProvinceName" is null' }),
+    // Lusaka: Alpha 10, Beta 6, Gamma 4 and the Merge Clinic 5 (its register row 'LUSAKA ' is the same province): 25 requests, shown as
+    // 'LUSAKA ' (the smaller spelling in byte order). S = 1+2+5+2 = 10, V = 2+2+2+2 = 8, R = 3+2+0+2 = 7, A = 4+2+0+1 = 7, U = 5+2+0+1 = 8.
+    listSuite('t29a-hand-prov-lusaka', 'prov', {}, [row({ ProvinceName: 'LUSAKA ' }, [25, 40.0, 32.0, 28.0, 28.0, 32.0])], { where: `lower(rtrim(z."ProvinceName")) = 'lusaka'` }),
+    // Kafue: Gamma (Lusaka) and Delta (Southern) are one district: 8 requests, S = 5+3 = 8, V = 2+1, R = 0+1, A = 0+1, U = 0+1.
+    listSuite('t29a-hand-dist-kafue', 'dist', {}, [row({ DistrictName: 'Kafue' }, [8, 100.0, 37.5, 12.5, 12.5, 12.5])], { where: onlyName('dist', 'Kafue') }),
+    listSuite('t29a-hand-dist-null', 'dist', {}, [row({ DistrictName: null }, [2, 50.0, 50.0, 50.0, 50.0, 50.0])], { where: 'z."DistrictName" is null' }),
+    // Lusaka district: Alpha, Beta, Merge (both spellings, 'Lusaka' and 'lusaka'): 21 requests. S = 1+2+2 = 5, V = 2+2+2 = 6, R = 3+2+2 = 7,
+    // A = 4+2+1 = 7, U = 5+2+1 = 8 over 21: 23.8, 28.6, 33.3, 33.3, 38.1.
+    listSuite('t29a-hand-dist-lusaka', 'dist', {}, [row({ DistrictName: 'Lusaka' }, [21, 23.8, 28.6, 33.3, 33.3, 38.1])], { where: `lower(z."DistrictName") = 'lusaka'` }),
+    listSuite('t29a-hand-dist-mongu', 'dist', {}, [row({ DistrictName: 'Mongu' }, [9, 33.3, 33.3, 33.3, 22.2, 22.2])], { where: onlyName('dist', 'Mongu') }),
+
+    // ---- Whole results against the model ----
+    modelSuite('t29a-prov-all', 'prov'),
+    modelSuite('t29a-dist-all', 'dist'),
+    modelSuite('t29a-fac-blank', 'fac'),
+    modelSuite('t29a-fac-all', 'fac', { test_type: 'all' }),
+    modelSuite('t29a-fac-all-spelled', 'fac', { test_type: 'All  ' }),
+    modelSuite('t29a-fac-eid', 'fac', { test_type: 'EID' }),
+    modelSuite('t29a-fac-eid-spelled', 'fac', { test_type: 'eid ' }),
+    modelSuite('t29a-fac-vl', 'fac', { test_type: 'VL' }),
+    modelSuite('t29a-fac-vl-spelled', 'fac', { test_type: 'vl' }),
+    modelSuite('t29a-fac-unknown', 'fac', { test_type: 'TB' }),
+    modelSuite('t29a-lab-all', 'lab'),
+    modelSuite('t29a-area-all', 'area'),
+    modelSuite('t29a-labfac-eid', 'labfac', { test_type: 'EID' }),
+    modelSuite('t29a-labfac-eid-spelled', 'labfac', { test_type: 'eid ' }),
+    modelSuite('t29a-labfac-vl', 'labfac', { test_type: 'VL' }),
+    modelSuite('t29a-labfac-vl-spelled', 'labfac', { test_type: 'vl' }),
+    // v1 has no all view of the lab facility: a blank or other type gives no rows.
+    modelSuite('t29a-labfac-blank', 'labfac', { test_type: '' }),
+    modelSuite('t29a-labfac-all', 'labfac', { test_type: 'all' }),
+
+    // ---- Windows (L line 23): the date is the first of collection, received, registered ----
+    modelSuite('t29a-prov-win10', 'prov', W10),
+    modelSuite('t29a-dist-win10', 'dist', W10),
+    modelSuite('t29a-fac-win10', 'fac', W10),
+    modelSuite('t29a-fac-win11', 'fac', W11),
+    modelSuite('t29a-fac-win09', 'fac', W09),
+    modelSuite('t29a-fac-winmay', 'fac', WMAY),
+    modelSuite('t29a-fac-winmay5', 'fac', WMAY5),
+    modelSuite('t29a-fac-win10-eid', 'fac', { ...W10, test_type: 'EID' }),
+    modelSuite('t29a-prov-winmay', 'prov', WMAY),
+    modelSuite('t29a-dist-winmay5', 'dist', WMAY5),
+    modelSuite('t29a-lab-win10', 'lab', W10),
+    modelSuite('t29a-lab-win11', 'lab', W11),
+    modelSuite('t29a-lab-winmay', 'lab', WMAY),
+    modelSuite('t29a-area-win10', 'area', W10),
+    modelSuite('t29a-area-win09', 'area', W09),
+    modelSuite('t29a-labfac-win10-vl', 'labfac', { ...W10, test_type: 'VL' }),
+    modelSuite('t29a-labfac-winmay-vl', 'labfac', { ...WMAY, test_type: 'VL' }),
+    // By hand: the Window Clinic. 10 June: w1 (local 10, UTC 9), w3 (received), w4 (registered), w8 (local 10, last millisecond).
+    // w2 (local 11, UTC 10), w5 (a month, then the registered 12th), w6 (collected the 20th), w7 (no window date), w9 (9th), w10 (12th) are out.
+    // S = w1 w8 = 2, V = w3, R = w4, A = w1, U = 0, over 4.
+    listSuite('t29a-hand-win10', 'fac', W10, [row({ FacilityName: 'Window Clinic' }, [4, 50.0, 25.0, 25.0, 25.0, 0.0])], { where: onlyName('fac', 'Window Clinic') }),
+    // From 11 June: w2 (11th), w5 (12th), w6 (20th), w10 (12th): S = w2 w6, V = w10, R = w5 w6, over 4.
+    listSuite('t29a-hand-win11', 'fac', W11, [row({ FacilityName: 'Window Clinic' }, [4, 50.0, 25.0, 50.0, 0.0, 0.0])], { where: onlyName('fac', 'Window Clinic') }),
+    // No window: all ten, w7 too. S = w1 w2 w6 w8 w9 = 5, V = w3 w10 = 2, R = w4 w5 w6 = 3, A = w1 w7 = 2, U = w7 = 1.
+    listSuite('t29a-hand-win-none', 'fac', {}, [row({ FacilityName: 'Window Clinic' }, [10, 50.0, 20.0, 30.0, 20.0, 10.0])], { where: onlyName('fac', 'Window Clinic') }),
+    // To 9 June: the Window Clinic has w9 alone; the May rows of the other facilities are in.
+    listSuite('t29a-hand-win09', 'fac', W09, [row({ FacilityName: 'Window Clinic' }, [1, 100.0, 0.0, 0.0, 0.0, 0.0])], { where: onlyName('fac', 'Window Clinic') }),
+    // May: Alpha a1-a5 only (a window date is a collection, received or registered date; a6-a10 have none): S1 V2 R3 A1 U1 of 5.
+    listSuite('t29a-hand-win-may', 'fac', WMAY, [row({ FacilityName: 'Alpha Clinic' }, [5, 20.0, 40.0, 60.0, 20.0, 20.0])], { where: onlyName('fac', 'Alpha Clinic') }),
+
+    // ---- By hand: the lab rows (L lines 6-26, LE, LV, A) ----
+    // Lab Alpha: ZAB and 'zab ' are one lab; the Alpha design again (S1 V2 R3 A4 U5 of 10). The name is the report's.
+    listSuite('t29a-hand-lab-alpha', 'lab', {}, [row({ LabPrefix: 'ZAB', LabFacility: 'Lab Alpha' }, [10, 10.0, 20.0, 30.0, 40.0, 50.0])], { where: `z."LabPrefix" = 'ZAB'` }),
+    // Lab Shared: ZGH 3 requests (S 2, V 1, R 1, A 1, U 1), ZEF 2 requests (S 1, V 2, R 2, A 1, U 1). One name per CODE (the Task 16 rule):
+    // ZEF keeps its own spelling 'lab shared ' here; the name views below merge the two names.
+    listSuite('t29a-hand-lab-shared', 'lab', {}, [
+      row({ LabPrefix: 'ZEF', LabFacility: 'lab shared ' }, [2, 50.0, 100.0, 100.0, 50.0, 50.0]),
+      row({ LabPrefix: 'ZGH', LabFacility: 'Lab Shared' }, [3, 66.7, 33.3, 33.3, 33.3, 33.3]),
+    ], { where: `lower(rtrim(z."LabFacility")) = 'lab shared'` }),
+    // The lab facility and lab area views group on the name: ZGH and ZEF are one row of 5. S = 3, V = 3, R = 3, A = 2, U = 2.
+    listSuite('t29a-hand-labfac-shared', 'labfac', { test_type: 'VL' }, [row({ LabFacility: 'Lab Shared' }, [5, 60.0, 60.0, 60.0, 40.0, 40.0])], { where: onlyName('labfac', 'Lab Shared') }),
+    listSuite('t29a-hand-area-shared', 'area', {}, [row({ LabName: 'Lab Shared' }, [5, 60.0, 60.0, 60.0, 40.0, 40.0])], { where: onlyName('area', 'Lab Shared') }),
+    // Names: a lab with no display name takes its register name; ZXX is shown by its code; ZNC takes the smallest name that is not the code.
+    listSuite('t29a-hand-lab-names', 'lab', {}, [
+      row({ LabPrefix: 'AAB', LabFacility: 'Zulu Lab' }, [2, 50.0, 50.0, 0.0, 0.0, 0.0]),
+      row({ LabPrefix: 'ZMP', LabFacility: 'Mapped Lab Name' }, [2, 50.0, 0.0, 0.0, 0.0, 0.0]),
+      row({ LabPrefix: 'ZNC', LabFacility: 'Name A' }, [3, 100.0, 0.0, 0.0, 0.0, 0.0]),
+      row({ LabPrefix: 'ZXX', LabFacility: 'ZXX' }, [1, 100.0, 100.0, 100.0, 100.0, 100.0]),
+    ], { where: `z."LabPrefix" in ('AAB', 'ZMP', 'ZNC', 'ZXX')` }),
+    listSuite('t29a-hand-area-zulu', 'area', {}, [row({ LabName: 'Zulu Lab' }, [2, 50.0, 50.0, 0.0, 0.0, 0.0])], { where: onlyName('area', 'Zulu Lab') }),
+    // The panel lab. The lab view takes HIVVL, HIVPC, VIRAL and HIVST (7 of 9; L line 24): S = p1 p6, V = p2 p6, R = p3 p6 p9, A = p4 p6, U = p5 p6.
+    listSuite('t29a-hand-lab-panel', 'lab', {}, [row({ LabPrefix: 'ZPN', LabFacility: 'Panel Lab' }, [7, 28.6, 28.6, 42.9, 28.6, 28.6])], { where: `z."LabPrefix" = 'ZPN'` }),
+    // The lab area view has no panel filter (A has none): all 9.
+    listSuite('t29a-hand-area-panel', 'area', {}, [row({ LabName: 'Panel Lab' }, [9, 33.3, 33.3, 33.3, 22.2, 22.2])], { where: onlyName('area', 'Panel Lab') }),
+    // EID (LE line 20: HIVPC): p3 R, p4 A. VL (LV line 20: HIVVL, VIRAL): p1 S, p2 V, p5 U, p9 R.
+    listSuite('t29a-hand-labfac-eid', 'labfac', { test_type: 'EID' }, [row({ LabFacility: 'Panel Lab' }, [2, 0.0, 0.0, 50.0, 50.0, 0.0])], { where: onlyName('labfac', 'Panel Lab') }),
+    listSuite('t29a-hand-labfac-vl', 'labfac', { test_type: 'VL' }, [row({ LabFacility: 'Panel Lab' }, [4, 25.0, 25.0, 25.0, 0.0, 25.0])], { where: onlyName('labfac', 'Panel Lab') }),
+    // No lab, no result: the requests with no report, a blank code or no code are in no row.
+    listSuite('t29a-hand-no-lab', 'area', {}, [], { where: `z."LabName" in ('Blank Lab', 'No Code Lab') or z."LabName" is null or rtrim(z."LabName") = ''` }),
+    // One request, two reports from two labs: each lab counts it (v1 holds one testing code per request row).
+    listSuite('t29a-hand-two-labs', 'lab', {}, [
+      row({ LabPrefix: 'ZTW1', LabFacility: 'Two One' }, [1, 100.0, 0.0, 0.0, 0.0, 0.0]),
+      row({ LabPrefix: 'ZTW2', LabFacility: 'Two Two' }, [1, 0.0, 100.0, 0.0, 0.0, 0.0]),
+    ], { where: `z."LabPrefix" in ('ZTW1', 'ZTW2')` }),
+    // The window lab, the same ten rows as the Window Clinic.
+    listSuite('t29a-hand-lab-win10', 'lab', W10, [row({ LabPrefix: 'ZWL', LabFacility: 'Window Lab' }, [4, 50.0, 25.0, 25.0, 25.0, 0.0])], { where: `z."LabPrefix" = 'ZWL'` }),
+    listSuite('t29a-hand-area-win-none', 'area', {}, [row({ LabName: 'Window Lab' }, [10, 50.0, 20.0, 30.0, 20.0, 10.0])], { where: onlyName('area', 'Window Lab') }),
+
+    // ---- Rounding (world r): half away from zero on exact decimals ----
+    listSuite('t29a-rounding', 'fac', {}, rounding.map(([name, count, , rates]) => row({ FacilityName: name }, [count, ...rates]))
+      .sort((a, b) => t29textCmp(a.FacilityName, b.FacilityName)), { w: 'r' }),
+    // The same rows as one province: 115 requests; S = 5, V = 39, R = 58, A = 69, U = 98 (the sums of the counts), over 115.
+    listSuite('t29a-rounding-prov', 'prov', {}, [row({ ProvinceName: 'Rounding' }, [115, 4.3, 33.9, 50.4, 60.0, 85.2])], { w: 'r' }),
+
+    // ---- Types: Requests is a count (bigint), every rate a double precision (convert(Double precision, ...)) ----
+    valueSuite('t29a-types-prov', 'prov', 'f', typesOf(T29_COLUMNS.prov, {}), { ProvinceName: 'text', Requests: 'bigint', ...rateTypes('prov') }),
+    valueSuite('t29a-types-dist', 'dist', 'f', typesOf(T29_COLUMNS.dist, {}), { DistrictName: 'text', Requests: 'bigint', ...rateTypes('dist') }),
+    valueSuite('t29a-types-fac', 'fac', 'f', typesOf(T29_COLUMNS.fac, {}), { FacilityName: 'text', Requests: 'bigint', ...rateTypes('fac') }),
+    valueSuite('t29a-types-lab', 'lab', 'l', typesOf(T29_COLUMNS.lab, {}), { LabPrefix: 'text', LabFacility: 'text', Requests: 'bigint', ...rateTypes('lab') }),
+    valueSuite('t29a-types-labfac', 'labfac', 'l', typesOf(T29_COLUMNS.labfac, { test_type: 'VL' }), { LabFacility: 'text', Requests: 'bigint', ...rateTypes('labfac') }),
+    valueSuite('t29a-types-area', 'area', 'l', typesOf(T29_COLUMNS.area, {}), { LabName: 'text', Requests: 'bigint', ...rateTypes('area') }),
+
+    // ---- A group with no RequestID: v1 raises (Divide by zero error encountered); so does the port ----
+    raisesSuite('t29a-zero-fac', 'fac'),
+    raisesSuite('t29a-zero-lab', 'lab'),
+  ];
+  return { name: 't29a', suites: suites29 };
+}
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a()];
