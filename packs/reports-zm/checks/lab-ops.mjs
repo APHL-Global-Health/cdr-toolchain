@@ -1753,6 +1753,9 @@ function group27() {
   vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, tat: 2 });
   vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'ND' }] }, { rq: 1, tat: 2 });
   vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'inv9' }] }, { rq: 1, tat: 2 });
+  // registered BEFORE the period: Invalids (F 155-177) read no registered stamp. A backlog test (INVALID is no invalid text, so it is also
+  // authorised) that is an Invalid; 'INVALID' is a known text, so it is no ORejects.
+  vl('WX', { reg: RB, ana: BA0, iss: '2026-05-03T10:00:00+02:00', results: [{ obs: 'HIVVL', text: 'INVALID' }] }, { bk: 1, ba: 1, inv: 1 });
   vl('WX', { ana: ANA, iss: null, results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, te: 1 });
   vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'Garbage' }] }, { rq: 1, tat: 2 });
   vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'inv9' }] }, { rq: 1, tat: 2 });
@@ -1781,6 +1784,10 @@ function group27() {
   coded(' I', {}, {});
   coded('I', { iss: J1 }, { tat: 22 });
   coded('I', { ana: J1 }, { te: 0 });
+  // an invalid text with a coded value: Positives and Indeterminates (F 204-252) do not look at the text, so both count; TestedAuthorised does
+  // (FAIL is an invalid text), and ORejects counts FAIL.
+  vl('WP1', { ana: ANA, iss: ISS, results: [{ obs: 'HIVVL', text: 'FAIL', coded: 'P' }] }, { rq: 1, te: 1, orj: 1, po: 1, tat: 2 });
+  vl('WP1', { ana: ANA, iss: ISS, results: [{ obs: 'HIVVL', text: 'FAIL', coded: 'I' }] }, { rq: 1, te: 1, orj: 1, id: 1, tat: 2 });
   coded('I', { results: [{ obs: 'HIVPC', text: '1500', coded: 'I' }] }, { te: 0 });
   coded('I', { reg: RB }, { rq: 0, te: 0, id: 1, bk: 1, tat: undefined });
   coded('P', { results: [{ obs: 'HIVVL', text: '1500', coded: 'P' }, { obs: 'HIVVC', text: '1500', coded: 'I' }] }, { po: 1, id: 1 });
@@ -1917,7 +1924,8 @@ function group27() {
   map('t27s-fm-sl10', 'SL10', 't27s-reg10', 'Src Hospital', 'North-Western', 'Solwezi', '1010', { ss: 'urn:src', ps: 'urn:perf' });
   map('t27s-fm-sl11', 'SL11', 't27s-reg10', 'Src Hospital', 'North-Western', 'Solwezi', '1010', { ss: 'urn:src' });
 
-  const L1 = ['Southern', 'Choma', 'Choma General Hospital', '1001', 'Hospital', 'SL1'];
+  // FacilityCode is NULL everywhere (ruling 7); the mapped rows still carry a national code, which must not show.
+  const L1 = ['Southern', 'Choma', 'Choma General Hospital', null, 'Hospital', 'SL1'];
   // SL1: request rows, not distinct requests (S line 9 sums rows); the window is the local date of the authorised stamp (S line 109)
   sreq('SL1', L1, 'ALT', ['ALT']);
   sreq('SL1', L1, 'ALT', ['ALT'], { id: 'T27S-DUP', obr: 1 });
@@ -1937,16 +1945,16 @@ function group27() {
   sreq('SL1', L1, 'HEPB', ['Hepatitis B'], { status: 'preliminary' });
   sreq('SL1', L1, 'GLUC', ['Glucose'], { reg: null });                                               // the registered stamp is not read
   // the other labs
-  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', '1002', 'Clinic', 'SL2'], 'HIVVL', ['HIV VL']);
-  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', '1002', 'Clinic', 'SL2'], 'POCVR', ['HIV VL']);
+  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', null, 'Clinic', 'SL2'], 'HIVVL', ['HIV VL']);
+  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', null, 'Clinic', 'SL2'], 'POCVR', ['HIV VL']);
   sreq('SL3', [...NO_LEAD, 'SL3'], 'AST', ['AST']);                                                  // not mapped: NULL province, district, facility
-  sreq('SL4', ['Central', 'Kabwe', 'No Extras Clinic', '1004', null, 'SL4'], 'ALT', ['ALT']);        // no extras: NULL type
-  sreq('SL5', ['Copperbelt', 'Kitwe', 'Own Type Post', '1005', 'Health Post', 'SL5'], 'ALT', ['ALT']);   // "ownership_type" is not "type"
+  sreq('SL4', ['Central', 'Kabwe', 'No Extras Clinic', null, null, 'SL4'], 'ALT', ['ALT']);        // no extras: NULL type
+  sreq('SL5', ['Copperbelt', 'Kitwe', 'Own Type Post', null, 'Health Post', 'SL5'], 'ALT', ['ALT']);   // "ownership_type" is not "type"
   sreq('SL6', [...NO_LEAD, 'SL6'], 'ALT', ['ALT']);                                                  // the mapping has no register row
   sreq('SL7', [...NO_LEAD, 'SL7'], 'ALT', ['ALT']);                                                  // the mapping is for another performer system
-  sreq('SL8', ['Eastern', 'Chipata', 'Case Hospital', '1008', 'District Hospital', 'SL8'], 'ALT', ['ALT']);
-  sreq('sl8 ', ['Eastern', 'Chipata', 'Case Hospital', '1008', 'District Hospital', 'SL8'], 'ALT', ['ALT']);   // another spelling: the same lab
-  sreq('SL10', ['North-Western', 'Solwezi', 'Src Hospital', '1010', 'Provincial Hospital', 'SL10'], 'ALT', ['ALT'], { ss: 'urn:src', ps: 'urn:perf' });
+  sreq('SL8', ['Eastern', 'Chipata', 'Case Hospital', null, 'District Hospital', 'SL8'], 'ALT', ['ALT']);
+  sreq('sl8 ', ['Eastern', 'Chipata', 'Case Hospital', null, 'District Hospital', 'SL8'], 'ALT', ['ALT']);   // another spelling: the same lab
+  sreq('SL10', ['North-Western', 'Solwezi', 'Src Hospital', null, 'Provincial Hospital', 'SL10'], 'ALT', ['ALT'], { ss: 'urn:src', ps: 'urn:perf' });
   sreq('SL11', [...NO_LEAD, 'SL11'], 'ALT', ['ALT'], { ps: null, ss: null });                        // the mapping needs the report's source system too
   sreq('XXXX', [...NO_LEAD, 'XXXX'], 'ALT', ['ALT']);                                                // only the five codes are left out, not a longer one
   // no testing code: v1 falls back to the receiving lab, which CE does not carry. The counts stay, in a row with no lab.
@@ -1967,7 +1975,7 @@ function group27() {
   const sumRows = [...sums.values()].map((s) => ({
     Province: s.lead[0], District: s.lead[1], Facility: s.lead[2], FacilityCode: s.lead[3], FacilityType: s.lead[4], LabCode: s.lead[5], ...s.counts,
   }));
-  const sumDayRows = [{ Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', FacilityCode: '1001', FacilityType: 'Hospital', LabCode: 'SL1',
+  const sumDayRows = [{ Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', FacilityCode: null, FacilityType: 'Hospital', LabCode: 'SL1',
     ...Object.fromEntries(SUM_TYPES.map((t) => [t, t === 'Creatinine' ? 1 : 0])) }];
 
   // =========================================================================================================================

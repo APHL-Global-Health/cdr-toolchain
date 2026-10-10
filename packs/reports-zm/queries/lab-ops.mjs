@@ -902,13 +902,17 @@ ${finalSelect26(labels, ['text', 'text', 'text', ...Array(12).fill('number')])}`
 // CE gaps (spec ruling 7 and 8):
 //   - The lab key. v1 uses the testing code, else the receiving code (S 96-97). CE has no receiving code, so the lab is the report's performer.
 //     A request whose testing code is blank is in the row with no lab (all six leading columns NULL); v1 would put it with its receiving lab.
-//     That row also holds v1's labs missing from the dictionary (v1 shows NULL province, district, facility and lab code for those).
-//   - Province, District, Facility, FacilityCode, FacilityType. CE has no laboratory dictionary. The lab's facility is the register row its
-//     testing code is mapped to (facility_map: source system, performer system and source code equal to the report's; registry_id set; the first
-//     row by id when several match): Province and District are that mapped row's region and district, Facility its register name, FacilityCode its
-//     national code (the MFL code; v1's code is a DISA code of the lab's facility, which CE does not hold) and FacilityType the register's `type`
-//     (the MFL "Type", kept in facility_registry.extras under "type" by build.mjs). A lab with no such row has NULL in all five. The lab code is
-//     shown as stored (the smallest spelling in byte order).
+//     That row also holds the requests of v1's labs missing from the dictionary. v1 puts all of those in ONE row with NULL province, district,
+//     facility and lab code (S 95 is a left join and the LabCode column is the dictionary's). CE has no dictionary, so each unmapped code keeps
+//     its own row with LabCode set and NULL in the other five columns (fixture SL3); only a blank testing code is in the NULL row.
+//   - Province, District, Facility, FacilityType. CE has no laboratory dictionary. The lab's facility is the register row its testing code is
+//     mapped to (facility_map: source system, performer system and source code equal to the report's; registry_id set; the first row by id when
+//     several match): Province and District are that mapped row's region and district, Facility its register name and FacilityType the
+//     register's `type`. A lab with no such row has NULL in all four. The lab code is shown as stored (the smallest spelling in byte order).
+//   - FacilityCode is NULL in every row (spec ruling 7). v1's l.FacilityCode is the DISA code of the facility that hosts the lab, from the
+//     Laboratories dictionary (S 7, S 98-99). CE does not hold it, and the register's MFL code is a different code system, so it is not used.
+//   - FacilityType reads the MFL "Type" text (facility_registry.extras under "type", build.mjs). v1's dictionary vocabulary for FacilityType
+//     is unverified, so the values may differ in wording from v1's.
 //   - FacilityType is read from the JSON text of the extras with a pattern, so odd JSON never fails the query (a type with an escaped quote is cut).
 //   - A request with two reports counts once per report (one testing lab per report).
 //
@@ -940,19 +944,19 @@ export function labSummarySql() {
     and not (${inListSql('dr.performer', SUMMARY_OUT)})
 ),
 labs as (
-  select distinct on (x.k) x.k, fm.region, fm.district, fm.name, fm.national_code, fm.registry_id
+  select distinct on (x.k) x.k, fm.region, fm.district, fm.name, fm.registry_id
   from (select distinct ${foldSql('d.code')} as k, d.source_system, d.performer_system from rws d where d.code is not null) x
   join facility_map fm on ${foldSql('fm.source_code')} = x.k
     and fm.source_system = coalesce(x.source_system, '') and fm.performer_system = coalesce(x.performer_system, '') and fm.registry_id is not null
   order by x.k, fm.id
 ),
 res as (
-  select l.region as c01, l.district as c02, l.name as c03, l.national_code as c04, ${typeSql} as c05, min(r.code collate "C") as c06,
+  select l.region as c01, l.district as c02, l.name as c03, null::text as c04, ${typeSql} as c05, min(r.code collate "C") as c06,
     ${counts.join(',\n    ')}
   from rws r
   left join labs l on l.k = ${foldSql('r.code')}
   left join facility_registry fre on fre.id = l.registry_id
-  group by ${foldSql('r.code')}, l.region, l.district, l.name, l.national_code, fre.extras
+  group by ${foldSql('r.code')}, l.region, l.district, l.name, fre.extras
 )
 ${finalSelect26(labels, [...Array(6).fill('text'), ...Array(16).fill('number')])}`;
 }
