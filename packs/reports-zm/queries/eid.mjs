@@ -3,7 +3,7 @@
 import { inListSql, rpt, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey,
-  inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql,
+  inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql, likeVarcharSql,
 } from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
@@ -663,11 +663,6 @@ export const eidAnswersParams = () => [];
 //
 // Deviations: none.
 
-// SQL Server `x like 'G____'` on a varchar value: the first character is a G (any case), the text is at least five characters long,
-// and its text without trailing spaces is at most five characters long (the characters in between can be anything, spaces too).
-// Measured on SQL Server: 'G1234 ', 'G123 ', 'G123  ' and 'G    ' match; 'G123', 'G1  ' and 'G12345' do not.
-const likeG4 = (x) => `(${x} ilike 'g%' and length(rtrim(${x})) <= 5 and length(${x}) >= 5)`;
-
 export function eidGeneXpertSql() {
   return `with ${eidCte('ed', { from: 'from', to: 'to', rowIds: true })}
 select ed.province as "Province", ed.district as "District", ed.facility as "Facility", ed.lab_id as "LabID", ed.gender as "Gender",
@@ -679,7 +674,7 @@ from ed
 join diagnostic_reports dr on dr.id = ed.report_row_id
 join lab_requests gr on ${foldSql('gr.request_id')} = ${foldSql('ed.lab_id')}
   and ${inListSql('gr.panel_code', ['HIVPC', 'POCGH', 'POEID'])}
-  and ${likeG4('gr.analyzer_code')}
+  and ${likeVarcharSql('gr.analyzer_code', 'G', 4)}
 where ed.tested_at is not null
 order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24`;
 }

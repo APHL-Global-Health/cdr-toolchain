@@ -623,10 +623,22 @@ export const genderFmiuSql = (sexExpr) => `case upper(rtrim(${sexExpr})) when 'F
 // The text value of one request attribute (spec section 3) of the request row `rowIdExpr`; NULL when absent.
 export const requestAttrSql = (rowIdExpr, code) => `(select max(a.value_text) from lab_request_attributes a where a.lab_request_id = ${rowIdExpr} and a.system = ${sqlLit(ATTR_SYSTEM)} and a.code = ${sqlLit(code)})`;
 
-// TestedAt: a 3-character ZU code other than ZUE and ZUA becomes ZUL. SQL Server LIKE ignores trailing
-// blanks in the matched text, so 'ZUB ' also becomes ZUL (the port trims first). `baseExpr` is the testing
-// code, or the receiving code when the testing code is blank (see rowFactsSql).
-export const testedAtSql = (baseExpr, testingExpr) => `case when rtrim(${baseExpr}) ilike 'ZU_' and ${foldSql(testingExpr)} not in ('zue', 'zua') then 'ZUL' else ${baseExpr} end`;
+// SQL Server `x like '<prefix><n underscores>'` on a varchar value, case-insensitive. Trailing blanks are
+// special: one blank can fill an underscore, and further trailing blanks are ignored. So the text starts
+// with the prefix, is at least prefix+n characters long, and without trailing blanks is at most that long.
+// Measured on SQL Server 16 (Latin1_General_CI_AS and SQL_Latin1_General_CP1_CI_AS): 'ZU ', 'ZU  ', 'ZUB '
+// LIKE 'ZU_' are true; 'ZU' is false. 'G123 ' and 'G    ' LIKE 'G____' are true; 'G123', 'G12345' false.
+// `prefix` must hold letters or digits only.
+export const likeVarcharSql = (x, prefix, n) => {
+  if (!/^[A-Za-z0-9]+$/.test(prefix) || !Number.isInteger(n) || n < 1) throw new Error('likeVarcharSql: bad prefix or count');
+  const len = prefix.length + n;
+  return `(${x} ilike ${sqlLit(prefix + '%')} and length(${x}) >= ${len} and length(rtrim(${x})) <= ${len})`;
+};
+
+// TestedAt: a code that matches v1's varchar LIKE 'ZU_' (likeVarcharSql: 'ZUB', 'ZUB ', and also 'ZU ')
+// becomes ZUL, unless the testing code is ZUE or ZUA. `baseExpr` is the testing code, or the receiving
+// code when the testing code is blank (see rowFactsSql).
+export const testedAtSql = (baseExpr, testingExpr) => `case when ${likeVarcharSql(baseExpr, 'ZU', 1)} and ${foldSql(testingExpr)} not in ('zue', 'zua') then 'ZUL' else ${baseExpr} end`;
 
 // Referral: 1 when a receiving code differs from the testing code, else 0. NULL while the receiving code is
 // not carried (ruling 7); it is never coalesced to 0.
@@ -713,8 +725,8 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //   - The valid list holds 'PTLTT' where the suppressed list holds 'PLTT'. DET, PLTT and
 //     '<883 copies/mL' are suppressed texts that never pass the valid-result filter.
 //   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
-//   - tested_at: a 3-character ZU code other than ZUE and ZUA becomes ZUL (lines 76-79). SQL Server
-//     LIKE ignores trailing blanks in the matched text, so 'ZUB ' also becomes ZUL (the port trims first).
+//   - tested_at: a code matching varchar LIKE 'ZU_' becomes ZUL unless the testing code is ZUE or ZUA
+//     (lines 76-79). That LIKE also matches 'ZUB ' and 'ZU ' (likeVarcharSql), so both become ZUL.
 //   - Partial stamps ('2026-07') give NULL dates and TAT, and never raise. A date-only stamp gives its date.
 //
 // CE gaps:
@@ -963,7 +975,7 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //     shifted to UTC. tat_within14 is 0, not NULL, when tat is NULL.
 //   - ISNUMERIC counts '1E5' and '12' as numbers: a lab id like '1E5-X' or a testing code like '12' is POC.
 //   - disalink does not count a referring id that starts with digits; HIVVL's does (HIVVL line 82; EID line 41 has no such term).
-//   - tested_at: SQL Server LIKE ignores trailing blanks in the matched text, so 'ZUB ' also becomes ZUL.
+//   - tested_at: SQL Server's varchar LIKE 'ZU_' also matches 'ZUB ' and 'ZU ' (likeVarcharSql), so both become ZUL.
 //   - Partial stamps ('2026-07') give NULL TAT and never raise. A date-only stamp gives its date.
 //   - v1's table has narrow columns (lab_id 26, tested_at 10, facility 50); a longer value would stop v1's
 //     insert. The port does not cut.

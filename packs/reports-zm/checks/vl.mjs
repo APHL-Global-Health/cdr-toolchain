@@ -197,10 +197,10 @@ SEXES.forEach(([sex, gender], i) => lab(`T2-SEX-${i}`, [{ sex }], { gender }));
 lab('T2-SEX-NOPATIENT', [{ sex: null }], { gender: null });
 
 // TestedAt (v1 lines 76-79). The testing code is the performer. ReceivingFacilityCode is not carried, so a blank
-// testing code gives NULL. A 3-letter ZU code other than ZUE and ZUA becomes ZUL. SQL Server LIKE ignores trailing
-// blanks in the matched text (non-Unicode data), so 'ZUB ' also becomes ZUL.
+// testing code gives NULL. A 3-letter ZU code other than ZUE and ZUA becomes ZUL. SQL Server's varchar
+// LIKE 'ZU_' also matches 'ZUB ' and 'ZU ' (one trailing blank fills the _), so both become ZUL.
 const TESTED_AT = [[null, null], ['', null], ['  ', null], ['ZUB', 'ZUL'], ['zub', 'ZUL'], ['ZU1', 'ZUL'],
-  ['ZUA', 'ZUA'], ['zue', 'zue'], ['ZUEE', 'ZUEE'], ['ZU', 'ZU'], ['ZUB ', 'ZUL']];
+  ['ZUA', 'ZUA'], ['zue', 'zue'], ['ZUEE', 'ZUEE'], ['ZU', 'ZU'], ['ZUB ', 'ZUL'], ['ZU ', 'ZUL'], ['ZU  ', 'ZUL'], ['ZUBC ', 'ZUBC ']];
 TESTED_AT.forEach(([performer, testedAt], i) => lab(`T2-TA-${i}`, [{ performer }], { tested_at: testedAt }));
 
 // TAT counts date boundaries, not 24-hour periods (v1 line 96). 14 days is within, 15 is not (line 97).
