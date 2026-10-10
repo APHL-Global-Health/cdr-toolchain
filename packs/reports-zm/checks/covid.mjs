@@ -149,6 +149,9 @@ add('T22-P04', { panel: 'covid ', results: [POS], patient: ['Ann', 'Moyo'] }); /
 // ---- Other facilities at UTH ----
 // ZCHO2: the same facility name as ZCHOM, another code and spelling. A separate group in v1's CTEs; SourceStats' last GROUP BY merges it.
 add('T22-F01', { req: 'ZCHO2', results: [POS], patient: ['Ruth', 'Mwale'], attrs: [{ code: 'reference-numbers', value: 'EP-F01' }] }); // 1,1,1,1
+// ZCHOM at a third UTH code: registered only. Under 'positive' and 'tested' v1's inner joins drop this reg GROUP (ZUC,ZCHOM), not the
+// whole facility, so Choma's Registered is 26 under 'all' and 25 under the other two.
+add('T22-G01', { perf: 'ZUC' }); // 1,0,0,0
 // ZLUSA: positive but not tested in the window (analysis missing); T22-M19 is registered here too.
 add('T22-M19', { req: 'ZLUSA' }); // 1,0,0,0
 add('T22-L01', { req: 'ZLUSA', ana: null, results: [POS] }); // 1,0,1,1
@@ -207,11 +210,11 @@ const LIST_COLUMNS = ['Province', 'District', 'Facility', 'Epid', 'Lab Number', 
 // (lab code, description, requesting code, facility) that have a registration in the window.
 //   UTH: (ZUA,ZCHOM) 26,15,14,12 + (ZUA,ZCHO2) 1,1,1,1 + (ZUA,ZLUSA) 2,0,1,1 + (ZUA,ZKITW) 1,1,1,0 + (ZUA,ZNDOL) 1,0,0,0
 //        + the three groups of unknown facilities 3,0,0,0 (Registered only) + (ZUB,ZMANS) 1,1,1,1 + ('ZU ',ZMANS) 1,1,1,1
-//        = 36, 19, 19, 16. (ZUA,ZMANS) has no registration in the window and adds nothing.
+//        = 37, 19, 19, 16. (ZUA,ZMANS) has no registration in the window and adds nothing.
 //   TDRC: (ZTT,ZCHOM) 1,0,0,0 + (ZTV,ZLUSA) 1,1,1,1 = 2,1,1,1. (ZTV,ZCHOM) has no registration and ZTT's does not match its lab code.
 //   Livingstone TH: ZLA and 'zlb ' = 2,2,2,2. ZNA: two registrations, no tests: Tested, Authorised and Positive are NULL (sum of nothing).
 const LAB_ROWS = [
-  lab('UTH', 36, 19, 19, 16),
+  lab('UTH', 37, 19, 19, 16),
   lab('TDRC', 2, 1, 1, 1),
   lab('Solwezi General', 1, 1, 1, 1),
   lab('Arthur Davison', 1, 1, 1, 1),
@@ -230,12 +233,12 @@ const LAB_ROWS = [
 const LAB_ROWS_ORDERED = [
   lab('aaa', 1, 1, 1, 1), lab('Arthur Davison', 1, 1, 1, 1), lab('CHAZ Complex Lab', 1, 1, 1, 1), lab('Kabwe General', 1, 1, 1, 1), lab('Kasama General', 1, 1, 1, 1),
   lab('Lewanika General', 1, 1, 1, 1), lab('Livingstone TH', 2, 2, 2, 2), lab('Mansa General', 1, 1, 1, 1), lab('Solwezi General', 1, 1, 1, 1),
-  lab('TDRC', 2, 1, 1, 1), lab('UTH', 36, 19, 19, 16), lab('ZNA', 2, null, null, null), lab('ZNP', 1, 1, 1, 1), lab('ZU', 1, 1, 1, 1),
+  lab('TDRC', 2, 1, 1, 1), lab('UTH', 37, 19, 19, 16), lab('ZNA', 2, null, null, null), lab('ZNP', 1, 1, 1, 1), lab('ZU', 1, 1, 1, 1),
 ];
 
 // COVID-19 by source facility for UTH, panel COVID only (COVII and COVIS out), window 2026-05-01 to 2026-05-31. The facility groups merge on
 // the name: ZCHOM and ZCHO2 are one row, shown in the smaller spelling (upper case sorts first in byte order).
-//   Choma: (ZUA,ZCHOM) 24,13,12,11 + (ZUA,ZCHO2) 1,1,1,1 = 25,14,13,12.
+//   Choma: (ZUA,ZCHOM) 24,13,12,11 + (ZUA,ZCHO2) 1,1,1,1 = 25,14,13,12; plus the registered-only group (ZUC,ZCHOM) 1,0,0,0 under 'all' = 26,14,13,12.
 //   Lusaka: (ZUA,ZLUSA) 2,0,1,1 (positive and not tested). Kitwe 1,1,1,0 (tested, not positive). Ndola 1,0,0,0.
 //   Mansa: (ZUB,ZMANS) 1,1,1,1 + ('ZU ',ZMANS) 1,1,1,1 = 2,2,2,2.
 //   Unknown facilities: 3 registered, Tested, Authorised and Positive 0 (line 258: coalesce).
@@ -245,8 +248,9 @@ const NDOLA = src('Copperbelt', 'Ndola', 'Ndola Clinic', 1, 0, 0, 0);
 const MANSA = src('Luapula', 'Mansa', 'Mansa Clinic', 2, 2, 2, 2);
 const LUSAKA = src('Lusaka', 'Lusaka', 'Chilenje Clinic', 2, 0, 1, 1);
 const CHOMA = src('SOUTHERN', 'CHOMA', 'CHOMA GENERAL HOSPITAL', 25, 14, 13, 12);
+const CHOMA_ALLGROUPS = src('SOUTHERN', 'CHOMA', 'CHOMA GENERAL HOSPITAL', 26, 14, 13, 12);
 // Order: province in word order (a missing one first): Copperbelt, Luapula, Lusaka, SOUTHERN.
-const UTH_ORDERED = [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA];
+const UTH_ORDERED = [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA_ALLGROUPS];
 
 // The positive list for UTH at Choma General Hospital, 2026-05-01 to 2026-05-31: the day after the end date at 00:00:00 is the end.
 const D = { collected: '2026-05-09T07:00:00Z', tested: '2026-05-11T08:00:00Z', reviewed: '2026-05-12T08:00:00Z' };
@@ -372,8 +376,8 @@ const suites = [
 
   // ---- COVID-19 by source facility ----
   // The lab is a Lab Description, compared as SQL Server compares text: 'uth ' finds UTH. Blank `show` is all (sp_COV2_SourceStats).
-  setSuite('source-uth-blank', SOURCE_STATS, { ...W, laboratory: 'uth ', show: '' }, SOURCE_COLUMNS, [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA]),
-  setSuite('source-uth-all', SOURCE_STATS, { ...W, laboratory: 'UTH', show: 'all' }, SOURCE_COLUMNS, [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA]),
+  setSuite('source-uth-blank', SOURCE_STATS, { ...W, laboratory: 'uth ', show: '' }, SOURCE_COLUMNS, [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA_ALLGROUPS]),
+  setSuite('source-uth-all', SOURCE_STATS, { ...W, laboratory: 'UTH', show: 'all' }, SOURCE_COLUMNS, [UNKNOWN, KITWE, NDOLA, MANSA, LUSAKA, CHOMA_ALLGROUPS]),
   // sp_COV2_PSources: `inner join pos` (line 274): facilities with a Positive count. Lusaka is positive and not tested; Kitwe is tested and not positive.
   setSuite('source-uth-positive', SOURCE_STATS, { ...W, laboratory: 'UTH', show: 'positive' }, SOURCE_COLUMNS, [MANSA, LUSAKA, CHOMA]),
   // sp_COV2_TSources: `inner join tested` as well (line 268): a Tested and a Positive count. Lusaka (no tests) and Kitwe (no positives) are out.

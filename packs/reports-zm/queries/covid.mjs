@@ -55,9 +55,12 @@ import { dateParams, likeVarcharSql, localTs, requestAttrSql, requesterJoin, ssT
 // CE facts and gaps (spec ruling 7):
 //   - Laboratory is `case TestingFacilityCode when '' then ReceivingFacilityCode ...`. A row with a blank testing code is dropped whatever
 //     the receiving code, so CE not carrying ReceivingFacilityCode changes no row.
-//   - The testing lab is on the report (diagnostic_reports.performer). A request with no report has no lab in CE, where v1 reads
-//     TestingFacilityCode from the request. Such a request is dropped (as a blank code is). HONEST NON-PROOF: nothing here shows how many
-//     requests Zambia's data has with no report.
+//   - The testing lab is on the report (diagnostic_reports.performer). cdr pushes a DiagnosticReport for every OBR, resulted or not
+//     (fhir-transform.ts:306-339, obr-sets.ts:52-54, v2-transform.ts:768-770), and writes performer whenever testing_facility_code is set
+//     (fhir-transform.ts:326-337). That value is buildLabConcept(site) ?? facilityConcept (v2-transform.ts:401), which is the configured
+//     OPENLDR_LAB_CODE (site-config.ts:39-42, 64-74). So the real dependency is that each lab's push sets OPENLDR_LAB_CODE equal to its v1
+//     TestingFacilityCode (ZUA, ZTT and so on). If it is unset, the 'lab' is the requesting clinic. A report with no performer, or a request
+//     with no report, has no lab and is dropped, as a blank TestingFacilityCode is.
 //   - A request with two reports at two labs counts under each lab.
 const COVID_OBSERVATIONS = ['COV2', 'COV68', 'CO751', 'CO752', 'CVGXN'];
 const COVID_POSITIVE = 'SARs-Cov-2 Genes Detected';
@@ -202,7 +205,7 @@ export const sourceStatsParams = () => [
   ...dateParams(true),
   laboratoryParam(),
   {
-    id: 'show', label: 'Show facilities (blank for all)', type: 'select', required: false,
+    id: 'show', label: 'Show facilities: all, positive (with positives, v1 PSources) or tested (tested and positive, v1 TSources); blank is all', type: 'select', required: false,
     optionsSql: "select 'all' as show union all select 'tested' union all select 'positive'",
   },
 ];
