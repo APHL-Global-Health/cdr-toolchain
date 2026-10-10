@@ -2,7 +2,7 @@
 
 import { inListSql, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, tbgnxCte, localDate, ssTextKey,
+  given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, tbgnxCte, geneXpertCte, localDate, localTs, ssTextKey,
 } from '../zm-sql.mjs';
 
 // ---- The measures the three TB GeneXpert dashboards share ---------------------------------------------------------------
@@ -316,10 +316,101 @@ export const tbTrendParams = () => [
   ...dateParams(true),
 ];
 
+// ---- TB GeneXpert report ------------------------------------------------------------------------------------------------
+//
+// Replaces fn_GeneXpertReport (from, to): GeneXpert TB results counted by testing lab, age group and TB/HIV status.
+// Unlike the three dashboards above, this one reads v1's view v_GeneXpert (geneXpertCte), not the tbgnx table, so the MTB and RIF
+// results are the RAW reported texts, not the cleaned ones.
+//
+// Columns (v1 names and order, lines 14-64): TestedAt, LabName, AgeGroup, TBHIV, MTB_neg, MTBRIF_neg, MTBRIF_pos, MTBRIF_IND,
+// Error_Results, Invalid_Results, No_Results. One row per group of TestedAt, LabName, AgeGroup and TBHIV.
+//
+// Rules (function lines):
+//   AgeGroup  by the age in years: 0 to 14 is '0-14', 15 and over '15+' (lines 24-25). A missing age falls back to the TBCOL answer TBAGE:
+//             'Adult' is '15+', 'Child' is '0-14' (lines 26-27). Anything else, including a NEGATIVE age, is 'Unknown' (line 28).
+//   TBHIV     the TBCOL answer TBHIV: 'Non-Reactive' is 'Negative'; 'Reactive' and 'Pulmonary' are 'Positive'; no answer is 'Unknown';
+//             any other text comes through as stored (lines 31-35).
+//   MTB_neg        MTB = 'Not Detected'                                              (line 38)
+//   MTBRIF_neg     RIF = 'Not Detected', whatever the MTB says                       (line 42)
+//   MTBRIF_pos     MTB starts with 'Detected' and RIF = 'Detected'                   (line 46)
+//   MTBRIF_IND     RIF = 'IND', whatever the MTB says                                (line 50)
+//   Error_Results  MTB = 'Error' or RIF = 'Error'                                    (line 54)
+//   Invalid_Results MTB = 'Invalid' or RIF = 'Invalid'                               (line 58)
+//   No_Results     MTB = 'NORES' or RIF = 'NORES'                                    (line 62)
+// Text compares ignore case and trailing spaces, as SQL Server's default collation does. A row counts in every measure it meets.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The window (line 67) is AnalysisDateTime >= @From and <= @To with DATES, so the stamp is compared with midnight: analysis from `from`
+//     00:00:00 up to and including `to` 00:00:00 (local wall time, the stamp's own text). The end day is out apart from its first
+//     instant, and from = to holds only analyses stamped exactly at midnight. The same decision as the facility report (Task 7/8).
+//   - The compare of MTB with 'Detected%' is a prefix match (line 46), the RIF side is an equality: a RIF of 'Detected _ Low' is not
+//     'Detected', 'Indeterminate' is not 'IND', 'ERR' is not 'Error'. These are the raw texts, not the cleaned ones of the tbgnx table.
+//   - A negative age is not NULL: it is 'Unknown' and TBAGE is not read.
+//   - No dedupe (geneXpertCte): two GXMTB results, two GXRIF results or two TBHIV answers on one request number make several rows, and
+//     each counts. A NULL request fact loses the RIF of a row (geneXpertCte), so that row counts the MTB measures only.
+//   - Groups compare as SQL Server compares text: TestedAt, LabName and TBHIV that differ only in case or trailing spaces are one group
+//     (and 'Negative' from 'Non-Reactive' is one group with a stored 'negative'). The row shows the smallest spelling in byte order
+//     (v1 shows whichever spelling the group holds first).
+//   - A stored TBHIV of 'Unknown' is the same group as a missing answer.
+//
+// Deviations (ruling 3): v1's @From and @To are dates with no default that gives a window; here both are required.
+//
+// CE gaps (ruling 7, 8):
+//   - v1 left-joins its laboratory dictionary on TestedAt (line 66). CE has none: LabName is the report's display, else the register name
+//     of the mapped code, else the code (ruling 8). Where the dictionary has one name per code, CE names a lab from each report, so one
+//     code with two display names is two rows here.
+//   - A report with no testing code has TestedAt NULL here (v1 falls back to ReceivingFacilityCode, which CE does not carry). Its LabName
+//     is NULL too, as v1's join finds no lab for a NULL code, whatever the report's display says. Such a row has no RIF (a NULL fact in
+//     geneXpertCte) and forms its own group.
+
+export function tbReportSql() {
+  const r = 'r';
+  const hit = (word, side) => inListSql(`${r}.${side}`, [word]);
+  const either = (word) => `(${hit(word, 'mtb')} or ${hit(word, 'rif')})`;
+  const stamp = localTs('g.analysis_date_time');
+  return `with ${geneXpertCte('gx', { from: 'from', to: 'to', on: 'analysis_at', labName: true })},
+rep as (
+  select g.tested_at,
+    case when g.tested_at is null then null else g.lab_name end as lab_name,
+    case
+      when g.age_in_years >= 0 and g.age_in_years < 15 then '0-14'
+      when g.age_in_years >= 15 then '15+'
+      when g.age_in_years is null and ${inListSql('g.tbage', ['Adult'])} then '15+'
+      when g.age_in_years is null and ${inListSql('g.tbage', ['Child'])} then '0-14'
+      else 'Unknown'
+    end as age_group,
+    case
+      when ${inListSql('g.tbhiv', ['Non-Reactive'])} then 'Negative'
+      when ${inListSql('g.tbhiv', ['Reactive'])} then 'Positive'
+      when ${inListSql('g.tbhiv', ['Pulmonary'])} then 'Positive'
+      when g.tbhiv is null then 'Unknown'
+      else g.tbhiv
+    end as tbhiv,
+    g.mtb, g.rif
+  from gx g
+  where ${stamp} >= ({{param.from}})::date::timestamp and ${stamp} <= ({{param.to}})::date::timestamp
+)
+select ${sample(`${r}.tested_at`)} as "TestedAt", ${sample(`${r}.lab_name`)} as "LabName", ${r}.age_group as "AgeGroup",
+  ${sample(`${r}.tbhiv`)} as "TBHIV",
+  ${count1(hit('Not Detected', 'mtb'))} as "MTB_neg",
+  ${count1(hit('Not Detected', 'rif'))} as "MTBRIF_neg",
+  ${count1(`${r}.mtb ilike 'Detected%' and ${hit('Detected', 'rif')}`)} as "MTBRIF_pos",
+  ${count1(hit('IND', 'rif'))} as "MTBRIF_IND",
+  ${count1(either('Error'))} as "Error_Results",
+  ${count1(either('Invalid'))} as "Invalid_Results",
+  ${count1(either('NORES'))} as "No_Results"
+from rep ${r}
+group by ${foldSql(`${r}.tested_at`)}, ${foldSql(`${r}.lab_name`)}, ${r}.age_group, ${foldSql(`${r}.tbhiv`)}
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11`;
+}
+
+export const tbReportParams = () => [...dateParams(true)];
+
 export function queries() {
   return [
     { name: 'TB GeneXpert dashboard summary', sql: tbDashboardSql(), params: tbDashboardParams() },
     { name: 'TB GeneXpert by facility, sex and age', sql: tbSexAgeSql(), params: tbSexAgeParams() },
     { name: 'TB GeneXpert monthly trend', sql: tbTrendSql(), params: tbTrendParams() },
+    { name: 'TB GeneXpert report', sql: tbReportSql(), params: tbReportParams() },
   ];
 }

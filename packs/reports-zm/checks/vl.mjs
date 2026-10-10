@@ -2655,6 +2655,255 @@ const rateCutSuite = caseSuite('rate-cut', ['top', 'n'], [
 
 const suites12all = [rateCutSuite, ...suitesRates, ...suitesLm, ...suitesBd, rankSuite, rankShape];
 
+// ============================================================================================
+// Group t16: "VL tests on GeneXpert" (v1 view v_GxVLTests) and the hivvl builder option rowIds. Fixture ids start with "t16-"; lab ids
+// (lr.request_id) start with "T16-". "G line N" is a line of View__dbo_v_GxVLTests.sql. The hivvl table itself is pinned by group t2; here
+// only what the view adds is pinned: the join to Requests, the analyser pattern, the testing lab and the window.
+//
+// Fixtures sit in September 2026 and the window is the month. A default request is a final HIVVL request of 30-year-old woman at
+// Choma General Hospital, tested at the lab 'LUS' (no name in CE, so LabName is the code), result 540, on an analyser 'G1234'.
+// ============================================================================================
+
+const PV16 = [];
+const RV16 = [];
+const SV16 = [];
+const DV16 = [];
+const LV16 = [];
+const AV16 = [];
+const FV16 = [];
+let nV16 = 0;
+const nzV16 = (v) => (v === null || v === undefined ? 'null' : String(v));
+
+// One v1 Requests row with its patient, specimen, report, results, attributes and VIRAL form. Returns the request row id and the report row id.
+function reqV16(labId, o = {}) {
+  const r = {
+    panel: 'HIVVL', status: 'final', req: 'ZSOUT', sex: 'F', age: 30, analyzer: 'G1234', perf: 'LUS', disp: null, noReport: false,
+    authored: '2026-09-02T08:00:00Z', analysis: '2026-09-02T09:00:00Z', effective: '2026-09-01T07:00:00Z', issued: '2026-09-10T10:00:00Z',
+    received: '2026-09-01T12:00:00Z', results: [{ obs: 'HIVVL', num: 540 }], attrs: [], form: null, ...o,
+  };
+  const k = String(++nV16).padStart(3, '0');
+  const qid = `t16-q${k}`;
+  const did = `t16-d${k}`;
+  let pid = null;
+  if (r.sex !== null) {
+    pid = `t16-p${k}`;
+    PV16.push(`(${lit(pid)}, ${lit(`P${k}`)}, ${lit(r.sex)})`);
+  }
+  RV16.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${lit(r.req)}, ${lit(pid)}, ${nzV16(r.age)}, ${lit(r.analyzer)})`);
+  if (!r.noReport) {
+    const sid = r.received ? `t16-s${k}` : null;
+    if (sid) SV16.push(`(${lit(sid)}, ${lit(r.received)})`);
+    DV16.push(`(${lit(did)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.effective)}, ${lit(r.issued)}, ${lit(r.perf)}, ${lit(sid)}, ${lit(r.disp)})`);
+  }
+  r.results.forEach((x, i) => {
+    LV16.push(`(${lit(`t16-r${k}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)}, ${nzV16(x.num)}, ${lit(x.cmp ?? null)})`);
+  });
+  r.attrs.forEach(([code, value], i) => AV16.push(`(${lit(`t16-a${k}-${i + 1}`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(code)}, ${lit(value)})`));
+  if (r.form) {
+    const items = r.form.map(([linkId, text]) => ({ linkId, answer: [{ valueString: text }] }));
+    FV16.push(`(${lit(`t16-f${k}`)}, 'q', 'hiv_vl_documentation', ${lit(qid)}, '2026-09-02T08:00:00Z', ${lit(JSON.stringify(items))})`);
+  }
+  return { qid, did };
+}
+
+// The columns of the view: the hivvl table's (v1 names, Table__dbo_HIVVL.sql) and LabName (G line 7).
+const GV_COLS = ['Province', 'District', 'Facility', 'LabID', 'Gender', 'AgeGroup', 'TestedDate', 'Suppressed', 'UU', 'TAT', 'TATWithin14', 'Pregnant',
+  'BreastFeeding', 'BaseLineVL', 'RunDate', 'ReceivedDate', 'RegisteredDate', 'CollectedDate', 'TestedAt', 'Referral', 'Disalink',
+  'ThreeMPostUnSuppressed', 'POC', 'POCW48H', 'LabName'];
+// What a default request gives, written out by hand from the hivvl rules: 540 is under 1000 (suppressed) and not under 200 (UU); TAT is 9 date
+// boundaries (09-01 to 09-10); the lab code LUS has no name in CE, so LabName is the code; Referral is NULL (ruling 7).
+const GVD = {
+  Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', Gender: 'Female', AgeGroup: '30-34',
+  TestedDate: '2026-09-10T10:00:00Z', Suppressed: 1, UU: 0, TAT: 9, TATWithin14: 1, Pregnant: null, BreastFeeding: null, BaseLineVL: null,
+  RunDate: '2026-09-02T09:00:00Z', ReceivedDate: '2026-09-01T12:00:00Z', RegisteredDate: '2026-09-02T08:00:00Z', CollectedDate: '2026-09-01T07:00:00Z',
+  TestedAt: 'LUS', Referral: null, Disalink: 0, ThreeMPostUnSuppressed: null, POC: 0, POCW48H: 0, LabName: 'LUS',
+};
+const gvRows = [];
+const gv = (lab, o = {}) => ({ ...GVD, ...o, LabID: lab });
+// `reqs` are the request rows of one lab number; `expect` the rows the view gives for it (empty: none).
+function gvCase(lab, reqs, expect) {
+  const ids = (Array.isArray(reqs) ? reqs : [reqs]).map((o) => reqV16(o.lab ?? lab, o));
+  gvRows.push(...expect);
+  return ids;
+}
+
+// The analyser pattern 'G____' (G line 14): a G and four characters, ignoring case; SQL Server's LIKE also lets one trailing space be the
+// fourth character after the G and ignores further trailing spaces (measured on varchar: 'G123 ' matches, 'G1  ' does not).
+const keptG01 = gvCase('T16-G01', { disp: 'Lusaka Lab' }, [gv('T16-G01', { LabName: 'Lusaka Lab' })]);
+// Panel POCVR, observation POCVR; the analyser code in lower case with a trailing space; the lab name from the register (a mapped row for the code).
+gvCase('T16-G02', { panel: 'POCVR', analyzer: 'g1234 ', perf: 'LUS2', results: [{ obs: 'POCVR', num: 1500 }] },
+  [gv('T16-G02', { TestedAt: 'LUS2', LabName: 'Mapped Lab', Suppressed: 0 })]);
+gvCase('T16-G03', { analyzer: 'G123' }, []);
+gvCase('T16-G04', { analyzer: 'G12345' }, []);
+gvCase('T16-G05', { analyzer: 'G12 4' }, [gv('T16-G05')]);
+gvCase('T16-G06', { analyzer: 'G123 ' }, [gv('T16-G06')]);
+gvCase('T16-G07', { analyzer: 'G1  ' }, []);
+gvCase('T16-G08', { analyzer: null }, []);
+gvCase('T16-G09', { analyzer: 'Z1234' }, []);
+gvCase('T16-G10', { panel: 'POHVL' }, [gv('T16-G10')]);
+// A ZU code other than ZUE and ZUA is stored as ZUL (the hivvl table); the lab name is the report's lab ('ZUB'), where v1 names ZUL.
+gvCase('T16-G11', { perf: 'ZUB' }, [gv('T16-G11', { TestedAt: 'ZUL', LabName: 'ZUB' })]);
+// No testing code: TestedAt is NULL, and the inner join to the laboratory list (lines 11-12) drops it.
+gvCase('T16-G12', { perf: '' }, []);
+gvCase('T16-G13', { perf: null }, []);
+gvCase('T16-G14', { perf: '  ' }, []);
+// The join to Requests (lines 9-10) repeats the test once per request row of the lab number that has a panel of the list and the analyser code,
+// with the kept row's own facts and the name of the kept row's own report: two such rows give two identical rows (v1 has no DISTINCT).
+gvCase('T16-G15', [{ issued: '2026-09-08T10:00:00Z', disp: 'Kept Lab' }, { issued: '2026-09-12T10:00:00Z', disp: 'Other Lab' }],
+  [gv('T16-G15', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7, LabName: 'Kept Lab' }), gv('T16-G15', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7, LabName: 'Kept Lab' })]);
+// The analyser code is a fact of any request row of the lab number, not of the row the hivvl table keeps.
+const keptG16 = gvCase('T16-G16', [{ analyzer: 'X1', issued: '2026-09-08T10:00:00Z', disp: 'Kept Lab' }, { analyzer: 'G1234', issued: '2026-09-12T10:00:00Z', disp: 'Other Lab' }],
+  [gv('T16-G16', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7, LabName: 'Kept Lab' })]);
+// The other request row must be in panel HIVVL, POCVR or POHVL (line 10), compared ignoring case and trailing spaces.
+for (const [i, panel] of ['HIVPC', 'RTRI', 'POCGH'].entries()) {
+  gvCase(`T16-G17${'abc'[i]}`, [{ analyzer: 'X1', issued: '2026-09-08T10:00:00Z' }, { panel, analyzer: 'G1234', issued: '2026-09-12T10:00:00Z', results: [] }], []);
+}
+for (const [i, panel] of ['HIVVL', 'POCVR', 'POHVL', 'pohvl ', 'hivvl'].entries()) {
+  gvCase(`T16-G18${'abcde'[i]}`, [{ analyzer: 'X1', issued: '2026-09-08T10:00:00Z' }, { panel, analyzer: 'G1234', issued: '2026-09-12T10:00:00Z' }],
+    [gv(`T16-G18${'abcde'[i]}`, { TestedDate: '2026-09-08T10:00:00Z', TAT: 7 })]);
+}
+// The lab numbers compare as SQL Server compares them (line 9): 't16-g19 ' on the second request is the lab number of the first.
+gvCase('T16-G19', [{ analyzer: 'X1', issued: '2026-09-08T10:00:00Z' }, { lab: 't16-g19 ', analyzer: 'G1234', issued: '2026-09-12T10:00:00Z' }],
+  [gv('T16-G19', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7 })]);
+gvCase('T16-G20', [{ analyzer: 'X1' }, { lab: 'T16-G20X', analyzer: 'G1234' }], [gv('T16-G20X')]);   // another lab number does not lend its analyser
+// The window is on the local date of TestedDate (line 13, now from and to): 10-01 00:30+02:00 is October (UTC says 09-30); 09-01 00:30+02:00 is
+// September (UTC says 08-31); 09-30 23:30+02:00 is in; 08-31 23:30Z is August.
+gvCase('T16-G21', { issued: '2026-10-01T00:30:00+02:00' }, []);
+gvCase('T16-G22', { issued: '2026-09-30T23:30:00+02:00' }, [gv('T16-G22', { TestedDate: '2026-09-30T23:30:00+02:00', TAT: 29, TATWithin14: 0 })]);
+gvCase('T16-G23', { issued: '2026-09-01T00:30:00+02:00' }, [gv('T16-G23', { TestedDate: '2026-09-01T00:30:00+02:00', TAT: 0 })]);
+gvCase('T16-G24', { issued: '2026-08-31T23:30:00Z' }, []);
+// The hivvl table keeps the earliest row of a lab number; when that one is outside the window the lab number has no row in it.
+gvCase('T16-G25', [{ issued: '2026-08-20T10:00:00Z', effective: '2026-08-19T07:00:00Z' }, { issued: '2026-09-10T10:00:00Z' }], []);
+// A point-of-care test: a numeric testing code. Collected 14 hour boundaries before it was tested, so POCW48H is 1.
+gvCase('T16-G26', { perf: '5551', effective: '2026-09-09T20:00:00Z', received: '2026-09-09T21:00:00Z' },
+  [gv('T16-G26', { TestedAt: '5551', LabName: '5551', CollectedDate: '2026-09-09T20:00:00Z', ReceivedDate: '2026-09-09T21:00:00Z', TAT: 1, POC: 1, POCW48H: 1 })]);
+// A facility that is not in the register has no hivvl row; one in another province keeps its own area names.
+gvCase('T16-G27', { req: 'ZUNMP' }, []);
+gvCase('T16-G28', { req: 'ZLUSA', sex: 'M', age: 10 }, [gv('T16-G28', { Province: 'Lusaka', District: 'Lusaka', Facility: 'Chilenje Clinic', Gender: 'Male', AgeGroup: '10-14' })]);
+// The result columns come through from the hivvl table: a not-detected text is suppressed and UU; 150 is both; a cancelled report is no row.
+gvCase('T16-G29', { results: [{ obs: 'HIVVL', text: 'Target Not Detected' }] }, [gv('T16-G29', { Suppressed: 1, UU: 1 })]);
+gvCase('T16-G30', { results: [{ obs: 'HIVVL', num: 150 }] }, [gv('T16-G30', { Suppressed: 1, UU: 1 })]);
+gvCase('T16-G31', { results: [{ obs: 'HIVVL', num: 1500 }] }, [gv('T16-G31', { Suppressed: 0, UU: 0 })]);
+gvCase('T16-G32', { status: 'cancelled' }, []);
+// Disalink reads the pre-registration attribute; the VIRAL answers and an RTRI request fill the flag columns; Referral stays NULL (ruling 7).
+gvCase('T16-G33', { attrs: [['prereg-registration-facility', 'ZSOUT']] }, [gv('T16-G33', { Disalink: 1 })]);
+gvCase('T16-G34', { form: [['ARTPR', 'Yes']] }, [gv('T16-G34', { Pregnant: 1 })]);
+gvCase('T16-G35', { form: [['ARTBR', 'Yes']] }, [gv('T16-G35', { BreastFeeding: 1 })]);
+gvCase('T16-G36', { form: [['ARTRS', 'Post EAC']] }, [gv('T16-G36', { ThreeMPostUnSuppressed: 1 })]);
+// More trailing spaces do not count in SQL Server's LIKE ('G1234  ' matches 'G____'); a lower-case g matches too.
+gvCase('T16-G38', { analyzer: 'G1234  ' }, [gv('T16-G38')]);
+gvCase('T16-G39', { analyzer: 'g1234' }, [gv('T16-G39')]);
+gvCase('T16-G40', { analyzer: 'G 123' }, [gv('T16-G40')]);
+gvCase('T16-G37', [{}, { panel: 'RTRI', analyzer: null, noReport: true, results: [{ obs: 'RTRI', text: 'Recent' }] }], [gv('T16-G37', { BaseLineVL: 1 })]);
+
+const SETUP_V16 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t16-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t16-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t16-fm3', '', '', 'ZUNMP', null, null, null, null),
+  ('t16-fm4', '', '', 'LUS2', 'reg-lab', 'Mapped Lab', 'Lusaka', 'Lusaka');
+insert into patients (id, surname, sex) values ${PV16.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, analyzer_code) values ${RV16.join(',\n  ')};
+insert into specimens (id, received_time) values ${SV16.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id, performer_display) values ${DV16.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values ${LV16.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${AV16.join(',\n  ')};
+insert into questionnaire_responses (id, questionnaire, form_code, based_on_id, authored, items) values ${FV16.join(',\n  ')};`;
+
+const gxVlQuery = queries().find((q) => q.name === 'VL tests on GeneXpert');
+
+// A multiset of rows (v1 has no ORDER BY; the query orders by every column): column order, the count, then every row.
+function gxVlSuite(name, params, expectedRows, setup = '') {
+  const key = (r) => JSON.stringify(GV_COLS.map((c) => r[c] ?? null));
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${gxVlQuery ? bind(gxVlQuery.sql, params) : 'select 1'}) q;`,
+    count: expectedRows.length + 1,
+    check(got) {
+      if (!gxVlQuery) return ['query "VL tests on GeneXpert" is missing'];
+      const failures = [];
+      if (got.length !== expectedRows.length) failures.push(`expected ${expectedRows.length} rows, got ${got.length}`);
+      if (got[0]) {
+        failures.push(...inOrder(Object.keys(got[0]), GV_COLS));
+        if (Object.keys(got[0]).length !== GV_COLS.length) failures.push(`expected ${GV_COLS.length} columns, got ${Object.keys(got[0]).length}`);
+      }
+      const left = expectedRows.map(key);
+      for (const h of got.map(key)) {
+        const i = left.indexOf(h);
+        if (i < 0) failures.push(`unexpected row ${h}`); else left.splice(i, 1);
+      }
+      for (const w of left) failures.push(`missing row ${w}`);
+      return failures;
+    },
+  };
+}
+
+// The builder option rowIds: the request row id and the report row id of the kept row as the last two columns. The default stays as group t2 pins
+// it. T16-G16 has two requests; the first (earlier tested date) is kept, and the ids are its own.
+const rowIdsSuites = [
+  {
+    name: 'hivvl-row-ids',
+    sql: `with ${hivvlCte('hv', { rowIds: true })} select 'hivvl-row-ids' || chr(9) || row_to_json(q)::text from (select * from hv where lab_id in ('T16-G01', 'T16-G16')) q;`,
+    count: 6,
+    check(got) {
+      const failures = [];
+      const want = { 'T16-G01': [keptG01[0].qid, keptG01[0].did], 'T16-G16': [keptG16[0].qid, keptG16[0].did] };
+      if (got.length !== 2) failures.push(`expected 2 rows, got ${got.length}`);
+      for (const r of got) {
+        const keys = Object.keys(r);
+        if (keys.length !== 26) failures.push(`${r.lab_id}: expected 26 columns, got ${keys.length}`);
+        if (keys[24] !== 'request_row_id' || keys[25] !== 'report_row_id') failures.push(`${r.lab_id}: the ids are not the last two columns: ${keys.slice(22)}`);
+        const [qid, did] = want[r.lab_id] ?? [];
+        if (r.request_row_id !== qid || r.report_row_id !== did) failures.push(`${r.lab_id}: expected ids ${qid} and ${did}, got ${r.request_row_id} and ${r.report_row_id}`);
+      }
+      return failures;
+    },
+  },
+  {
+    name: 'hivvl-no-row-ids',
+    sql: `with ${hivvlCte('hv')} select 'hivvl-no-row-ids' || chr(9) || row_to_json(q)::text from (select * from hv where lab_id in ('T16-G01', 'T16-G16')) q;`,
+    count: 4,
+    check(got) {
+      const failures = [];
+      if (got.length !== 2) failures.push(`expected 2 rows, got ${got.length}`);
+      for (const r of got) if (Object.keys(r).length !== 24) failures.push(`${r.lab_id}: the default must keep 24 columns, got ${Object.keys(r).length}`);
+      if (hivvlCte('x') !== hivvlCte('x', { rowIds: false })) failures.push('rowIds false must give the same text as no option');
+      if (/poc_w48h,\s*r\.request_row_id/.test(hivvlCte('x'))) failures.push('the default select must not carry the ids');
+      if (!/poc_w48h,\s*r\.request_row_id, r\.report_row_id\s*from/.test(hivvlCte('x', { rowIds: true }))) failures.push('rowIds must add the ids after poc_w48h');
+      return failures;
+    },
+  },
+];
+
+const suitesV16 = [
+  gxVlSuite('gxvl-sep', { from: '2026-09-01', to: '2026-09-30' }, gvRows, SETUP_V16),
+  gxVlSuite('gxvl-empty', { from: '2026-11-01', to: '2026-11-30' }, []),
+  // A window that ends on the 10th still holds the tests of the 10th (the local date, both ends in) and not the later ones.
+  gxVlSuite('gxvl-ten', { from: '2026-09-10', to: '2026-09-10' }, gvRows.filter((r) => r.TestedDate.startsWith('2026-09-10'))),
+  {
+    name: 'gxvl-shape',
+    count: 8,
+    check() {
+      if (!gxVlQuery) return ['query "VL tests on GeneXpert" is missing'];
+      const bad = [];
+      const ids = gxVlQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: expected from, to; got ${ids}`);
+      for (const p of gxVlQuery.params) {
+        if (p.type !== 'text') bad.push(`${p.id}: expected type text, got ${p.type}`);
+        if (p.required !== true) bad.push(`${p.id}: must be required (v1 has the window)`);
+      }
+      const text = gxVlQuery.sql;
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(text.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(text)) bad.push('does not start with "with"');
+      const order = Array.from({ length: GV_COLS.length }, (_, i) => i + 1).join(', ');
+      if (!text.trimEnd().endsWith(`order by ${order}`)) bad.push(`must end with a total ORDER BY over all ${GV_COLS.length} columns`);
+      return bad;
+    },
+  },
+  ...rowIdsSuites,
+];
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
-  { name: 't12', suites: suites12all }];
+  { name: 't12', suites: suites12all },
+  { name: 't16', suites: suitesV16 }];

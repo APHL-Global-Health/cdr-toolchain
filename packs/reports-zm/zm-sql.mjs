@@ -683,6 +683,10 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //                                               values are parameter names, compared as in inRange
 //   hivvlCte('hv', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many
 //                                               days (sp_dash_getHIVVL_v2 reads up to the day after its end date)
+//   hivvlCte('hv', { rowIds: true })            adds request_row_id and report_row_id (the kept row's lab_requests.id and
+//                                               diagnostic_reports.id) as the last two columns, for a report that needs the kept
+//                                               row's own report (as eidCte's option of the same name). Off by default: the
+//                                               columns below stay as they are.
 //   hivvlCte('hv', { from, to, labsInWindow: true })  one row for every lab id that has a report in the window, whatever
 //                                               the kept row's tested_date (for a report that joins the table by lab id,
 //                                               as sp_getUniqueVLClientsInfo does; a lab whose earliest row is before the
@@ -740,7 +744,7 @@ export const rowFactsSql = (r, pocExtra = 'false') => `${localDate(`${r}.tested_
 //     reported text, so v1's coded-value test (LIMSCodedValue = 'BASE', line 22) is covered by the text
 //     test (ARTRS text like '%Base%') only. A form on any request row of the lab id counts, because v1
 //     keys the flags on RequestID. RTRI is a lab panel: any result row on an RTRI request is a baseline test.
-export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false } = {}) {
+export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false, rowIds = false } = {}) {
   const { prefilter, finalRange: windowed } = copyWindow('hivvlCte', from, to, 'r.tested_date', extraDays);
   const finalRange = labsInWindow ? '' : windowed;
   const result = rpt('l');
@@ -787,7 +791,7 @@ export function hivvlCte(name, { from, to, extraDays = 0, labsInWindow = false }
     ${disalinkSql('c.prereg_facility', 'c.referring_id', { digitPrefix: true })} as disalink,
     f.three_m_post_unsuppressed,
     case when c.is_poc then 1 else 0 end as poc,
-    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
+    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h${rowIds ? ',\n    r.request_row_id, r.report_row_id' : ''}
   from ${name}_ranked r
   left join ${name}_flags f on f.lab_key = ${foldSql('r.lab_id')}
   cross join lateral (select

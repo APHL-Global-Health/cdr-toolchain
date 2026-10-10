@@ -4,6 +4,7 @@ import { foldSql, inListSql, rpt, isNumericSql } from '../../vl-reports-mz/vl-qu
 import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
+  labNameSql, likeVarcharSql,
 } from '../zm-sql.mjs';
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
@@ -1356,6 +1357,55 @@ order by "Year" nulls first, "Month" nulls first`;
 
 export const resultBandsParams = () => dateParams(false);
 
+// ---- VL tests on GeneXpert ----
+//
+// Replaces v_GxVLTests: the rows of the hivvl copy table (rebuilt by hivvlCte) whose lab number has a request in panel HIVVL, POCVR or POHVL
+// with an analyser code like 'G____' (a G and four characters), tested in the window, with the testing laboratory's name.
+// Columns (v1 names and order, the hivvl table's then LabName): Province, District, Facility, LabID, Gender, AgeGroup, TestedDate, Suppressed,
+// UU, TAT, TATWithin14, Pregnant, BreastFeeding, BaseLineVL, RunDate, ReceivedDate, RegisteredDate, CollectedDate, TestedAt, Referral,
+// Disalink, ThreeMPostUnSuppressed, POC, POCW48H, LabName.
+//
+// The fixed window (TestedDate within the last 1,095 days, line 13; no upper bound) is `from` and `to` (spec ruling 3, ruling 2: a rolling window
+// becomes from and to); both are required. The window is on the LOCAL date of the tested date, both ends in.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The join to Requests (lines 9-10) repeats a test once per request row of its lab number that is in one of the three panels and has a G
+//     analyser code; v1 has no DISTINCT. Two such rows give two identical rows. The analyser code is a fact of any such request row, not
+//     necessarily the row the hivvl table kept (the facts of the output are the kept row's).
+//   - 'G____' follows SQL Server's LIKE for varchar, ignoring case; a trailing space can be the fourth character after the G, and further
+//     trailing spaces do not count (measured: 'G123 ' and 'G1234  ' match, 'G1  ' and 'G12345' do not).
+//   - The lab number joins as SQL Server compares text (line 9): case and trailing spaces do not matter.
+//   - No ORDER BY in v1: the port orders by every column.
+//
+// CE gaps (ruling 7):
+//   - Referral stays NULL: CE holds no receiving facility (the hivvl builder's referral). Disalink reads the pre-registration attributes and
+//     is 0 until cdr-toolchain fills them.
+//   - v1 inner-joins its laboratory dictionary on TestedAt (lines 11-12): a test whose testing laboratory is not in it, or has no testing
+//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with no testing code is out and every other one stays.
+//     LabName is the report's display, else the mapped register name, else the code (ruling 8), taken from the report of the row the hivvl
+//     table kept. For a ZU code stored as ZUL (TestedAt), the name is that of the report's own code, where v1 names ZUL.
+//
+// Deviations (ruling 2): the rolling window becomes from and to (above).
+
+export function gxVlSql() {
+  return `with ${hivvlCte('hv', { from: 'from', to: 'to', rowIds: true })}
+select hv.province as "Province", hv.district as "District", hv.facility as "Facility", hv.lab_id as "LabID", hv.gender as "Gender",
+  hv.age_group as "AgeGroup", hv.tested_date as "TestedDate", hv.suppressed as "Suppressed", hv.uu as "UU", hv.tat as "TAT",
+  hv.tat_within14 as "TATWithin14", hv.pregnant as "Pregnant", hv.breastfeeding as "BreastFeeding", hv.baseline_vl as "BaseLineVL",
+  hv.run_date as "RunDate", hv.received_date as "ReceivedDate", hv.registered_date as "RegisteredDate", hv.collected_date as "CollectedDate",
+  hv.tested_at as "TestedAt", hv.referral as "Referral", hv.disalink as "Disalink", hv.three_m_post_unsuppressed as "ThreeMPostUnSuppressed",
+  hv.poc as "POC", hv.poc_w48h as "POCW48H", ${labNameSql('dr')} as "LabName"
+from hv
+join diagnostic_reports dr on dr.id = hv.report_row_id
+join lab_requests gr on ${foldSql('gr.request_id')} = ${foldSql('hv.lab_id')}
+  and ${inListSql('gr.panel_code', ['HIVVL', 'POCVR', 'POHVL'])}
+  and ${likeVarcharSql('gr.analyzer_code', 'G', 4)}
+where hv.tested_at is not null
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25`;
+}
+
+export const gxVlParams = () => [...dateParams(true)];
+
 export function queries() {
   return [
     { name: 'VL dashboard summary', sql: vlDashboardSql(), params: vlDashboardParams() },
@@ -1373,5 +1423,6 @@ export function queries() {
     { name: 'Unique VL clients, 12-month rates', sql: uniqueClientsRatesSql(), params: uniqueClientsRatesParams() },
     { name: 'VL requests and tests by lab and month', sql: labMonthSql(), params: labMonthParams() },
     { name: 'VL result bands by month', sql: resultBandsSql(), params: resultBandsParams() },
+    { name: 'VL tests on GeneXpert', sql: gxVlSql(), params: gxVlParams() },
   ];
 }

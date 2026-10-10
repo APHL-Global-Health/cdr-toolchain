@@ -1155,4 +1155,323 @@ const suites15 = [
   extraDaysSuite15,
 ];
 
-export const groups = [{ name: 't4', suites }, { name: 't15', suites: suites15 }];
+// ============================================================================================
+// Group t16: "TB GeneXpert report" (v1 fn_GeneXpertReport). Fixture ids start with "t16-"; lab ids (lr.request_id) start with
+// "T16-". "F line N" is a line of UserDefinedFunction__dbo_fn_GeneXpertReport.sql. The view v_GeneXpert is pinned by group t4.
+//
+// Each case has its own testing code (the TestedAt column), so its row stands alone: the code is the case name (M01 ...). A lab name
+// that no display and no register row gives is the code itself (ruling 8). Counts are written as
+// [MTB_neg, MTBRIF_neg, MTBRIF_pos, MTBRIF_IND, Error_Results, Invalid_Results, No_Results].
+//
+// The window is on the analysis stamp (F line 67): AnalysisDateTime >= @From and <= @To with dates, so from 00:00:00 of `from` up to and
+// including 00:00:00 of `to` (local wall time of the stamp's own text). The main window is 2026-05-04 to 2026-05-06, and the one-day
+// window 2026-05-05 to 2026-05-05 holds only what is stamped exactly at midnight.
+// ============================================================================================
+
+const P16 = [];
+const R16 = [];
+const S16 = [];
+const D16 = [];
+const L16 = [];
+let n16 = 0;
+const nz16 = (v) => (v === null || v === undefined ? 'null' : String(v));
+const N0 = [0, 0, 0, 0, 0, 0, 0];
+
+// One v1 Requests row of a lab number with its patient, specimen, report and results. `mtb` and `rif` are the GXMTB and GXRIF texts
+// (undefined: no such result; null: a result without a value). `tbhiv` and `tbage` are TBCOL answers on a second request of the
+// same lab number (undefined: none; an array: several answers). `extra` are more results of the request.
+function req16(labId, o = {}) {
+  const r = {
+    panel: 'TBGNX', req: 'ZSOUT', sex: 'F', years: 30, days: 10950, status: 'final',
+    authored: '2026-05-04T08:00:00Z', analysis: '2026-05-05T09:00:00Z', effective: '2026-05-03T07:00:00Z',
+    issued: '2026-05-06T10:00:00Z', received: '2026-05-03T12:00:00Z', perf: 'ZZZ', disp: null, report: true, patient: true,
+    mtb: 'Not Detected', rif: 'Not Detected', extra: [], tbhiv: undefined, tbage: undefined, tbcolPanel: 'TBCOL', ...o,
+  };
+  const k = String(++n16).padStart(3, '0');
+  const qid = `t16-q${k}`;
+  let pid = null;
+  if (r.patient) {
+    pid = `t16-p${k}`;
+    P16.push(`(${lit(pid)}, ${lit(`P${k}`)}, ${lit(r.sex)})`);
+  }
+  R16.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.authored)}, ${lit(r.analysis)}, ${lit(r.req)}, ${lit(pid)}, ${nz16(r.years)}, ${nz16(r.days)})`);
+  const sid = r.received ? `t16-s${k}` : null;
+  if (sid) S16.push(`(${lit(sid)}, ${lit(r.received)})`);
+  if (r.report) D16.push(`(${lit(`t16-d${k}`)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.effective)}, ${lit(r.issued)}, ${lit(r.perf)}, ${lit(r.disp)}, ${lit(sid)})`);
+  const results = [
+    ...(r.mtb === undefined ? [] : [{ obs: 'GXMTB', text: r.mtb }]),
+    ...(r.rif === undefined ? [] : [{ obs: 'GXRIF', text: r.rif }]),
+    ...r.extra,
+  ];
+  results.forEach((x, i) => L16.push(`(${lit(`t16-r${k}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)})`));
+  const answers = [
+    ...(r.tbhiv === undefined ? [] : [r.tbhiv].flat().map((text) => ({ obs: 'TBHIV', text }))),
+    ...(r.tbage === undefined ? [] : [r.tbage].flat().map((text) => ({ obs: 'TBAGE', text }))),
+  ];
+  if (answers.length > 0) {
+    const cid = `t16-c${k}`;
+    R16.push(`(${lit(cid)}, ${lit(labId)}, ${lit(r.tbcolPanel)}, null::text, null::text, null::text, null::text, null, null)`);
+    answers.forEach((x, i) => L16.push(`(${lit(`t16-a${k}-${i + 1}`)}, ${lit(cid)}, ${lit(x.obs)}, ${lit(x.text)})`));
+  }
+}
+
+const OUT16 = ['TestedAt', 'LabName', 'AgeGroup', 'TBHIV', 'MTB_neg', 'MTBRIF_neg', 'MTBRIF_pos', 'MTBRIF_IND', 'Error_Results', 'Invalid_Results', 'No_Results'];
+const exp16 = [];   // { wins, row }: the windows ('main', 'day') the row shows in
+const ex16 = (testedAt, labName, age, tbhiv, counts, wins = ['main']) =>
+  exp16.push({ wins, row: Object.fromEntries(OUT16.map((c, i) => [c, [testedAt, labName, age, tbhiv, ...counts][i]])) });
+// One case: a lab number whose testing code is `code`; the row it gives is alone in its group.
+function cs16(code, o, counts, e = {}) {
+  req16(`T16-${code}`, { perf: code, ...o });
+  ex16(code, e.lab ?? code, e.age ?? '15+', e.tbhiv ?? 'Unknown', counts, e.wins);
+}
+
+// -- The measures (F lines 37-64). The compare ignores case and trailing spaces. Only the MTB 'Detected%' is a prefix match (line 46); the RIF
+// side of every measure is an equality, so 'Detected _ Low' as the RIF, 'DETEC', 'Indeterminate', 'ERR', 'INV' and 'No Results' count nowhere.
+cs16('M01', {}, [1, 1, 0, 0, 0, 0, 0]);                                                  // lines 38, 42
+cs16('M02', { mtb: 'not detected  ', rif: 'NOT DETECTED ' }, [1, 1, 0, 0, 0, 0, 0]);     // case, trailing spaces
+cs16('M03', { mtb: 'Negative', rif: 'Negative' }, N0);
+cs16('M04', { mtb: 'MTB Not Detected', rif: 'MTB Not Detected' }, N0);
+cs16('M05', { mtb: 'Detected', rif: 'Detected' }, [0, 0, 1, 0, 0, 0, 0]);                // line 46
+cs16('M06', { mtb: 'Detected _ Low', rif: 'Detected' }, [0, 0, 1, 0, 0, 0, 0]);          // 'Detected%'
+cs16('M07', { mtb: 'DETECTED _ HIGH ', rif: 'detected  ' }, [0, 0, 1, 0, 0, 0, 0]);
+cs16('M08', { mtb: 'Detected', rif: 'Detected _ Low' }, N0);                              // the RIF must equal 'Detected'
+cs16('M09', { mtb: 'Detected', rif: 'DETEC' }, N0);
+cs16('M10', { mtb: 'Not Detected', rif: 'Detected' }, [1, 0, 0, 0, 0, 0, 0]);             // 'Not Detected' is not 'Detected%'
+cs16('M11', { mtb: 'Detected', rif: 'Not Detected' }, [0, 1, 0, 0, 0, 0, 0]);             // line 42: the RIF counts whatever the MTB says
+cs16('M12', { mtb: 'Positive', rif: 'Detected' }, N0);
+cs16('M13', { mtb: 'Detectedfoo', rif: 'Detected' }, [0, 0, 1, 0, 0, 0, 0]);
+cs16('M14', { mtb: ' Detected', rif: 'Detected' }, N0);                                 // a prefix, not a contains
+cs16('M15', { mtb: 'Detected', rif: 'IND' }, [0, 0, 0, 1, 0, 0, 0]);                      // line 50
+cs16('M16', { mtb: 'Detected', rif: 'ind ' }, [0, 0, 0, 1, 0, 0, 0]);
+cs16('M17', { mtb: 'Detected', rif: 'Indeterminate' }, N0);
+cs16('M18', { mtb: 'IND', rif: 'Detected' }, N0);                                         // IND counts on the RIF side only
+cs16('M19', { mtb: 'Error', rif: 'Not Detected' }, [0, 1, 0, 0, 1, 0, 0]);                // line 54: the MTB side alone
+cs16('M20', { mtb: 'Detected', rif: 'Error' }, [0, 0, 0, 0, 1, 0, 0]);                    // the RIF side alone
+cs16('M21', { mtb: 'Error', rif: 'Error' }, [0, 0, 0, 0, 1, 0, 0]);                       // both sides: one result, not two
+cs16('M22', { mtb: 'ERROR  ', rif: 'Not Detected' }, [0, 1, 0, 0, 1, 0, 0]);
+cs16('M23', { mtb: 'ERR', rif: 'ERR' }, N0);
+cs16('M24', { mtb: 'Invalid', rif: 'Not Detected' }, [0, 1, 0, 0, 0, 1, 0]);              // line 58: the MTB side alone
+cs16('M25', { mtb: 'Detected', rif: 'invalid' }, [0, 0, 0, 0, 0, 1, 0]);                  // the RIF side alone
+cs16('M26', { mtb: 'Invalid', rif: 'Invalid' }, [0, 0, 0, 0, 0, 1, 0]);
+cs16('M27', { mtb: 'INV', rif: 'INV' }, N0);
+cs16('M28', { mtb: 'NORES', rif: 'Not Detected' }, [0, 1, 0, 0, 0, 0, 1]);                // line 62: the MTB side alone
+cs16('M29', { mtb: 'Detected', rif: 'nores ' }, [0, 0, 0, 0, 0, 0, 1]);                   // the RIF side alone
+cs16('M30', { mtb: 'NORES', rif: 'NORES' }, [0, 0, 0, 0, 0, 0, 1]);
+cs16('M31', { mtb: 'No Results', rif: 'No Results' }, N0);
+cs16('M32', { mtb: 'Error', rif: 'Invalid' }, [0, 0, 0, 0, 1, 1, 0]);                     // two measures on one row
+cs16('M33', { mtb: 'Error', rif: 'NORES' }, [0, 0, 0, 0, 1, 0, 1]);
+cs16('M34', { mtb: null, rif: 'Not Detected' }, [0, 1, 0, 0, 0, 0, 0]);                   // a result without a value tests false
+cs16('M35', { mtb: 'Detected', rif: undefined }, N0);                                     // no GXRIF result: the row stays, RIF is NULL
+cs16('M36', { mtb: 'Detected', rif: null }, N0);
+// Several rows in one group add up (a count of distinct rows or a flag would not).
+for (const [i, [mtb, rif]] of [['Not Detected', 'Not Detected'], ['Not Detected', 'Not Detected'], ['Detected', 'Detected'], ['Error', 'Not Detected'],
+  ['NORES', 'IND'], ['Invalid', 'Detected']].entries()) req16(`T16-AGG${i + 1}`, { perf: 'AGG', mtb, rif });
+ex16('AGG', 'AGG', '15+', 'Unknown', [2, 3, 1, 1, 1, 1, 1]);
+
+// -- The age group (F lines 23-29). A known age wins over TBAGE. A NULL age loses the RIF (view line 119), so those rows count the MTB only.
+cs16('A01', { years: 0 }, [1, 1, 0, 0, 0, 0, 0], { age: '0-14' });
+cs16('A02', { years: 14 }, [1, 1, 0, 0, 0, 0, 0], { age: '0-14' });
+cs16('A03', { years: 15 }, [1, 1, 0, 0, 0, 0, 0], { age: '15+' });
+cs16('A04', { years: 99 }, [1, 1, 0, 0, 0, 0, 0], { age: '15+' });
+cs16('A05', { years: -1, tbage: 'Adult' }, [1, 1, 0, 0, 0, 0, 0], { age: 'Unknown' });   // a negative age is not NULL: TBAGE is not read
+cs16('A06', { years: null, tbage: 'Adult' }, [1, 0, 0, 0, 0, 0, 0], { age: '15+' });     // line 26
+cs16('A07', { years: null, tbage: 'Child' }, [1, 0, 0, 0, 0, 0, 0], { age: '0-14' });    // line 27
+cs16('A08', { years: null }, [1, 0, 0, 0, 0, 0, 0], { age: 'Unknown' });
+cs16('A09', { years: null, tbage: 'adult ' }, [1, 0, 0, 0, 0, 0, 0], { age: '15+' });
+cs16('A10', { years: null, tbage: 'CHILD' }, [1, 0, 0, 0, 0, 0, 0], { age: '0-14' });
+cs16('A11', { years: null, tbage: 'Infant' }, [1, 0, 0, 0, 0, 0, 0], { age: 'Unknown' });
+cs16('A12', { years: 40, tbage: 'Child' }, [1, 1, 0, 0, 0, 0, 0], { age: '15+' });
+cs16('A13', { years: 5, tbage: 'Adult' }, [1, 1, 0, 0, 0, 0, 0], { age: '0-14' });
+cs16('A14', { years: null, tbage: null }, [1, 0, 0, 0, 0, 0, 0], { age: 'Unknown' });
+// Two ages in one band are one group.
+req16('T16-AMRG1', { perf: 'AMRG', years: 3 });
+req16('T16-AMRG2', { perf: 'AMRG', years: 12 });
+ex16('AMRG', 'AMRG', '0-14', 'Unknown', [2, 2, 0, 0, 0, 0, 0]);
+
+// -- TBHIV (F lines 30-36). The compare ignores case and trailing spaces; any other text comes through as stored.
+cs16('H01', { tbhiv: 'Non-Reactive' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Negative' });   // line 31
+cs16('H02', { tbhiv: 'Reactive' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });       // line 32
+cs16('H03', { tbhiv: 'Pulmonary' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });      // line 33
+cs16('H04', {}, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Unknown' });                            // line 34: no answer
+cs16('H05', { tbhiv: 'Negative' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Negative' });
+cs16('H06', { tbhiv: 'Positive' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });
+cs16('H07', { tbhiv: 'non-reactive ' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Negative' });
+cs16('H08', { tbhiv: 'REACTIVE' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });
+cs16('H09', { tbhiv: 'pulmonary  ' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });
+cs16('H10', { tbhiv: 'Indeterminate' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Indeterminate' });   // line 35
+cs16('H11', { tbhiv: '' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: '' });                              // a blank answer is not NULL
+cs16('H12', { tbhiv: 'Unknown' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Unknown' });
+cs16('H13', { tbhiv: 'Non Reactive' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Non Reactive' });
+cs16('H14', { tbhiv: null }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Unknown' });                      // an answer without a value
+cs16('H15', { tbhiv: 'Reactive', tbcolPanel: 'HIVVL' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Unknown' });   // only panel TBCOL (view line 83)
+cs16('H16', { tbhiv: 'Reactive', tbcolPanel: 'tbcol ' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'Positive' });
+cs16('H17', { tbhiv: 'positive ' }, [1, 1, 0, 0, 0, 0, 0], { tbhiv: 'positive ' });             // as stored, trailing space and all
+// Groups merge on the compare: 'NEGATIVE', 'Negative' (from Non-Reactive) and 'negative ' are one TBHIV, shown with the smallest spelling.
+for (const [i, tbhiv] of ['NEGATIVE', 'Non-Reactive', 'negative ', 'Negative'].entries()) req16(`T16-HMRG${i + 1}`, { perf: 'HMRG', tbhiv });
+ex16('HMRG', 'HMRG', '15+', 'NEGATIVE', [4, 4, 0, 0, 0, 0, 0]);
+for (const [i, tbhiv] of ['Reactive', 'positive', 'Pulmonary'].entries()) req16(`T16-HPOS${i + 1}`, { perf: 'HPOS', tbhiv });
+ex16('HPOS', 'HPOS', '15+', 'Positive', [3, 3, 0, 0, 0, 0, 0]);
+// A stored 'Unknown' and a missing answer are one group.
+req16('T16-HUNK1', { perf: 'HUNK', tbhiv: 'Unknown' });
+req16('T16-HUNK2', { perf: 'HUNK', tbhiv: 'unknown ' });
+req16('T16-HUNK3', { perf: 'HUNK' });
+ex16('HUNK', 'HUNK', '15+', 'Unknown', [3, 3, 0, 0, 0, 0, 0]);
+
+// -- The testing lab (F lines 14-15, 66, 71-72). Rows group on TestedAt and LabName, each compared ignoring case and trailing spaces, and show
+// the smallest spelling in byte order.
+req16('T16-LAB1', { perf: 'LUS', disp: 'Lusaka Lab' });
+req16('T16-LAB2', { perf: 'lus', disp: 'LUSAKA LAB' });
+req16('T16-LAB3', { perf: 'LUS ', disp: 'lusaka lab ' });
+ex16('LUS', 'LUSAKA LAB', '15+', 'Unknown', [3, 3, 0, 0, 0, 0, 0]);
+// Two codes with one name are two rows (the code is in the group).
+req16('T16-LAB4', { perf: 'KIT', disp: 'Shared Lab' });
+req16('T16-LAB5', { perf: 'NDO', disp: 'Shared Lab' });
+ex16('KIT', 'Shared Lab', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+ex16('NDO', 'Shared Lab', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+// One code with two names is two rows: the name is in the group. v1's dictionary gives one name to a code; CE names a lab from each report.
+req16('T16-LAB6', { perf: 'SPL', disp: 'Name A' });
+req16('T16-LAB7', { perf: 'SPL', disp: 'Name B' });
+ex16('SPL', 'Name A', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+ex16('SPL', 'Name B', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+// The name is the report's display, else the register name of the mapped code (a blank display counts as none), else the code.
+req16('T16-LAB8', { perf: 'LUSX' });
+req16('T16-LAB9', { perf: 'LUSX', disp: '  ' });
+ex16('LUSX', 'Lusaka Provincial Lab', '15+', 'Unknown', [2, 2, 0, 0, 0, 0, 0]);
+req16('T16-LAB10', { perf: 'LUSX', disp: 'Override Name' });
+ex16('LUSX', 'Override Name', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+// No testing code: TestedAt is NULL and so is LabName (v1's join finds no lab for a NULL code), even where the report has a display. The RIF is lost
+// (a NULL fact), so these count the MTB only. A blank, a NULL, spaces only and no report at all are one group.
+req16('T16-NUL1', { perf: '', disp: 'Ghost Lab' });
+req16('T16-NUL2', { perf: null, disp: 'Ghost Lab' });
+req16('T16-NUL3', { perf: 'ZZZ', report: false });
+req16('T16-NUL4', { perf: '  ', disp: 'Ghost Lab' });
+ex16(null, null, '15+', 'Unknown', [4, 0, 0, 0, 0, 0, 0]);
+
+// -- Which rows count (view lines 46 and 73): panel TBGNX or POCGT, GXMTB results. No test on the report status.
+cs16('S01', { panel: 'POCGT' }, [1, 1, 0, 0, 0, 0, 0]);
+cs16('S02', { panel: 'pocgt ' }, [1, 1, 0, 0, 0, 0, 0]);
+req16('T16-S03', { perf: 'S03', panel: 'HIVVL' });                                         // not a GeneXpert panel: no row
+req16('T16-S04', { perf: 'S04', mtb: undefined, rif: 'Detected' });                        // a GXRIF alone makes no row
+cs16('S05', { status: 'cancelled' }, [1, 1, 0, 0, 0, 0, 0]);
+// A RIF on another request row of the lab number (the other panel) with equal facts joins.
+req16('T16-S07', { perf: 'S07', rif: undefined });
+req16('T16-S07', { perf: 'S07', panel: 'POCGT', mtb: undefined, rif: 'Detected' });
+ex16('S07', 'S07', '15+', 'Unknown', [1, 0, 0, 0, 0, 0, 0]);
+// No dedupe: two GXRIF results make two rows, two GXMTB results make two rows, two TBHIV answers make two rows.
+req16('T16-S08', { perf: 'S08', mtb: 'Detected', rif: 'Not Detected', extra: [{ obs: 'GXRIF', text: 'Detected' }] });
+ex16('S08', 'S08', '15+', 'Unknown', [0, 1, 1, 0, 0, 0, 0]);
+req16('T16-S09', { perf: 'S09', mtb: 'Not Detected', rif: 'Not Detected', extra: [{ obs: 'GXMTB', text: 'Detected' }] });
+ex16('S09', 'S09', '15+', 'Unknown', [1, 2, 0, 0, 0, 0, 0]);
+req16('T16-S10', { perf: 'S10', tbhiv: ['Reactive', 'Non-Reactive'] });
+ex16('S10', 'S10', '15+', 'Positive', [1, 1, 0, 0, 0, 0, 0]);
+ex16('S10', 'S10', '15+', 'Negative', [1, 1, 0, 0, 0, 0, 0]);
+
+// -- A NULL fact loses the RIF (view lines 110-120); the MTB row stays and counts.
+cs16('N01', { received: null }, [1, 0, 0, 0, 0, 0, 0]);
+cs16('N02', { req: 'ZUNMP' }, [1, 0, 0, 0, 0, 0, 0]);    // a facility the register does not know has no description
+cs16('N03', { patient: false }, [1, 0, 0, 0, 0, 0, 0]);  // no patient: no sex
+
+// -- The window (F line 67), on the analysis stamp: main 2026-05-04 .. 2026-05-06, day 2026-05-05 .. 2026-05-05.
+const MAIN = ['main'];
+const BOTH = ['main', 'day'];
+const w16 = (code, analysis, wins) => {
+  req16(`T16-${code}`, { perf: code, analysis });
+  if (wins) ex16(code, code, '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0], wins);
+};
+w16('W01', '2026-05-04T00:00:00Z', MAIN);                // the first instant of `from`
+w16('W02', '2026-05-03T23:59:59Z');                      // a second before
+w16('W03', '2026-05-06T00:00:00Z', MAIN);                // the first instant of `to`: in
+w16('W04', '2026-05-06T00:00:01Z');                      // a second later: out
+w16('W05', '2026-05-05T12:00:00Z', MAIN);
+w16('W06', '2026-05-04T00:30:00+02:00', MAIN);           // local 05-04 (UTC says 05-03)
+w16('W07', '2026-05-03T23:30:00+02:00');                 // local 05-03
+w16('W08', '2026-05-05T23:30:00+02:00', MAIN);
+w16('W09', '2026-05-06T01:00:00+02:00');                 // local 05-06 01:00 is after midnight (UTC says 05-05 23:00)
+w16('W10', '2026-05');                                   // a partial stamp is no date
+w16('W11', null);                                        // no analysis stamp
+w16('W12', '2026-05-05', BOTH);                          // a date alone is its midnight
+w16('W13', '2026-05-06', MAIN);
+w16('W14', '2026-05-06T00:00:00+02:00', MAIN);           // local midnight of `to`
+w16('W15', '2026-05-05T00:00:00Z', BOTH);
+w16('W16', '2026-05-05T00:00:00+02:00', BOTH);
+w16('W17', '2026-05-05T00:00:01Z', MAIN);                // one second after midnight: not in a one-day window
+w16('W18', '2026-05-04', MAIN);
+// The window is on the analysis stamp, not the authorised one.
+req16('T16-X01', { perf: 'X01', issued: '2026-07-01T10:00:00Z' });
+ex16('X01', 'X01', '15+', 'Unknown', [1, 1, 0, 0, 0, 0, 0]);
+req16('T16-X02', { perf: 'X02', analysis: '2026-06-20T09:00:00Z', issued: '2026-05-05T10:00:00Z' });
+
+// The rows of a window, as the tests expect them.
+const rowsIn16 = (win) => exp16.filter((e) => e.wins.includes(win)).map((e) => e.row);
+const W16 = { from: '2026-05-04', to: '2026-05-06' };
+const DAY16 = { from: '2026-05-05', to: '2026-05-05' };
+
+const SETUP16 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t16-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t16-fm2', '', '', 'ZUNMP', null, null, null, null),
+  ('t16-fm3', '', '', 'LUSX', 'reg-lab', 'Lusaka Provincial Lab', 'Lusaka', 'Lusaka');
+insert into patients (id, surname, sex) values ${P16.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, age_days) values ${R16.join(',\n  ')};
+insert into specimens (id, received_time) values ${S16.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display, specimen_id) values ${D16.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value) values ${L16.join(',\n  ')};`;
+
+const tbReportQuery = queries().find((q) => q.name === 'TB GeneXpert report');
+
+// A multiset of rows (v1 has no ORDER BY; the query orders by every column): column order, the count, then every row.
+function reportSuite16(name, params, expectedRows, setup = '') {
+  const key = (r) => JSON.stringify(OUT16.map((c) => r[c] ?? null));
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${tbReportQuery ? bind(tbReportQuery.sql, params) : 'select 1'}) q;`,
+    count: expectedRows.length + 1,
+    check(got) {
+      if (!tbReportQuery) return ['query "TB GeneXpert report" is missing'];
+      const failures = [];
+      if (got.length !== expectedRows.length) failures.push(`expected ${expectedRows.length} rows, got ${got.length}`);
+      if (got[0]) {
+        failures.push(...inOrder(Object.keys(got[0]), OUT16));
+        if (Object.keys(got[0]).length !== OUT16.length) failures.push(`expected ${OUT16.length} columns, got ${Object.keys(got[0]).length}`);
+      }
+      const left = expectedRows.map(key);
+      for (const h of got.map(key)) {
+        const i = left.indexOf(h);
+        if (i < 0) failures.push(`unexpected row ${h}`); else left.splice(i, 1);
+      }
+      for (const w of left) failures.push(`missing row ${w}`);
+      return failures;
+    },
+  };
+}
+
+const suites16 = [
+  reportSuite16('tbreport-main', W16, rowsIn16('main'), SETUP16),
+  // A window of one day holds only what is stamped exactly at midnight.
+  reportSuite16('tbreport-day', DAY16, rowsIn16('day')),
+  reportSuite16('tbreport-empty', { from: '2026-11-01', to: '2026-11-30' }, []),
+  // The window can sit on the other side of the data: June holds only X02.
+  reportSuite16('tbreport-june', { from: '2026-06-01', to: '2026-06-30' }, [
+    Object.fromEntries(OUT16.map((c, i) => [c, ['X02', 'X02', '15+', 'Unknown', 1, 1, 0, 0, 0, 0, 0][i]]))]),
+  {
+    name: 'tbreport-shape',
+    count: 8,
+    check() {
+      if (!tbReportQuery) return ['query "TB GeneXpert report" is missing'];
+      const bad = [];
+      const ids = tbReportQuery.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(['from', 'to'])) bad.push(`params: expected from, to; got ${ids}`);
+      for (const p of tbReportQuery.params) {
+        if (p.type !== 'text') bad.push(`${p.id}: expected type text, got ${p.type}`);
+        if (p.required !== true) bad.push(`${p.id}: must be required (v1 has the window)`);
+      }
+      const text = tbReportQuery.sql;
+      if (/--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i.test(text.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(text)) bad.push('does not start with "with"');
+      if (!/order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11\s*$/.test(text)) bad.push('must end with a total ORDER BY over all 11 columns');
+      return bad;
+    },
+  },
+];
+
+export const groups = [{ name: 't4', suites }, { name: 't15', suites: suites15 }, { name: 't16', suites: suites16 }];
