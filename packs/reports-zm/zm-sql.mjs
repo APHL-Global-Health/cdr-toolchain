@@ -897,6 +897,9 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //   eidCte('ed')                              all rows
 //   eidCte('ed', { from: 'from', to: 'to' })  only rows whose tested_date is in the window; the two
 //                                             values are parameter names, compared as in inRange
+//   eidCte('ed', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many
+//                                             days (sp_dash_getEID_V2 and sp_dash_getEID_v2_List read up to
+//                                             the day after their end date)
 // v1 fills the table with sp_update_EIDTable (a MERGE that also deletes rows missing from its source)
 // and then the eid half of sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
 //
@@ -953,8 +956,8 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //   - Disalink reads the request attributes prereg-registration-facility (LIMSPreReg_RegistrationFacilityCode)
 //     and referring-request-id (ReferringRequestID). cdr-toolchain does not fill them yet, so disalink is 0
 //     until it does. v1's facility list is the mapped facility_map codes.
-export function eidCte(name, { from, to } = {}) {
-  const { prefilter, finalRange } = copyWindow('eidCte', from, to);
+export function eidCte(name, { from, to, extraDays = 0 } = {}) {
+  const { prefilter, finalRange } = copyWindow('eidCte', from, to, 'r.tested_date', extraDays);
   const flag = (words) => `case when ${inListSql('r.result_text', words)} then 1 else 0 end`;
   return `${name} as (
   with ${name}_src as (
