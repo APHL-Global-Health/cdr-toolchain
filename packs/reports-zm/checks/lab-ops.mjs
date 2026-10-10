@@ -7,7 +7,7 @@
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, vleidRequestsCte } from '../zm-sql.mjs';
 import { queries } from '../queries/lab-ops.mjs';
-import { facilityRows, orderedSuite, shapeSuite } from './epi-fixture.mjs';
+import { facilityRows, orderedSuite, shapeSuite, dateErrorSuites } from './epi-fixture.mjs';
 
 // The columns of Table__dbo_VLEIDRequests.sql in snake_case (56 columns; the inventory says 57).
 const COLUMNS = ['date_time_stamp', 'versionstamp', 'lims_date_time_stamp', 'lims_versionstamp', 'request_id', 'obr_set_id',
@@ -4551,4 +4551,11 @@ insert into questionnaire_responses (id, form_code, based_on_id, items, authored
 }
 
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b(), group30()];
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+// Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
+const suites30c = [];
+suites30c.push(...dateErrorSuites('t30c-lab-ops', queries(), { blankOk: ['Requests received by week'] }));
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b(), group30(),
+  { name: 't30c', suites: suites30c }
+];

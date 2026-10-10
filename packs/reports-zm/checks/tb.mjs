@@ -8,7 +8,7 @@
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { geneXpertCte, tbgnxCte } from '../zm-sql.mjs';
 import { queries } from '../queries/tb.mjs';
-import { orderedSuite } from './epi-fixture.mjs';
+import { orderedSuite, dateErrorSuites } from './epi-fixture.mjs';
 
 // ---- Columns ----
 
@@ -1132,8 +1132,9 @@ const extraDaysSuite15 = {
     const plain = tbgnxCte('x', { from: 'a', to: 'b' });
     if (plain !== tbgnxCte('x', { from: 'a', to: 'b', extraDays: 0 })) bad.push('extraDays 0 must give the same text as no option');
     const moved = tbgnxCte('x', { from: 'a', to: 'b', extraDays: 1 });
-    if (!moved.includes("::date + 1, 'YYYY-MM-DD')")) bad.push('extraDays 1 must move the end of the window by one day');
-    if (plain.includes('::date + 1')) bad.push('the default window must not move');
+    // Task 30c: the end date is the validated parameter (dateParamSql), so the day is added to it before the text is made.
+    if (!moved.includes(" + 1)::timestamp, 'YYYY-MM-DD')")) bad.push('extraDays 1 must move the end of the window by one day');
+    if (plain.includes(' + 1)::timestamp')) bad.push('the default window must not move');
     try { tbgnxCte('x', { from: 'a', to: 'b', extraDays: -1 }); bad.push('a negative extraDays must throw'); } catch { /* expected */ }
     return bad;
   },
@@ -1483,4 +1484,11 @@ const suites16 = [
   },
 ];
 
-export const groups = [{ name: 't4', suites }, { name: 't15', suites: suites15 }, { name: 't16', suites: suites16 }];
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+// Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
+const suites30c = [];
+suites30c.push(...dateErrorSuites('t30c-tb', queries()));
+
+export const groups = [{ name: 't4', suites }, { name: 't15', suites: suites15 }, { name: 't16', suites: suites16 },
+  { name: 't30c', suites: suites30c }
+];

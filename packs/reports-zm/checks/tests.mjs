@@ -10,7 +10,7 @@
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { recencyCte, recencySurveillanceCte } from '../zm-sql.mjs';
 import { queries } from '../queries/tests.mjs';
-import { orderedSuite } from './epi-fixture.mjs';
+import { orderedSuite, dateErrorSuites } from './epi-fixture.mjs';
 
 // ---- Shared fixture builder ----
 
@@ -2935,6 +2935,11 @@ const suites21 = [
   ]),
 ];
 
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+// Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
+const suites30c = [];
+suites30c.push(...dateErrorSuites('t30c-tests', queries()));
+
 export const groups = [
   { name: 't5-recency', suites: recencySuites },
   { name: 't5-surveillance', suites: survSuites },
@@ -2943,4 +2948,5 @@ export const groups = [
   { name: 't19', suites: suites19 },
   { name: 't20', suites: suites20 },
   { name: 't21', suites: suites21 },
+  { name: 't30c', suites: suites30c }
 ];

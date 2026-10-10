@@ -8,7 +8,7 @@
 import { lit, inOrder, caseSuite } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, hivvlCte, tndCte } from '../zm-sql.mjs';
 import { queries, rateCutSql } from '../queries/vl.mjs';
-import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite } from './epi-fixture.mjs';
+import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite, dateErrorSuites } from './epi-fixture.mjs';
 
 // ---- Fixture builder ----
 
@@ -2903,7 +2903,14 @@ const suitesV16 = [
   ...rowIdsSuites,
 ];
 
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+// Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
+const suites30c = [];
+suites30c.push(...dateErrorSuites('t30c-vl', queries()));
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
-  { name: 't16', suites: suitesV16 }];
+  { name: 't16', suites: suitesV16 },
+  { name: 't30c', suites: suites30c }
+];

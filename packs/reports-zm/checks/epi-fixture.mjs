@@ -99,3 +99,66 @@ export function shapeSuite(name, query, wantIds, wantTypes) {
     },
   };
 }
+
+// A suite that expects a query to FAIL (or, with wanted null, to run). The harness runs one psql script with ON_ERROR_STOP, so an error would
+// stop every suite. This one wraps the query in a temporary function that runs it in a plpgsql block and returns the error text, and the
+// suite compares that text. `query` is a { name, sql } object (undefined when the query is missing). `wanted` is a fragment the message
+// must contain, or null for "no error". Used by checks/covid.mjs (Task 23) and every area's t30c group (date parameter validation).
+export function errorSuite(name, query, params, wanted) {
+  const body = query ? bind(query.sql, params) : 'select 1';
+  return {
+    name,
+    sql: `create or replace function pg_temp.zm_err(q text) returns text language plpgsql as $f$ begin execute q; return 'no error'; exception when others then return sqlerrm; end $f$;
+select ${lit(name)} || chr(9) || json_build_object('msg', pg_temp.zm_err($q$${body}$q$))::text;`,
+    count: 1,
+    check(rows) {
+      if (!query) return [`the query of ${name} is missing`];
+      const msg = rows[0]?.msg;
+      if (wanted === null) return msg === 'no error' ? [] : [`expected no error, got ${msg}`];
+      return typeof msg === 'string' && msg.includes(wanted) ? [] : [`expected an error containing "${wanted}", got ${msg}`];
+    },
+  };
+}
+
+// The message of a bad date parameter (zm-sql.mjs dateParamSql).
+export const badDate = (id, value) => `${id} must be YYYY-MM-DD, got ${value}`;
+
+// Date parameter validation (Task 30c, item A), for every query of an area that takes the `from` and `to` dates. Per query:
+//   - a valid window runs;
+//   - '09/10/2026' as `from` and 'yesterday' as `to` raise the error that names the parameter and shows the value;
+//   - a required date left blank raises, an optional date left blank means no limit and raises nothing, also beside a valid date on the
+//     other side, and a bad date beside a blank one still raises.
+// The other parameters are blank, except those in DATE_ERROR_OTHER (a required choice). The line list validates date-times itself (Task 23).
+const DATE_ERROR_OTHER = { test_type: 'VL', art_number: '', year: '2026' };
+// `blankOk` lists queries whose required date still reads a blank value as no limit (the weekly W query's `from`, an old floor).
+export function dateErrorSuites(prefix, queryList, { skip = [], blankOk = [] } = {}) {
+  const out = [];
+  for (const q of queryList) {
+    if (skip.includes(q.name)) continue;
+    const ps = q.params ?? [];
+    const from = ps.find((p) => p.id === 'from');
+    const to = ps.find((p) => p.id === 'to');
+    if (!from) continue;
+    const open = blankOk.includes(q.name);
+    const base = { ...Object.fromEntries(ps.map((p) => [p.id, DATE_ERROR_OTHER[p.id] ?? ''])) };
+    const win = { ...base, from: '2026-05-01', ...(to ? { to: '2026-05-31' } : {}) };
+    const id = (k) => `${prefix}: ${q.name}: ${k}`;
+    out.push(errorSuite(id('valid window'), q, win, null));
+    out.push(errorSuite(id('from 09/10/2026'), q, { ...win, from: '09/10/2026' }, badDate('from', '09/10/2026')));
+    if (from.required && !open) out.push(errorSuite(id('from blank (required)'), q, { ...win, from: '' }, badDate('from', '')));
+    else {
+      out.push(errorSuite(id('both blank'), q, { ...win, from: '', to: '' }, null));
+      out.push(errorSuite(id('from blank, to given'), q, { ...win, from: '' }, null));
+      out.push(errorSuite(id('from blank, to bad'), q, { ...win, from: '', to: 'yesterday' }, badDate('to', 'yesterday')));
+    }
+    if (!to) continue;
+    out.push(errorSuite(id('to yesterday'), q, { ...win, to: 'yesterday' }, badDate('to', 'yesterday')));
+    out.push(errorSuite(id('to 2026-02-30'), q, { ...win, to: '2026-02-30' }, badDate('to', '2026-02-30')));
+    if (to.required) out.push(errorSuite(id('to blank (required)'), q, { ...win, to: '' }, badDate('to', '')));
+    else {
+      out.push(errorSuite(id('to blank, from given'), q, { ...win, to: '' }, null));
+      out.push(errorSuite(id('from bad, to blank'), q, { ...win, from: '09/10/2026', to: '' }, badDate('from', '09/10/2026')));
+    }
+  }
+  return out;
+}

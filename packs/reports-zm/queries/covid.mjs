@@ -4,6 +4,7 @@ import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
   requesterJoin, sqlLit, ssTextKey, testingCodeSql,
+  dateParamSql,
 } from '../zm-sql.mjs';
 
 // ---- The COVID-19 counts (Task 22) -----------------------------------------------------------------------------------------------
@@ -85,8 +86,8 @@ const labDescSql = (c) => `case
 
 // `stamp` between the start date at 00:00:00 and the end date at 00:00:00 plus `extraDays` days, on the local wall time. False for a
 // stamp that is missing or has no full date. The parameters are YYYY-MM-DD.
-const inWindow = (stamp, extraDays = 0) => `coalesce(${localTs(stamp)} >= ({{param.from}})::date::timestamp
-      and ${localTs(stamp)} <= ({{param.to}})::date::timestamp + interval '${extraDays} day', false)`;
+const inWindow = (stamp, extraDays = 0) => `coalesce(${localTs(stamp)} >= ${dateParamSql('from')}::timestamp
+      and ${localTs(stamp)} <= ${dateParamSql('to')}::timestamp + interval '${extraDays} day', false)`;
 
 // Text order of a display column: SQL Server's word order first, then byte order; a missing value first. A total order needs both.
 const textOrder = (e) => `${ssTextKey(e)} collate "C" nulls first, ${e} collate "C" nulls first`;

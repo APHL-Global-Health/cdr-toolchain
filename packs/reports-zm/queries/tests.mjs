@@ -4,6 +4,7 @@ import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-qu
 import {
   dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, optionalWindowSql, provinceParam, recencyCte,
   recencySurveillanceCte, requesterJoin, requestAttrSql, sqlLit, ssTextKey, testingCodeSql, tndCte,
+  dateParamSql,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -594,8 +595,8 @@ export function hpvSql() {
   cross join lateral (select ${localDate('dr.issued')} as d) ld
   where ${inListSql('lr.panel_code', HPV_PANELS)}
     and not ${inListSql('l.observation_code', ['STXT', 'SCOM'])}
-    and ${stamp} >= ({{param.from}})::date + time '00:00:01'
-    and ${stamp} <= ({{param.to}})::date + time '23:59:59'
+    and ${stamp} >= ${dateParamSql('from')} + time '00:00:01'
+    and ${stamp} <= ${dateParamSql('to')} + time '23:59:59'
 ),
 names as (
   select s.lab_key, (array_agg(s.report_name order by ${foldSql('s.report_name')} = s.lab_key, s.report_name collate "C"))[1] as lab_name

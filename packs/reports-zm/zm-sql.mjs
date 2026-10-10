@@ -15,16 +15,41 @@ export const ATTR_SYSTEM = 'urn:openldr:cs:request-attribute';
 // 'a', 'b' from ['a', 'b']: single quotes doubled.
 export const sqlList = (values) => values.map(sqlLit).join(', ');
 
+// A date parameter (YYYY-MM-DD) as SQL. Every date parameter of the pack is text, and a day/month entry such as '09/10/2026' compares
+// as text and silently gives wrong or empty rows, so each use goes through here. The value must be four digits, two digits and two
+// digits and a real date (no 2026-02-30; 02-29 only in a leap year; no year 0000). Anything else raises an error that names the
+// parameter and shows the value: 'invalid input syntax for type integer: "from must be YYYY-MM-DD, got 09/10/2026"'.
+// The pattern is a regular expression, not a date cast, so no Postgres date error can come first. A bad value takes the ELSE branch, which
+// builds the message text and casts it to integer: that cast fails with the message inside Postgres' error text. The integer cast is
+// IMMUTABLE and the value is a constant, so Postgres folds it while PLANNING the query and the error comes even when no row would reach the
+// test. (A date cast is only STABLE: it is not folded, it runs per row, and a window over an empty table would never see a bad date.)
+// Only the message is cast inside the CASE. The value is cast to date outside it, after the check passed (Task 23 found that a cast of
+// the value inside the CASE is folded at plan time and raises Postgres' own error first).
+//   dateParamSql(id)                 a date; an error for any bad value, a blank one included (a required parameter)
+//   dateParamSql(id, { optional })   the same, but a blank value gives NULL (no limit) and raises nothing
+//   dateTextParamSql(id, ...)        the same date as text 'YYYY-MM-DD' (to_char of a timestamp, so neither the session DateStyle nor
+//                                    its time zone can change it), for the text compares of inRange and optionalWindowSql
+const DATE_30 = '(0[13578]|1[02])-(0[1-9]|[12][0-9]|3[01])|(0[469]|11)-(0[1-9]|[12][0-9]|30)|02-(0[1-9]|1[0-9]|2[0-8])';
+const DATE_OK = `^(?!0000)[0-9]{4}-(${DATE_30})$`;
+const DATE_LEAP = '^(?!0000)([0-9]{2}(0[48]|[2468][048]|[13579][26])|([02468][048]|[13579][26])00)-02-29$';
+export function dateParamSql(id, { optional = false } = {}) {
+  const v = `{{param.${id}}}`;
+  return `(case${optional ? ` when ${v} = '' then null` : ''} when ${v} ~ ${sqlLit(DATE_OK)} or ${v} ~ ${sqlLit(DATE_LEAP)} then ${v}
+      else ((${sqlLit(`${id} must be YYYY-MM-DD, got `)} || ${v})::int)::text end)::date`;
+}
+export const dateTextParamSql = (id, opts) => `to_char(${dateParamSql(id, opts)}::timestamp, 'YYYY-MM-DD')`;
+
 // A window on a date column: `expr ~ <date pattern> and left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
 // characters of the stamp's own text (YYYY-MM-DD), so it is the LOCAL date: '2026-05-31T23:30:00+02:00' and
 // '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside, and so is a stamp that does not start with a full date (a partial
-// FHIR dateTime such as '2026-07', which as text would sort inside a June to July window). The parameters are YYYY-MM-DD.
+// FHIR dateTime such as '2026-07', which as text would sort inside a June to July window). The parameters are YYYY-MM-DD and are
+// validated (dateParamSql): a bad one raises an error.
 // `extraDays` moves the end of the window later by that many days, for the v1 reports that add a day to
 // their end date (the dashboard procedures run @EDate = dateadd(dd, 1, @EDate)). It is 0 for every other caller.
 export function inRange(expr, fromParam = 'from', toParam = 'to', extraDays = 0) {
   if (!Number.isInteger(extraDays) || extraDays < 0) throw new Error('inRange: extraDays must be a whole number, 0 or more');
-  const end = extraDays === 0 ? `{{param.${toParam}}}` : `to_char(({{param.${toParam}}})::date + ${extraDays}, 'YYYY-MM-DD')`;
-  return `${expr} ~ ${DATE_START} and left(${expr}, 10) >= {{param.${fromParam}}} and left(${expr}, 10) <= ${end}`;
+  const end = extraDays === 0 ? dateTextParamSql(toParam) : `to_char((${dateParamSql(toParam)} + ${extraDays})::timestamp, 'YYYY-MM-DD')`;
+  return `${expr} ~ ${DATE_START} and left(${expr}, 10) >= ${dateTextParamSql(fromParam)} and left(${expr}, 10) <= ${end}`;
 }
 
 // ---- Parameters ----
@@ -634,8 +659,8 @@ export const requestAttrSql = (rowIdExpr, code, { typed = false } = {}) => `(sel
 // with a full date (missing, or a partial FHIR dateTime such as '2026-07') is outside. The parameters are `from` and `to`, YYYY-MM-DD.
 export const optionalWindowSql = (stamp) => `(({{param.from}} = '' and {{param.to}} = '')
       or (${stamp} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-        and ({{param.from}} = '' or left(${stamp}, 10) >= {{param.from}})
-        and ({{param.to}} = '' or left(${stamp}, 10) <= {{param.to}})))`;
+        and ({{param.from}} = '' or left(${stamp}, 10) >= ${dateTextParamSql('from', { optional: true })})
+        and ({{param.to}} = '' or left(${stamp}, 10) <= ${dateTextParamSql('to', { optional: true })})))`;
 
 // A testing code that is blank (empty or spaces) is no code: no lab, no name.
 export const testingCodeSql = (dr) => `case when rtrim(${dr}.performer) = '' then null else ${dr}.performer end`;
@@ -1863,8 +1888,8 @@ export function vleidRequestsCte(name, { from, to, on = 'registered', rowIds = f
 // authorised date; TATTests counts those requests and TATpre = average x TATTests, summed over facilities. A sum over nothing is NULL.
 // Rows come ordered by the group columns as SQL Server orders text (NULL first).
 export function epiSummarySql({ panel, observations, anchor, endExtraDays = 0, lead, area, resultWhere = 'true', splits }) {
-  const lo = '({{param.from}})::date::timestamp';
-  const hi = endExtraDays === 0 ? '({{param.to}})::date::timestamp' : `(({{param.to}})::date + ${endExtraDays})::timestamp`;
+  const lo = `${dateParamSql('from')}::timestamp`;
+  const hi = endExtraDays === 0 ? `${dateParamSql('to')}::timestamp` : `(${dateParamSql('to')} + ${endExtraDays})::timestamp`;
   const within = (expr) => `${localTs(expr)} >= ${lo} and ${localTs(expr)} <= ${hi}`;
   const days = `${localDate('dr.issued')} - ${localDate('dr.effective')}`;
   const finalResults = (name, extraSelect, extraWhere) => `${name} as (

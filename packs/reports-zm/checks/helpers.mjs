@@ -4,8 +4,10 @@ import { lit, caseSuite } from '../../shared/pg-check.mjs';
 import {
   sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
   dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, labNameSql,
-  districtOptionsSql, ssTextKey,
+  districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql,
 } from '../zm-sql.mjs';
+import { dateErrorSuites } from './epi-fixture.mjs';
+import { zmQueryFile } from '../zm-queries.mjs';
 
 const bind = (sqlText, params) => Object.entries(params)
   .reduce((s, [k, v]) => s.replaceAll(`{{param.${k}}}`, `'${v.replace(/'/g, "''")}'`), sqlText);
@@ -374,4 +376,91 @@ suites.push(caseSuite('ss-max-pair-sql-collation-marks', ['x', 'y'], [
   { x: 'a-c', y: 'ab', expected: 'ab' }, { x: 'a_', y: 'ab', expected: 'ab' }, { x: '<20', y: '_1', expected: '_1' },
 ], maxOf({ sqlCollation: true })));
 
-export const groups = [{ name: 't1', suites }];
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+const suites30c = [];
+
+// Item A: dateParamSql / dateTextParamSql. A value is four digits, two and two and a real date: every month's length, February in leap and
+// other years (1900 and 2100 are not leap years, 2000 and 2400 are), year 0000 (a Postgres date error of its own), and the forms that look
+// like dates but are not. The expected answer for the sweep comes from JavaScript's own calendar, not from the SQL under test.
+// The suite runs `select <expr>` in a plpgsql block and keeps either 'ok <value>' or the error text.
+function evalSuite(name, cases) {
+  const call = (expr) => `pg_temp.zm_eval($q$select ${expr}$q$)`;
+  return {
+    name,
+    sql: `create or replace function pg_temp.zm_eval(q text) returns text language plpgsql as $f$ declare r text; begin execute q into r; return 'ok ' || coalesce(r, '(null)'); exception when others then return sqlerrm; end $f$;
+select ${lit(name)} || chr(9) || json_build_object('got', (select json_agg(v.x order by v.i) from (values ${cases.map((c, i) => `(${i}, ${call(bind(c.expr, c.params))})`).join(',\n  ')}) as v(i, x)))::text;`,
+    count: cases.length,
+    check(rows) {
+      const got = rows[0]?.got ?? [];
+      return cases.flatMap((c, i) => {
+        const ok = typeof c.want === 'string' && c.want.startsWith('ok ') ? got[i] === c.want : typeof got[i] === 'string' && got[i].includes(c.want);
+        return ok ? [] : [`${c.label}: expected ${JSON.stringify(c.want)}, got ${JSON.stringify(got[i])}`];
+      });
+    },
+  };
+}
+const dateAt = (d, id = 'd') => ({ expr: dateTextParamSql(id), params: { [id]: d }, label: JSON.stringify(d) });
+const bad = (id, v) => `${id} must be YYYY-MM-DD, got ${v}`;
+const dateCases = [
+  // Real dates: both ends of every kind of month, leap days.
+  ...['2026-01-01', '2026-01-31', '2026-03-31', '2026-04-30', '2026-12-31', '2024-02-29', '2000-02-29', '2400-02-29', '0001-01-01', '9999-12-31']
+    .map((d) => ({ ...dateAt(d), want: `ok ${d}` })),
+  // Not dates, or not in this format.
+  ...['09/10/2026', 'yesterday', '', ' ', 'now', '2026-5-1', '2026-05-1', '26-05-01', '20260501', '2026/05/01', '2026-05-01T00:00', '2026-05-01 00:00',
+    ' 2026-05-01', '2026-05-01 ', '2026-05-01\n', '\n2026-05-01', '2026-05-011', '12026-05-01', '2026-13-01', '2026-00-10', '2026-05-00', '2026-05-32',
+    '2026-02-29', '2026-02-30', '2026-02-31', '2026-04-31', '2026-06-31', '2026-09-31', '2026-11-31', '1900-02-29', '2100-02-29', '0000-01-01', '0000-12-31',
+    '2026-05-01+02', 'null', 'NULL', '٢٠٢٦-٠٥-٠١']
+    .map((d) => ({ ...dateAt(d), want: bad('d', d) })),
+];
+// The sweep: 8 years x 12 months x 7 days against the JavaScript calendar.
+const sweep = [];
+for (const y of [1900, 1999, 2000, 2023, 2024, 2026, 2100, 2400]) {
+  for (let m = 1; m <= 12; m += 1) {
+    for (const day of [0, 1, 28, 29, 30, 31, 32]) {
+      const text = `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const t = new Date(Date.UTC(y, m - 1, day));
+      const real = day >= 1 && t.getUTCMonth() === m - 1 && t.getUTCDate() === day;
+      sweep.push({ ...dateAt(text), want: real ? `ok ${text}` : bad('d', text) });
+    }
+  }
+}
+suites30c.push(evalSuite('date-param-values', dateCases));
+suites30c.push(evalSuite('date-param-sweep', sweep));
+
+// The optional form: a blank value is NULL and raises nothing; a bad one still raises. The required form raises for a blank.
+const optionalDate = (d) => ({ expr: dateTextParamSql('d', { optional: true }), params: { d }, label: `optional ${JSON.stringify(d)}` });
+suites30c.push(evalSuite('date-param-optional', [
+  { ...optionalDate(''), want: 'ok (null)' },
+  { ...optionalDate('2026-05-01'), want: 'ok 2026-05-01' },
+  { ...optionalDate('yesterday'), want: bad('d', 'yesterday') },
+  { ...optionalDate(' '), want: bad('d', ' ') },
+  { ...optionalDate('09/10/2026'), want: bad('d', '09/10/2026') },
+  { ...optionalDate('2026-02-30'), want: bad('d', '2026-02-30') },
+  { ...dateAt(''), want: bad('d', '') },
+  // The parameter id is in the message, and the date form works in arithmetic.
+  { ...dateAt('x', 'start'), want: bad('start', 'x') },
+  { expr: `to_char(${dateParamSql('d')} + 1, 'YYYY-MM-DD')`, params: { d: '2026-12-31' }, want: 'ok 2027-01-01', label: 'date + 1' },
+  { expr: `to_char(${dateParamSql('d')} + 1, 'YYYY-MM-DD')`, params: { d: '2026-12-32' }, want: bad('d', '2026-12-32'), label: 'date + 1, bad' },
+  // A value with a quote (CE doubles it) is shown as it is.
+  { ...dateAt("it's"), want: bad('d', "it's") },
+]));
+
+// inRange and optionalWindowSql: the window still works for a valid date, a bad date raises, and a blank optional side stays open.
+const winCase = (expr, params, want, label) => ({ expr, params, want, label });
+suites30c.push(evalSuite('date-window-helpers', [
+  winCase(`(${inRange("'2026-05-15'")})::text`, { from: '2026-05-01', to: '2026-05-31' }, 'ok true', 'inRange inside'),
+  winCase(`(${inRange("'2026-06-01'")})::text`, { from: '2026-05-01', to: '2026-05-31' }, 'ok false', 'inRange outside'),
+  winCase(`(${inRange("'2026-05-15'")})::text`, { from: '09/10/2026', to: '2026-05-31' }, bad('from', '09/10/2026'), 'inRange bad from'),
+  winCase(`(${inRange("'2026-05-15'")})::text`, { from: '2026-05-01', to: 'yesterday' }, bad('to', 'yesterday'), 'inRange bad to'),
+  winCase(`(${inRange("'2026-06-01'", 'from', 'to', 1)})::text`, { from: '2026-05-01', to: '2026-05-31' }, 'ok true', 'inRange extra day inside'),
+  winCase(`(${inRange("'2026-06-01'", 'from', 'to', 1)})::text`, { from: '2026-05-01', to: '2026-05-32' }, bad('to', '2026-05-32'), 'inRange extra day bad to'),
+  winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '', to: '' }, 'ok true', 'optional both blank'),
+  winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '2026-05-10', to: '' }, 'ok true', 'optional from only, inside'),
+  winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '', to: '2026-05-10' }, 'ok false', 'optional to only, outside'),
+  winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '', to: 'yesterday' }, bad('to', 'yesterday'), 'optional bad to'),
+  winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '09/10/2026', to: '' }, bad('from', '09/10/2026'), 'optional bad from'),
+]));
+// Slice 1's query (VL clients by province) is not in an area file.
+suites30c.push(...dateErrorSuites('t30c-slice1', zmQueryFile().queries));
+
+export const groups = [{ name: 't1', suites }, { name: 't30c', suites: suites30c }];

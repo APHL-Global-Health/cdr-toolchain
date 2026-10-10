@@ -5,6 +5,7 @@ import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswerSql, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
+  dateParamSql, dateTextParamSql,
 } from '../zm-sql.mjs';
 
 // ---- VL dashboard summary ----------------------------------------------------------------------
@@ -248,7 +249,7 @@ sc as (
     hv.lab_id, hv.suppressed, hv.uu, hv.tat_within14, hv.pregnant, hv.breastfeeding, hv.baseline_vl, hv.three_m_post_unsuppressed
   from hv
   where ${supported}
-    and ${localTs('hv.tested_date')} <= (({{param.to}})::date + 1)::timestamp
+    and ${localTs('hv.tested_date')} <= (${dateParamSql('to')} + 1)::timestamp
     and ${same('hv.province', 'province')}
     and ${same('hv.district', 'district')}
 ),
@@ -484,8 +485,8 @@ src as (
   where ${inListSql('lr.panel_code', ['HIVVL'])}
     and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC'])}
     and dr.status = 'final'
-    and ${localTs('lr.analysis_at')} >= ({{param.from}})::date::timestamp
-    and ${localTs('lr.analysis_at')} <= ({{param.to}})::date::timestamp
+    and ${localTs('lr.analysis_at')} >= ${dateParamSql('from')}::timestamp
+    and ${localTs('lr.analysis_at')} <= ${dateParamSql('to')}::timestamp
     and not ${inListSql(result, INVALID_VL_TEXTS)}
 ),
 tests as (
@@ -543,8 +544,8 @@ const COHORT_EXCLUDED_TEXTS = ['antibodies. @mat3', 'No', 'per request', 'Positi
   'Please repeat', 'Insufficient serum received', 'Insufficient for further tests', 'Indeterminate', 'Haemolysed', 'FAIL', 'Absent',
   'Haemolysed ++', 'Icteric ++++', 'INV', 'This result has been checked', 'to confirm patient identity.'];
 
-const cohortFrom = '({{param.from}})::date';
-const cohortTo = '({{param.to}})::date::timestamp';
+const cohortFrom = `${dateParamSql('from')}`;
+const cohortTo = `${dateParamSql('to')}::timestamp`;
 // The window of z (BETWEEN with dates at 00:00:00, local) on a local-time SQL expression.
 const cohortWindow = (ts) => `${ts} >= ${cohortFrom}::timestamp and ${ts} <= ${cohortTo}`;
 const cohortArt = () => artNumberShortSql("coalesce(zi.reference_numbers, '')", "coalesce(zi.unique_id, '')");
@@ -929,7 +930,7 @@ const UNIQUE_BANDS = [
 const UNIQUE_SEXES = ['m', 'f', 'i', 'u', 'x'];
 
 // The window of TND on its ResultDate (a datetime) against two dates: from 00:00:00 up to and including to 00:00:00, local wall time.
-const midnightWindow = (ts) => `${ts} >= ({{param.from}})::date::timestamp and ${ts} <= ({{param.to}})::date::timestamp`;
+const midnightWindow = (ts) => `${ts} >= ${dateParamSql('from')}::timestamp and ${ts} <= ${dateParamSql('to')}::timestamp`;
 
 // The shared head of both queries. `w` holds TND rows of the window whose lab number has a hivvl row, with the lower-cased keys v1's
 // text comparison ignores (case, trailing spaces) and `not_baseline` (hivvl.BaseLineVL = 0 or null). `wWhere` is the condition on w.
@@ -1250,7 +1251,7 @@ export const uniqueClientsRatesParams = () => [
 //
 // Deviations (spec ruling 2): none.
 export function labMonthSql() {
-  const rangeBlank = `({{param.from}} = '' or left(lr.authored_at, 10) >= {{param.from}}) and ({{param.to}} = '' or left(lr.authored_at, 10) <= {{param.to}})`;
+  const rangeBlank = `({{param.from}} = '' or left(lr.authored_at, 10) >= ${dateTextParamSql('from', { optional: true })}) and ({{param.to}} = '' or left(lr.authored_at, 10) <= ${dateTextParamSql('to', { optional: true })})`;
   return `${labMonthSource(rangeBlank, 'g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"')}
 order by g."Year" nulls first, g."Month" nulls first, ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Requests", coalesce(t.n, 0)`;
 }
@@ -1360,7 +1361,7 @@ select extract(year from b.day)::int as "Year", extract(month from b.day)::int a
   ${count('lt1000')} as "< 1000 copies/ml",
   ${count('ge1000')} as ">= 1000 copies/ml"
 from b
-where ({{param.from}} = '' or to_char(b.day, 'YYYY-MM-DD') >= {{param.from}}) and ({{param.to}} = '' or to_char(b.day, 'YYYY-MM-DD') <= {{param.to}})
+where ({{param.from}} = '' or to_char(b.day, 'YYYY-MM-DD') >= ${dateTextParamSql('from', { optional: true })}) and ({{param.to}} = '' or to_char(b.day, 'YYYY-MM-DD') <= ${dateTextParamSql('to', { optional: true })})
 group by extract(year from b.day), extract(month from b.day)
 order by "Year" nulls first, "Month" nulls first`;
 }

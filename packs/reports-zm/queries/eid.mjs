@@ -4,6 +4,7 @@ import { inListSql, rpt, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey,
   inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql, likeVarcharSql,
+  dateParamSql,
 } from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
@@ -292,7 +293,7 @@ sc as (
     ${localDate('ed.tested_date')} - ${localDate('ed.recieved_date')} as lab_days
   from ed
   where ${supported}
-    and ${localTs('ed.tested_date')} <= (({{param.to}})::date + 1)::timestamp
+    and ${localTs('ed.tested_date')} <= (${dateParamSql('to')} + 1)::timestamp
     and ${same('ed.province', 'province')}
     and ${same('ed.district', 'district')}
 ),
@@ -558,8 +559,8 @@ export function eidResultsSql() {
   ${requesterJoin('lr', 'fmr', 'left join')}
   cross join lateral (select ${ts} as stamp) w
   where ${foldSql('lr.panel_code')} = 'hivpc'
-    and w.stamp >= ({{param.from}})::date::timestamp
-    and case when ${vpcr} then w.stamp < (({{param.to}})::date + 1)::timestamp else w.stamp <= ({{param.to}})::date::timestamp end
+    and w.stamp >= ${dateParamSql('from')}::timestamp
+    and case when ${vpcr} then w.stamp < (${dateParamSql('to')} + 1)::timestamp else w.stamp <= ${dateParamSql('to')}::timestamp end
     and (not (${vpcr}) or (coalesce(rtrim(lr.rejection_code), '') = '' and lr.age_days < 763))
 ),
 zr_one as (

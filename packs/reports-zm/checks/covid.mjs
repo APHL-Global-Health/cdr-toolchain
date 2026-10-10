@@ -8,7 +8,7 @@
 
 import { lit, inOrder } from '../../shared/pg-check.mjs';
 import { queries } from '../queries/covid.mjs';
-import { bind, facilityRows, orderedSuite } from './epi-fixture.mjs';
+import { bind, facilityRows, orderedSuite, errorSuite as errorSuiteOf, dateErrorSuites } from './epi-fixture.mjs';
 
 const LAB_STATS = 'COVID-19 by testing lab';
 const SOURCE_STATS = 'COVID-19 by source facility';
@@ -857,25 +857,8 @@ away('T23-Z0321-X0', { iss: '2026-03-21T00:30:00+02:00' }); // after it (in UTC 
 const LINE_PARAMS = (day, extra = {}) => ({ ...dayWindow(day), version: 'standard', facility: '', ...extra });
 const lineSuite = (name, params, wanted, setup = '') => setSuite(name, LINE_LIST, params, LINE_COLUMNS, wanted, setup);
 const lineOrdered = (name, params, wanted) => ordered(name, LINE_LIST, params, LINE_COLUMNS, wanted);
-// A suite that expects the query to FAIL (or, with wanted null, to run). The harness runs one psql script with ON_ERROR_STOP, so an error would
-// stop every suite. This one wraps the query in a temporary function that runs it in a plpgsql block and returns the error text, and the
-// suite compares that text. wanted is a fragment the message must contain, or null for "no error".
-function errorSuite(name, queryName, params, wanted) {
-  const q = query(queryName);
-  const body = q ? bind(q.sql, params) : 'select 1';
-  return {
-    name,
-    sql: `create or replace function pg_temp.t23_err(q text) returns text language plpgsql as $f$ begin execute q; return 'no error'; exception when others then return sqlerrm; end $f$;
-select ${lit(name)} || chr(9) || json_build_object('msg', pg_temp.t23_err($q$${body}$q$))::text;`,
-    count: 1,
-    check(rows) {
-      if (!q) return [`query "${queryName}" is missing`];
-      const msg = rows[0]?.msg;
-      if (wanted === null) return msg === 'no error' ? [] : [`expected no error, got ${msg}`];
-      return typeof msg === 'string' && msg.includes(wanted) ? [] : [`expected an error containing "${wanted}", got ${msg}`];
-    },
-  };
-}
+// A suite that expects the query to FAIL (or, with wanted null, to run): the shared errorSuite of epi-fixture.mjs, by query name.
+const errorSuite = (name, queryName, params, wanted) => errorSuiteOf(name, query(queryName), params, wanted);
 const badTime = (id, value) => `${id} must be YYYY-MM-DDTHH:MM, got ${value}`;
 const NONE_FOUND = { from: '2030-01-01T04:00', to: '2030-01-02T04:00', version: 'standard', facility: '' };
 
@@ -1757,4 +1740,11 @@ const suites24 = [
   },
 ];
 
-export const groups = [{ name: 't22', suites }, { name: 't23', suites: suites23 }, { name: 't24', suites: suites24 }];
+// ---- Group t30c (Task 30c): the shared fixes that reviewers deferred. Fixture ids start with "t30c-". ----
+// Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
+const suites30c = [];
+suites30c.push(...dateErrorSuites('t30c-covid', queries(), { skip: ['COVID-19 daily line list'] }));
+
+export const groups = [{ name: 't22', suites }, { name: 't23', suites: suites23 }, { name: 't24', suites: suites24 },
+  { name: 't30c', suites: suites30c }
+];

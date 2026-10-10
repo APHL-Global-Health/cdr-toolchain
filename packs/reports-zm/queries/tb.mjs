@@ -3,6 +3,7 @@
 import { inListSql, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, tbgnxCte, geneXpertCte, localDate, localTs, ssTextKey,
+  dateParamSql,
 } from '../zm-sql.mjs';
 
 // ---- The measures the three TB GeneXpert dashboards share ---------------------------------------------------------------
@@ -391,7 +392,7 @@ rep as (
     end as tbhiv,
     g.mtb, g.rif
   from gx g
-  where ${stamp} >= ({{param.from}})::date::timestamp and ${stamp} <= ({{param.to}})::date::timestamp
+  where ${stamp} >= ${dateParamSql('from')}::timestamp and ${stamp} <= ${dateParamSql('to')}::timestamp
 ),
 names as (
   select ${foldSql('p.tested_at')} as code_key,

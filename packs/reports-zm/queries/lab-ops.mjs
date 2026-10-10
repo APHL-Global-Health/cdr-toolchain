@@ -4,6 +4,7 @@ import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-qu
 import {
   ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
   optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql, vleidRequestsCte,
+  dateParamSql,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -49,12 +50,12 @@ import { labMonthSource, rateCutSql } from './vl.mjs';
 //
 // Windows: the three queries take the same two parameters.
 
-const START = '({{param.from}})::date::timestamp';
-const END = '(({{param.to}})::date + 1)::timestamp';
+const START = `${dateParamSql('from')}::timestamp`;
+const END = `(${dateParamSql('to')} + 1)::timestamp`;
 // v1 `datetime BETWEEN @StartDate AND @EndDate` (dates, the end already moved a day).
 const inWindow = (stamp) => `(${localTs(stamp)} >= ${START} and ${localTs(stamp)} <= ${END})`;
 // v1 `cast(datetime as date) BETWEEN @StartDate AND @EndDate`: the whole local day counts at both ends.
-const authorisedDay = (stamp) => `${localDate(stamp)} between ({{param.from}})::date and ({{param.to}})::date + 1`;
+const authorisedDay = (stamp) => `${localDate(stamp)} between ${dateParamSql('from')} and ${dateParamSql('to')} + 1`;
 
 // decimal(26,12), cut. NULL when the count is 0 or either side is NULL.
 const rate = (top, count) => `(${rateCutSql(top, count)})::numeric(26,12)`;
@@ -402,7 +403,7 @@ ${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'TBTestRequests', 
 // Replaces sp_DQ_DaysSinceLastVLEIDTans, sp_DQ_VLEIDSuspectedWrongSampleCollectionDateEntries and sp_getDisaLinkStats (with its body
 // fn_WeeklyDisaLinkUpdate; fn_WeeklyDisaLinkUpdate2 and 3 are dropped). Lab names follow the Task 16 rule (labNamesCte).
 //
-// Parameters. All date parameters are text, YYYY-MM-DD, required (a final wave adds shared validation).
+// Parameters. All date parameters are text, YYYY-MM-DD, required, and validated (dateParamSql: a bad date raises an error that names the parameter).
 //
 // Row order. v1 orders by its first columns and CE pages a result with LIMIT and OFFSET, so each query orders by every output column: text
 // in SQL Server's word order (ssTextKey, then the plain text), a number as a number, a missing value first.
@@ -484,7 +485,7 @@ function finalSelect26(labels, kinds, orderIdx = labels.map((_, i) => i)) {
 }
 
 export function daysSinceSql() {
-  const floor = '({{param.from}})::date::timestamp';
+  const floor = `${dateParamSql('from')}::timestamp`;
   return `with lab_dist as (
   select distinct dr.performer, dr.performer_display, dr.source_system, dr.performer_system
   from diagnostic_reports dr
@@ -591,8 +592,8 @@ ${finalSelect26(['Province', 'LabCode', 'LabName', 'LastTransmission'], ['text',
 //
 // Deviations: none (the dates are parameters, as v1's).
 export function suspectDatesSql() {
-  const start = '({{param.from}})::date::timestamp';
-  const end = '({{param.to}})::date::timestamp';
+  const start = `${dateParamSql('from')}::timestamp`;
+  const end = `${dateParamSql('to')}::timestamp`;
   return `with sel as (
   select ${testingCodeSql('dr')} as code,
     case ${foldSql('lr.panel_code')} when 'hivvl' then 'Viral Load' when 'hivpc' then 'EID' end as test_type,
@@ -657,8 +658,8 @@ ${finalSelect26(['Laboratory', 'Test Type', 'RequestID', 'Days from collection t
 //
 // Deviations: none besides the one above.
 export function disaLinkSql() {
-  const start = '({{param.from}})::date::timestamp';
-  const end = '(({{param.to}})::date + 1)::timestamp';
+  const start = `${dateParamSql('from')}::timestamp`;
+  const end = `(${dateParamSql('to')} + 1)::timestamp`;
   const inWindow = (stamp) => `${stamp} >= ${start} and ${stamp} < ${end}`;
   return `with fac as (
   select ${foldSql('fm.source_code')} as code_key, (array_agg(fm.name order by (fm.name is null), fm.id))[1] as name
@@ -799,7 +800,7 @@ export function weeklyStatsSql() {
   const reg = inPeriod('lr.authored_at');
   const ana = inPeriod('lr.analysis_at');
   const auth = inPeriod('dr.issued');
-  const regBefore = `coalesce(${localDate('lr.authored_at')} < ({{param.from}})::date, false)`;
+  const regBefore = `coalesce(${localDate('lr.authored_at')} < ${dateParamSql('from')}, false)`;
   // The request rows of one panel: the facts every count reads. The result facts are `exists` over the request row's results of the pattern.
   const rows = (testType, panel, prefix) => {
     const result = rpt('y');
@@ -1063,7 +1064,7 @@ order by ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C",
 //   - The collection date is the earliest local date among the request's reports (CE can hold several reports per request row; v1 holds one
 //     SpecimenDateTime). A blank or partial stamp ('', '2026-07') is no date and falls back to the registered date, where a v1 datetime is
 //     always a full date. The request is still counted once.
-//   - An unknown test_type gives no rows. The date parameters are not validated here (a final wave adds one check).
+//   - An unknown test_type gives no rows. The date parameters are validated (dateParamSql).
 //
 // Rows are ordered by the three names (SQL Server's word order), the facility code, and the bucket (v1 has no ORDER BY; this key is total).
 const REJECTION_REASONS = [
@@ -1320,7 +1321,7 @@ order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls 
 // registered date alone would force RegisteredDate to 100% in every windowed row. A request with none of the three dates is out as soon as one
 // side is given. L's v1 window was exclusive at both ends of a datetime (after 2017-10-31 00:00:00, before 2018-04-01 00:00:00), so
 // from = 2017-10-31 and to = 2018-03-31 gives the same rows except a stamp at exactly 2017-10-31 00:00:00.
-// The date parameters are not validated here (a final wave adds one check).
+// The date parameters are validated (dateParamSql).
 //
 // Order. v1 has no ORDER BY; the port orders by every output column (the name in SQL Server's text order, then the rest), so CE can page.
 const DATE_START = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}'";
@@ -1482,7 +1483,7 @@ export const labAreaCompletenessSql = () => completenessSql({ level: 'labarea', 
 //     a request has no lab and is left out. The lab views therefore lose those requests; v1 would count them for the receiving lab.
 //
 // Window (ruling 5): v1 has none. `from` and `to` are optional (blank is all history), YYYY-MM-DD, on the local date of the view's bucket
-// date (optionalWindowSql); a request with no bucket date is out as soon as one side is given. The date parameters are not validated here.
+// date (optionalWindowSql); a request with no bucket date is out as soon as one side is given. The date parameters are validated (dateParamSql).
 //
 // Rejected: a rejection code that is not blank (rtrim length above 0). NULL, '' and spaces are not rejections (TL 41: is null or = '').
 // Order: v1 has none; the port orders by every output column (name in SQL Server's text order, then the rest, NULL first), so CE can page.
@@ -1596,7 +1597,7 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 // helper, weeklySql:
 //   Requests received by week                  W   Labprefix, LabName, Year, Quarter, Month, Week, TotalRequests, PCRRequests, VLRequests, OtherRequests
 //   Requests received by week (VLEID copy)     V   LabPrefix, labFacility, LabName, then the same eight columns
-// Both take `from` and `to` (text, YYYY-MM-DD; a final wave adds validation). W's `from` is REQUIRED: v1's 2018-05-31 floor is a fixed window,
+// Both take `from` and `to` (text, YYYY-MM-DD; validated, dateParamSql). W's `from` is REQUIRED: v1's 2018-05-31 floor is a fixed window,
 // which ruling 3 turns into a required parameter (as "Days since last transmission" does with its 2019 floor). W's `to` and both of V's are optional.
 //
 // What differs (W lines, V lines):
@@ -1670,7 +1671,7 @@ export const monthTurnaroundSql = () => tatSql({ level: 'month' });
 //     (the form has no request to attach to).
 //   - The lab's name is taken from all the reports of the lab, not only the listed ones (the copy does not carry the report's display, and the
 //     two queries should name a lab the same way). The names never depend on the window.
-//   - The date windows are not validated (a final wave adds one check).
+//   - The date windows are validated (dateParamSql); a blank optional date is no limit.
 //
 // Order: v1 has no ORDER BY; the port orders by every output column (the lab code and name in SQL Server's text order, then year, quarter,
 // month, week and the four counts, NULL first), so CE can page the result. labFacility and LabName are one value, so one key covers both.
@@ -1711,8 +1712,8 @@ rq as (
   const window = copy
     ? optionalWindowSql("to_char(c.b, 'YYYY-MM-DD')")
     : `c.b is not null
-    and ({{param.from}} = '' or c.b > nullif({{param.from}}, '')::date::timestamp)
-    and ({{param.to}} = '' or c.b::date <= nullif({{param.to}}, '')::date)`;
+    and ({{param.from}} = '' or c.b > ${dateParamSql('from', { optional: true })}::timestamp)
+    and ({{param.to}} = '' or c.b::date <= ${dateParamSql('to', { optional: true })})`;
   const distinctIds = (cond) => `count(distinct ${foldSql('c.request_id')})${cond === undefined ? '' : ` filter (where ${cond})`}`;
   const lead = copy ? ['"LabPrefix"', '"labFacility"', '"LabName"'] : ['"Labprefix"', '"LabName"'];
   const leadValues = copy ? ['g.code', 'g.nm', 'g.nm'] : ['g.code', 'g.nm'];
@@ -1769,7 +1770,7 @@ export const weeklyRequestsSql = () => weeklySql({ copy: false });
 export const weeklyRequestsCopySql = () => weeklySql({ copy: true });
 
 // The two date parameters of the weekly request queries. W's `from` is v1's floor (a datetime after 00:00:00 of the day); V's is the usual
-// inclusive date. W's `from` is required, the others optional text; a final wave validates them.
+// inclusive date. W's `from` is required, the others optional text; all are validated (dateParamSql).
 const weeklyParams = (floor) => [
   { id: 'from', label: floor ? 'Date after (YYYY-MM-DD; use 2018-05-31 to match v1; a request at exactly 00:00 of that day is out)' : 'Date from (YYYY-MM-DD; blank for no limit)', type: 'text', required: floor },
   { id: 'to', label: 'Date to (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
