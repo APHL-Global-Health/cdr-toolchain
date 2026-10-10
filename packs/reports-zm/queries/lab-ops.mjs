@@ -438,12 +438,16 @@ ${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'TBTestRequests', 
 //     no condition at all.
 //   - The exclusion list is v1's own constant (line 62, 45 lab codes). It is pack content and stays in the query. It applies to the folded
 //     code, so case and trailing spaces do not matter, and a leading space does. It cuts part b rows as well.
+//   - Part a counts every panel (D lines 18-36 have no panel condition): a lab whose only requests are TB, COVID or any other panel is listed.
 //   - Part b has no panel or status condition: any request pre-registered at the facility counts.
 //   - Text compares ignore case and trailing spaces. Two spellings of one lab code are one lab. The code shown is the smallest spelling in
 //     byte order.
-//   - A lab with a part a row but no part b row is shown with part a; a lab known only through part b is shown with part b.
+//   - A lab with a part a row but no part b row is shown with part a; a lab with a part b row but no part a row is shown with part b, provided
+//     it has a report somewhere in CE (see the gap below).
 //
 // CE gaps (spec rulings 7 and 8):
+//   - A DISA Link site in v1's Laboratories that never tests has a part b row only in v1. CE has no Laboratories list: a lab exists only through a
+//     report's testing code, so such a site has no row in CE.
 //   - v1's lab key is ReceivingFacilityCode when set, else TestingFacilityCode. CE carries no receiving code, so the key is the testing
 //     code, diagnostic_reports.performer. cdr writes it from its configured OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401), so
 //     the lab is the lab that PUSHED the data, which v1's receiving lab is not always. A request with no report, or a blank or missing

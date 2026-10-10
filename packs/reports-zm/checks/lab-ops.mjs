@@ -997,6 +997,9 @@ function group26() {
   // D line 64 compares an int with getdate() and is always true: a stamp tomorrow gives -1 and the row stays.
   dLab('ZNEG', 'Negative Lab', [at(-1, '09:00:00')]);
   dExpect(null, 'ZNEG', 'Negative Lab', -1);
+  // D lines 18-36 have no panel condition: a lab whose only request is a TB panel is listed.
+  add(D, 'T26-D-ZTB-1', { panel: 'TBGNX', authored: at(12), reports: [{ perf: 'ZTB', display: 'Tb Lab' }] });
+  dExpect(null, 'ZTB', 'Tb Lab', 12);
 
   // -- The floor (D line 30): RegisteredDateTime > 2019-01-01 00:00:00, strictly --
   const since2019 = daysBetween('2019-01-01', TODAY);
