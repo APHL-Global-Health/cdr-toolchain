@@ -1143,9 +1143,17 @@ clients.push(cl('may', SOUTH14, 'T14-R13', 'Two Rows', 0, 'Male', null, null, C_
 clients.push(cl('may', SOUTH14, 'T14-R13', 'Two Rows', 0, 'Male', null, null, C_EFF, '2026-05-06T09:00:00Z', null, 'REJECTED'));
 req14('T14-R14', { req: 'ZLUSA', first: 'Lu', sur: 'Saka', sex: 'F', years: 4, status: 'cancelled', auth: '2026-05-05T08:00:00Z', iss: null, results: [] });
 clients.push(cl('may', LUSAKA14, 'T14-R14', 'Lu Saka', 4, 'Female', null, null, C_EFF, '2026-05-05T08:00:00Z', null, 'REJECTED'));
+// Task 30c (item J): the province filter applies to the valid part BEFORE the rejected part reads it (line 63: NOT IN the valid rows of the same
+// window AND province). A lab number valid in Lusaka and cancelled in Southern: asked for Southern, `valid` holds Southern rows only, so v1 shows
+// the cancelled Southern request as REJECTED. Asked for all provinces, the Lusaka valid row is in `valid` and the rejected row is left out. Asked
+// for Lusaka, the Lusaka valid row shows and the Southern request is not in that province.
+req14('T14-J01', { req: 'ZLUSA', first: 'Lu', sur: 'Valid', sex: 'F', dob: '2025-04-04', iss: '2026-05-16T10:00:00Z', results: [hiv('Negative')] });
+req14('T14-J01', { req: 'ZSOUT', first: 'So', sur: 'Rejected', sex: 'F', years: 0, status: 'cancelled', obr: 2, iss: null, results: [] });
+clients.push(cl('may', LUSAKA14, 'T14-J01', 'Lu Valid', 1, 'Female', null, null, C_EFF, C_AUTH, '2026-05-16T10:00:00Z', 'Negative'));
+clients.push({ ...cl('may', SOUTH14, 'T14-J01', 'So Rejected', 0, 'Female', null, null, C_EFF, C_AUTH, null, 'REJECTED'), onlyWhenAsked: true });
 
 const clientRows = (province, month) => clients
-  .filter((c) => c.month === month && (province.trim() === '' || c.province.toLowerCase() === province.trim().toLowerCase()))
+  .filter((c) => c.month === month && (province.trim() === '' ? !c.onlyWhenAsked : c.province.toLowerCase() === province.trim().toLowerCase()))
   .map((c) => c.row);
 const clientsQuery = q14('EID clients by province');
 const clientSuite = (name, province, from, to, month, setup = '') => rows14(name, clientsQuery, { province, from, to }, CLN, clientRows(province, month), setup);
