@@ -3355,4 +3355,650 @@ insert into diagnostic_reports (id, based_on_id, effective, issued, performer, p
   return { name: 't29a', suites: suites29 };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a()];
+
+// Group t29b: Turnaround times (v1 views vTATLab <= vTATEIDLab, vTATVLoadLab; vTATProvince <= vTATEIDProvince, vTATVLoadProvince;
+// vTATVLoadLabMonth). Fixture ids start with "t29b-l" (lab world) and "t29b-p" (province world); request numbers with "T29B-". The two
+// worlds hold the same scenarios (a lab world request has a performer and no requester; a province world request the opposite), and every
+// suite deletes the rows of the other world first (isolate), inside a savepoint. The month query reads the lab world.
+// "TL line N", "TEL line N", "TVL line N", "TP line N", "TEP line N", "TVP line N" and "TM line N" mean a line of
+// View__dbo_vTATLab.sql, ...vTATEIDLab, ...vTATVLoadLab, ...vTATProvince, ...vTATEIDProvince, ...vTATVLoadProvince and ...vTATVLoadLabMonth.
+// Expected rows come from a model of the v1 text (modelRows below) and from rows worked out by hand ("by hand"). The week numbers of the
+// hand rows were read from SQL Server (datepart(wk, ...)).
+
+const Q29B = {
+  lab: 'Turnaround times by lab',
+  prov: 'Turnaround times by province',
+  month: 'VL turnaround by month',
+};
+const t29bquery = (name) => queries().find((x) => x.name === name);
+const T29B_STEPS = ['TATCollectedReceived', 'TATReceivedRegistered', 'TATRegisteredTested', 'TATTestedAuthorized', 'TATTotal'];
+const T29B_COLUMNS = {
+  lab: ['LabFacility', 'Year', 'Quarter', 'Month', 'Week', ...T29B_STEPS],       // TL lines 20-33
+  prov: ['ProvinceName', 'Year', 'Quarter', 'Month', 'Week', ...T29B_STEPS],     // TP lines 20-33
+  month: ['Year', 'Month', 'LabFacility', 'TATTotal'],                           // TM lines 25-28, 38
+};
+// SQL Server datepart(wk): the US week. Sunday first, week 1 holds 1 January. Worked out from the Sunday on or before 1 January.
+function t29bWeek(iso) {
+  const jan1 = utcDay(`${iso.slice(0, 4)}-01-01`);
+  const weekStart = jan1 - new Date(jan1).getUTCDay() * 86400000;
+  return Math.floor((utcDay(iso) - weekStart) / (7 * 86400000)) + 1;
+}
+// The nulls-first compare of SQL Server.
+const t29bNum = (a, b) => ((a === null ? 0 : 1) - (b === null ? 0 : 1)) || (a === null ? 0 : a - b);
+
+function group29b() {
+  const P = 't29b-';
+  let n = 0;
+  const fm = [];
+  const reqRows = [];
+  const repRows = [];
+  const specRows = [];
+  const recs = { l: [], p: [] };
+  const regs = { l: [], p: [] };
+
+  // A register row (facility_map). `mapped` false: no register id, so the code is not in the register.
+  function fmap(w, code, region, district, name, mapped = true) {
+    const i = fm.length + 1;
+    fm.push(`(${lit(`${P}${w}-fm${i}`)}, '', '', ${lit(code)}, ${lit(mapped ? `reg-${P}${w}-${i}` : null)}, ${lit(name)}, ${lit(region)}, ${lit(district)})`);
+    if (mapped) regs[w].push({ code, region, district, name });
+  }
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+  // A date as the five columns carry it. 'MM-DD' becomes a 2026 stamp in a form of its own (offset, Z, date only, fraction); null stays NULL;
+  // any other text goes in as it is ('', '2026-05', 'garbage', a full stamp of another year).
+  const FORMS = { s: (d) => `${d}T09:30:00+02:00`, v: (d) => `${d}T10:00:00Z`, r: (d) => d, a: (d) => `${d}T11:00:00.000+02:00`, u: (d) => `${d}T14:00:00Z` };
+  const stamp = (kind, v) => {
+    if (v === null || v === undefined) return null;
+    return /^\d\d-\d\d$/.test(v) ? FORMS[kind](`2026-${v}`) : v;
+  };
+  // One request row. s, v, u: collection (the report's effective), received (the specimen's received time), authorised (the report's issued).
+  // r, a: registered (authored_at), analysed (analysis_at). `reports`: several reports as { s, v, u, code, display }. `report: false`: none.
+  function add(w, o) {
+    const r = { panel: 'HIVVL', rej: null, rid: undefined, obr: null, s: null, v: null, r: null, a: null, u: null, report: true, code: null, display: null, fac: null, reports: null, ...o };
+    n += 1;
+    r.id = `${P}${w}-q${n}`;
+    if (r.rid === undefined) r.rid = `T29B-${w.toUpperCase()}${n}`;
+    r.reg = stamp('r', r.r);
+    r.ana = stamp('a', r.a);
+    const source = r.reports ?? (r.report === false ? [] : [{ s: r.s, v: r.v, u: r.u, code: r.code, display: r.display }]);
+    r.reps = source.map((x) => ({ spec: stamp('s', x.s), recv: stamp('v', x.v), auth: stamp('u', x.u), code: x.code ?? null, display: x.display ?? null }));
+    reqRows.push(`(${lit(r.id)}, ${lit(r.rid)}, ${lit(r.panel)}, ${lit(r.reg)}, ${lit(r.ana)}, ${lit(r.fac)}, ${num(r.obr)}, ${lit(r.rej)})`);
+    r.reps.forEach((rep, i) => {
+      let specimenId = null;
+      if (rep.recv !== null) {
+        specimenId = `${r.id}-s${i + 1}`;
+        specRows.push(`(${lit(specimenId)}, ${lit(rep.recv)})`);
+      }
+      repRows.push(`(${lit(`${r.id}-d${i + 1}`)}, ${lit(r.id)}, ${lit(rep.spec)}, ${lit(rep.auth)}, ${lit(rep.code)}, ${lit(rep.display)}, ${lit(specimenId)})`);
+    });
+    recs[w].push(r);
+    return r;
+  }
+  // One scenario in both worlds. Lab world: the report's performer is `code` and its display "<name> Lab"; the request has no requester.
+  // Province world: the requester is a code mapped to the region "<name> Province"; the reports have no performer.
+  let facSeq = 0;
+  function both(name, code, rows, { worlds = 'lp', region2 = null } = {}) {
+    let fac = null;
+    let fac2 = null;
+    if (worlds.includes('p')) {
+      facSeq += 1;
+      fac = `ZP${facSeq}`;
+      fmap('p', fac, `${name} Province`, `${name} District`, `${name} Clinic`);
+      if (region2) {
+        fac2 = `ZQ${facSeq}`;
+        fmap('p', fac2, region2, `${name} District`, `${name} Clinic`);
+      }
+    }
+    const own = (x) => ({ ...x, code: x.code === undefined ? code : x.code, display: x.display === undefined ? `${name} Lab` : x.display });
+    const strip = (x) => ({ ...x, code: null, display: null });
+    for (const row of rows) {
+      if (worlds.includes('l')) add('l', { ...own(row), reports: row.reports ? row.reports.map(own) : undefined });
+      if (worlds.includes('p')) add('p', { ...strip(row), reports: row.reports ? row.reports.map(strip) : undefined, fac: row.fac2 ? fac2 : fac });
+    }
+  }
+  // A row from five dates (collection, received, registered, analysed, authorised).
+  const D = (s, v, r, a, u, extra = {}) => ({ s, v, r, a, u, ...extra });
+
+  // ===========================================================================================================================
+  // Scenarios. May 2026: the 1st is a Friday, so 3 May is a Sunday (week 19 starts) and 10 May a Sunday (week 20 starts).
+  // ===========================================================================================================================
+  // Step: the five steps all different (4, 3, 2, 7, 16), so a swapped step shows. TL lines 25-33, TP lines 25-33.
+  both('Step', 'ZST', [D('05-04', '05-08', '05-11', '05-13', '05-20')]);
+  // Trunc: two requests, averages 1.5, 1, 1.5, 3.5 and 7.5. SQL Server truncates AVG of an integer (1, 1, 1, 3, 7).
+  both('Trunc', 'ZTR', [D('05-10', '05-11', '05-12', '05-14', '05-17'), D('05-09', '05-11', '05-12', '05-13', '05-17')]);
+  // Negative: every step runs backwards. Averages -1.5, -1.5, 0.5, -2, -4.5 are cut toward zero (-1, -1, 0, -2, -4), never floored.
+  both('Negative', 'ZNG', [D('05-14', '05-13', '05-12', '05-12', '05-11'), D('05-15', '05-13', '05-11', '05-12', '05-09')]);
+  // Mixed: collection to receipt is -3 and +2, an average of -0.5 that cuts to 0; the total is -4 and +1, -1.5 cuts to -1.
+  both('Mixed', 'ZMX', [D('05-16', '05-13', '05-12', '05-12', '05-12'), D('05-11', '05-13', '05-12', '05-12', '05-12')]);
+  // Unfinished: no analysis or authorised date, measured up to today (getdate(), the Zambian date).
+  both('Unfinished', 'ZUF', [D('05-04', '05-05', '05-07', null, null), D('05-04', '05-05', '05-07', '05-11', null)]);
+  // Odd: stamps that are no date ('' and a month and 'garbage') are NULL, as a v1 datetime column cannot hold them.
+  both('Odd', 'ZOD', [D('', '2026-05', '05-12', '05-14', 'garbage')]);
+  // Week: every date of a row is one stamp, so every step is 0 and the row shows its year, quarter, month and week. Edges around 1 January
+  // (a Thursday in 2026, a Sunday in 2023, a Saturday in 2022), a Sunday at local midnight, a leap day and the quarter change.
+  const K = (x) => D(x, x, x, x, x);
+  both('Week', 'ZWK', [
+    '2025-12-31T23:30:00+02:00', '2026-01-01T00:30:00+02:00', '2026-01-03T23:30:00+02:00', '2026-01-04T00:30:00+02:00', '2026-12-31',
+    '2027-01-01T08:00:00Z', '2027-01-02', '2027-01-03T00:20:00+02:00', '2023-01-01', '2023-01-07', '2023-01-08', '2022-01-01', '2022-01-02',
+    '2022-12-31', '2024-02-29', '2026-03-31T23:50:00+02:00', '2026-04-01T00:20:00+02:00',
+  ].map(K));
+  // Multi: a request with two reports from one lab (the code in two spellings) is one row, with the earliest date of each column.
+  both('Multi', 'ZMU', [
+    { r: '05-08', a: '05-12', reports: [{ s: '05-04', v: '05-06', u: '05-14' }, { code: 'zmu ', s: '05-04', v: '05-06', u: '05-14' }] },
+    D('05-04', '05-12', '05-08', '05-12', '05-14'),
+  ]);
+  // Fold: two reports with different dates, the earliest in the second one: collection 10 May and received 22 May (the first report has 20 and 30 May).
+  both('Fold', 'ZFD', [{ r: '05-25', a: '05-26', reports: [{ s: '05-20', v: '05-30', u: '05-28' }, { s: '05-10', v: '05-22' }] }]);
+  // Two: one request with reports from two labs. Each lab has the request (in the province world it is one request).
+  both('Two', 'ZTW', [{ r: '05-08', a: '05-10', reports: [{ code: 'ZTW1', display: 'Two One', s: '05-04', u: '05-12' }, { code: 'ZTW2', display: 'Two Two', v: '05-06', u: '05-12' }] }]);
+  // Dup: one request number on three rows (one in another case with a trailing space) and one with no number. Every row counts (CR 1, 3, 8, 13).
+  both('Dup', 'ZDP', [
+    D('05-10', '05-11', '05-12', '05-13', '05-15', { rid: 'T29B-DUP', obr: 1 }),
+    D('05-08', '05-11', '05-12', '05-13', '05-15', { rid: 'T29B-DUP', obr: 2 }),
+    D('05-03', '05-11', '05-12', '05-13', '05-15', { rid: 't29b-dup ', obr: 3 }),
+    D('04-28', '05-11', '05-12', '05-13', '05-15', { rid: null, obr: 4 }),
+  ]);
+  // Shared: two labs (two provinces) with one name in other spellings: one row.
+  both('Shared', 'ZGH', [
+    D('05-04', '05-05', '05-11', '05-12', '05-14'),
+    D('05-04', '05-09', '05-11', '05-12', '05-14', { code: 'ZEF', display: 'shared lab ', fac2: true }),
+  ], { region2: 'shared province ' });
+  // Names (lab world): one lab, three names on its reports; one name for the lab (not the code, then the smallest in byte order).
+  both('Names', 'ZNC', [
+    D('05-04', '05-05', '05-11', '05-12', '05-14', { display: 'Name B' }),
+    D('05-04', '05-06', '05-11', '05-12', '05-14', { display: 'Name A' }),
+    D('05-04', '05-10', '05-11', '05-12', '05-14', { display: null }),
+  ], { worlds: 'l' });
+  // Zulu (lab world): a code that sorts before its name is still shown by its name.
+  both('Zulu', 'AAB', [
+    D('05-04', '05-06', '05-11', '05-12', '05-14', { display: 'Zulu Lab' }),
+    D('05-04', '05-08', '05-11', '05-12', '05-14', { display: null }),
+  ], { worlds: 'l' });
+  // Mapped (lab world): no display name on the report: the register name of the code.
+  fmap('l', 'ZMP', 'Lusaka', 'Lusaka', 'Mapped Lab Name');
+  both('Mapped', 'ZMP', [D('05-04', '05-05', '05-11', '05-12', '05-14', { display: null })], { worlds: 'l' });
+  // NoLab (lab world): no report, a blank code, no code. LabList cannot match these (inner join): none is in any result.
+  both('NoLab', 'ZNL', [
+    D('05-04', '05-05', '05-11', '05-12', '05-14', { report: false }),
+    D('05-04', '05-05', '05-11', '05-12', '05-14', { code: '   ', display: 'Blank Lab' }),
+    D('05-04', '05-05', '05-11', '05-12', '05-14', { code: null, display: 'No Code Lab' }),
+  ], { worlds: 'l' });
+  // Province world only: a map row with no register id, a code with no map row, no code, and a region that is NULL.
+  fmap('p', 'ZUNMAP', 'Ghost', 'Ghost', 'Ghost Clinic', false);
+  add('p', D('05-04', '05-05', '05-11', '05-12', '05-14', { fac: 'ZUNMAP' }));
+  add('p', D('05-04', '05-05', '05-11', '05-12', '05-14', { fac: 'ZNOMAP' }));
+  add('p', D('05-04', '05-05', '05-11', '05-12', '05-14', { fac: null }));
+  fmap('p', 'ZNW', null, null, 'Nowhere Clinic');
+  add('p', D('05-04', '05-05', '05-11', '05-12', '05-14', { fac: 'ZNW' }));
+  add('p', D('05-04', '05-07', '05-11', '05-12', '05-14', { fac: 'ZNW' }));
+  // Panel: one request per panel, with registered, analysed and collected dates in different months, so every bucket date shows.
+  // TEL line 42 (HIVPC), TVL line 48 (HIVVL, VIRAL), TL line 41 (no panel filter).
+  const pan = (panel, s, v, r, a, u) => D(s, v, r, a, u, { panel });
+  both('Panel', 'ZPL', [
+    pan('HIVPC', '02-02', '02-03', '03-04', '04-06', '04-08'),
+    pan('HIVVL', '02-10', '02-12', '03-12', '05-04', '05-06'),
+    pan('VIRAL', null, '06-01', '06-03', '06-05', '06-09'),
+    pan('hivpc ', '07-01', '07-02', '07-03', '07-07', '07-10'),
+    pan('viral ', '07-30', '08-05', '08-06', '08-10', '08-11'),
+    pan('HIVST', '09-01', '09-02', '09-04', '09-08', '09-09'),
+    pan(null, '10-01', '10-02', '10-02', '10-05', '10-06'),
+  ]);
+  // Reject: a rejection code that is NULL, '' or spaces is no rejection (v1 `is null or = ''`); 'R1' and 'r2 ' are. The rejected requests
+  // authorise a week later, so they show in the averages.
+  const rj = (panel, rej, v, u) => D('05-04', v, '05-20', '05-21', u, { panel, rej });
+  both('Reject', 'ZRJ', [
+    rj('HIVVL', null, '05-04', '05-22'),
+    rj('HIVVL', '', '05-06', '05-22'),
+    rj('HIVPC', '   ', '05-08', '05-22'),
+    rj('HIVVL', 'R1', '05-14', '05-28'),
+    rj('HIVPC', 'r2 ', '05-24', '05-28'),
+  ]);
+  // Fallback: a missing collection, received or registered date. The province view for all requests falls back (TP lines 25, 27 and 33); the other
+  // views do not. The registered date of the last request is missing: in the lab view it has a NULL bucket.
+  both('Fallback', 'ZFB', [
+    D(null, '05-05', '05-07', '05-11', '05-18', { panel: 'HIVPC' }),
+    D('05-04', null, '05-07', '05-11', '05-18'),
+    D(null, null, '05-07', '05-11', '05-18'),
+    D('05-03', '05-05', null, '05-11', '05-18'),
+  ]);
+  // Month (lab world): VL requests of one month in two weeks and a month of another year, one with no collection date (bucket: registered),
+  // one on an EID panel and one rejected (both out).
+  both('Month', 'ZMO', [
+    D('05-04', '05-05', '05-06', '05-07', '05-14'),
+    D('05-18', '05-19', '05-20', '05-21', '06-02'),
+    D('2025-05-10', '2025-05-11', '2025-05-12', '2025-05-13', '2025-05-13'),
+    D(null, null, '05-21', '05-22', '05-23'),
+    D('05-06', '05-07', '05-08', '05-09', '08-14', { panel: 'HIVPC' }),
+    D('05-07', '05-08', '05-09', '05-10', '06-26', { rej: 'R9' }),
+  ], { worlds: 'l' });
+  // Window: +02:00 and Z stamps at the edges of 10 June. A window applies to the bucket date of the type.
+  both('Window', 'ZWN', [
+    D('2026-06-09T23:30:00+02:00', '06-10', '2026-06-10T00:30:00+02:00', '2026-06-10T11:00:00+02:00', '06-12'),                       // w1
+    D('2026-06-11T00:10:00+02:00', '06-11', '2026-06-11T00:30:00+02:00', '2026-06-11T11:00:00+02:00', '06-13'),                       // w2
+    D('2026-06-10T23:59:59.999Z', '06-11', '2026-06-10T23:59:59.999Z', '2026-06-10T23:59:59.999Z', '06-14'),                           // w3
+    D('06-08', '06-08', '2026-06-09T23:59:59+02:00', '2026-06-09T23:59:59+02:00', '06-11'),                                           // w4
+    D(null, '06-10', '2026-06-10', '06-11', '06-12'),                                                                                 // w5
+    D('2026-06-10T08:00:00Z', null, null, '06-20', '06-21'),                                                                          // w6
+    D('06-01', '06-02', '06-14', '2026-06-10T00:10:00+02:00', '06-15', { panel: 'HIVPC' }),                                           // w7
+    D('06-01', '06-02', '06-10', '2026-06-09T23:50:00+02:00', '06-15', { panel: 'HIVPC' }),                                           // w8
+    D('2026-06-10T22:30:00Z', '06-11', '06-12', '06-13', '06-16'),                                                                    // w9
+  ]);
+  // Apple: a name that starts with a small letter sorts first in SQL Server (case ignored), after the capitals in byte order.
+  both('apple', 'ZAP', [D('05-04', '05-08', '05-11', '05-13', '05-20')]);
+  // Empty: no date at all. A group whose five averages are all NULL.
+  both('Empty', 'ZEM', [D(null, null, null, null, null)]);
+
+  const setup = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ${fm.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, obr_set_id, rejection_code) values
+  ${reqRows.join(',\n  ')};
+insert into specimens (id, received_time) values
+  ${specRows.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, effective, issued, performer, performer_display, specimen_id) values
+  ${repRows.join(',\n  ')};`;
+
+  // ---- The model: the result v1 gives for the rows of a world ----
+  const co = (...xs) => xs.find((x) => x !== null && x !== undefined) ?? null;
+  const dd = (a, b) => (a === null || b === null ? null : daysBetween(a, b));    // datediff(d, a, b)
+  const blank = (x) => x === null || x === undefined || x.replace(/ +$/, '') === '';
+  // The rows v1 reads, with each date as a day (YYYY-MM-DD) or null.
+  function labRowsOf() {
+    const out = [];
+    for (const r of recs.l) {
+      const byLab = new Map();
+      for (const x of r.reps) {
+        if (blank(x.code)) continue;                       // LabList cannot match a blank or missing code
+        const k = t29fold(x.code);
+        if (!byLab.has(k)) byLab.set(k, []);
+        byLab.get(k).push(x);
+      }
+      for (const [k, list] of byLab) {
+        const names = list.map((x) => {
+          const mapped = regs.l.find((m) => m.code === x.code);
+          const display = x.display !== null && x.display.trim() !== '' ? x.display : null;
+          return display ?? mapped?.name ?? x.code;
+        }).sort((a, b) => ((t29fold(a) === k) - (t29fold(b) === k)) || t29byteCmp(a, b));
+        out.push({
+          panel: r.panel, rej: r.rej, code: list.map((x) => x.code).sort(t29byteCmp)[0], name: names[0],
+          spec: t29min(list.map((x) => x.spec)), recv: t29min(list.map((x) => x.recv)), auth: t29min(list.map((x) => x.auth)),
+          reg: t29day(r.reg), ana: t29day(r.ana),
+        });
+      }
+    }
+    return out;
+  }
+  function provRowsOf() {
+    const out = [];
+    for (const r of recs.p) {
+      const reg = regs.p.find((x) => x.code === r.fac);   // FacilityList: an exact code with a register row
+      if (!reg) continue;
+      out.push({
+        panel: r.panel, rej: r.rej, region: reg.region,
+        spec: t29min(r.reps.map((x) => x.spec)), recv: t29min(r.reps.map((x) => x.recv)), auth: t29min(r.reps.map((x) => x.auth)),
+        reg: t29day(r.reg), ana: t29day(r.ana),
+      });
+    }
+    return out;
+  }
+  // The result of a query: filter, step values, bucket, window, group, average (cut toward zero), order.
+  function modelRows(level, { test_type = '', from = '', to = '' } = {}) {
+    const isLab = level !== 'prov';
+    const t = level === 'month' ? 'vl' : t29fold(test_type);
+    const isAll = t === '' || t === 'all';
+    const today = zmToday();
+    const fb = level === 'prov' && isAll;                  // TP lines 25, 27, 33: only the province view for all requests falls back
+    const rows = (isLab ? labRowsOf() : provRowsOf()).filter((r) => {
+      const p = t29fold(r.panel);
+      const panelOk = isAll || (t === 'eid' && p === 'hivpc') || (t === 'vl' && (p === 'hivvl' || p === 'viral'));
+      const rejected = !blank(r.rej);
+      return panelOk && (level === 'prov' ? (isAll || !rejected) : !rejected);
+    }).map((r) => {
+      let bucket;
+      if (level === 'prov') bucket = r.ana;
+      else if (level === 'month') bucket = co(r.spec, r.reg);
+      else bucket = isAll ? r.reg : t === 'eid' ? r.ana : co(r.spec, r.reg);
+      const steps = [
+        fb ? dd(co(r.spec, r.recv, r.reg), co(r.recv, r.reg)) : dd(r.spec, r.recv),
+        fb ? dd(co(r.recv, r.reg), r.reg) : dd(r.recv, r.reg),
+        dd(r.reg, co(r.ana, today)),
+        dd(r.ana, co(r.auth, today)),
+        fb ? dd(co(r.spec, r.reg), co(r.auth, today)) : dd(r.spec, co(r.auth, today)),
+      ];
+      return { ...r, bucket, steps };
+    }).filter((r) => (from === '' && to === '') || (r.bucket !== null && (from === '' || r.bucket >= from) && (to === '' || r.bucket <= to)));
+    // One name per lab code from the listed rows: a name that is not just the code first, then the smallest in byte order.
+    const labNames = new Map();
+    if (isLab) {
+      const byCode = new Map();
+      for (const r of rows) {
+        const k = t29fold(r.code);
+        if (!byCode.has(k)) byCode.set(k, []);
+        byCode.get(k).push(r.name);
+      }
+      for (const [k, list] of byCode) labNames.set(k, list.sort((a, b) => ((t29fold(a) === k) - (t29fold(b) === k)) || t29byteCmp(a, b))[0]);
+    }
+    const keyOf = (r) => (isLab ? labNames.get(t29fold(r.code)) : r.region);
+    const groups = new Map();
+    for (const r of rows) {
+      const y = r.bucket === null ? null : Number(r.bucket.slice(0, 4));
+      const m = r.bucket === null ? null : Number(r.bucket.slice(5, 7));
+      const parts = level === 'month' ? [y, m] : [y, r.bucket === null ? null : Math.ceil(m / 3), m, r.bucket === null ? null : t29bWeek(r.bucket)];
+      const gk = JSON.stringify([t29fold(keyOf(r)), ...parts]);
+      if (!groups.has(gk)) groups.set(gk, { parts, list: [] });
+      groups.get(gk).list.push(r);
+    }
+    const avg = (list, i) => {
+      const xs = list.map((r) => r.steps[i]).filter((x) => x !== null);
+      return xs.length === 0 ? null : Math.trunc(xs.reduce((a, b) => a + b, 0) / xs.length);
+    };
+    const out = [];
+    for (const { parts, list } of groups.values()) {
+      const keys = list.map(keyOf).filter((x) => x !== null && x !== undefined).sort(t29byteCmp);
+      const key = keys.length === 0 ? null : keys[0];
+      const steps = [0, 1, 2, 3, 4].map((i) => avg(list, i));
+      if (level === 'month') out.push({ Year: parts[0], Month: parts[1], LabFacility: key, TATTotal: steps[4] });
+      else out.push({ [T29B_COLUMNS[level][0]]: key, Year: parts[0], Quarter: parts[1], Month: parts[2], Week: parts[3], ...Object.fromEntries(T29B_STEPS.map((c, i) => [c, steps[i]])) });
+    }
+    const cols = T29B_COLUMNS[level];
+    return out.sort((a, b) => {
+      if (level === 'month') return t29bNum(a.Year, b.Year) || t29bNum(a.Month, b.Month) || t29textCmp(a.LabFacility, b.LabFacility) || t29bNum(a.TATTotal, b.TATTotal);
+      return t29textCmp(a[cols[0]], b[cols[0]]) || cols.slice(1).reduce((d, c) => d || t29bNum(a[c], b[c]), 0);
+    });
+  }
+
+  // ---- Suites ----
+  const isolate = (w) => ['diagnostic_reports', 'specimens', 'lab_requests', 'facility_map'].map((t) => `delete from ${t} where id not like '${P}${w}-%';`).join('\n');
+  const WORLD = { lab: 'l', prov: 'p', month: 'l' };
+  let sp = 0;
+  const NONE = { test_type: '', from: '', to: '' };
+  function listSuite(name, level, params, wanted, { where, before = '' } = {}) {
+    const q = t29bquery(Q29B[level]);
+    const text = q && where ? `select z.* from (${q.sql}) z where ${where}` : (q?.sql ?? 'select null::text as "x"');
+    const s = orderedSuite(name, text, { ...NONE, ...params }, T29B_COLUMNS[level], wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${Q29B[level]}" is missing`, ...check(got)];
+    }
+    sp += 1;
+    s.sql = `savepoint t29bsp${sp};\n${isolate(WORLD[level])}\n${before}\n${s.sql}\nrollback to savepoint t29bsp${sp};`;
+    return s;
+  }
+  const modelSuite = (name, level, params = {}) => listSuite(name, level, params, modelRows(level, params));
+  function valueSuite(name, level, selectExpr, want) {
+    const q = t29bquery(Q29B[level]);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${Q29B[level]}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t29bsp${sp};\n${isolate(WORLD[level])}\nselect ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;\nrollback to savepoint t29bsp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  const BANNED = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
+  const shape = (name, level, wantIds, wantTypes) => ({
+    name,
+    count: 2 + 2 * wantIds.length,
+    check() {
+      const q = t29bquery(Q29B[level]);
+      if (!q) return [`query "${Q29B[level]}" is missing`];
+      const bad = [];
+      const ids = q.params.map((p) => p.id);
+      if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}, got ${ids}`);
+      q.params.forEach((p, i) => {
+        if (p.required !== false) bad.push(`${p.id}: v1 has no required input, so it must be optional`);
+        if (p.type !== wantTypes[i]) bad.push(`${p.id}: expected type ${wantTypes[i]}, got ${p.type}`);
+      });
+      if (BANNED.test(q.sql.replace(/'(?:[^']|'')*'/g, "''"))) bad.push('banned word or comment marker');
+      if (!/^\s*with\b/i.test(q.sql)) bad.push('does not start with "with"');
+      return bad;
+    },
+  });
+  const orderHas = (name, level, needles) => ({
+    name,
+    count: needles.length,
+    check() {
+      const q = t29bquery(Q29B[level]);
+      if (!q) return [`query "${Q29B[level]}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      return needles.filter((x) => !tail.includes(x)).map((x) => `ORDER BY must list ${x}`);
+    },
+  });
+  const optionsAre = (name, level, words) => ({
+    name,
+    count: 1,
+    check() {
+      const p = t29bquery(Q29B[level])?.params.find((x) => x.id === 'test_type');
+      if (!p || !p.optionsSql) return ['test_type has no optionsSql'];
+      const got = [...p.optionsSql.matchAll(/'([^']*)'/g)].map((m) => m[1]);
+      return JSON.stringify(got) === JSON.stringify(words) ? [] : [`expected options ${JSON.stringify(words)}, got ${JSON.stringify(got)}`];
+    },
+  });
+
+  // ---- Hand rows ----
+  const td = (md) => daysBetween(`2026-${md}`, zmToday());           // days from a May-June 2026 date to today (Zambia)
+  const NAME_COLUMN = { lab: 'LabFacility', prov: 'ProvinceName', month: 'LabFacility' };
+  const hand = (level, name) => `lower(rtrim(z."${NAME_COLUMN[level]}")) = ${lit(name.toLowerCase())}`;
+  const lr = (name, y, q, m, w, steps) => ({ LabFacility: name, Year: y, Quarter: q, Month: m, Week: w, ...Object.fromEntries(T29B_STEPS.map((c, i) => [c, steps[i]])) });
+  const pr = (name, y, q, m, w, steps) => ({ ProvinceName: name, Year: y, Quarter: q, Month: m, Week: w, ...Object.fromEntries(T29B_STEPS.map((c, i) => [c, steps[i]])) });
+  const mo = (y, m, name, total) => ({ Year: y, Month: m, LabFacility: name, TATTotal: total });
+  const L = (id, params, wanted, name, before = '') => listSuite(`t29b-hand-lab-${id}`, 'lab', params, wanted, { where: hand('lab', name), before });
+  const Pv = (id, params, wanted, name, before = '') => listSuite(`t29b-hand-prov-${id}`, 'prov', params, wanted, { where: hand('prov', name), before });
+  const M = (id, params, wanted, name, before = '') => listSuite(`t29b-hand-month-${id}`, 'month', params, wanted, { where: hand('month', name), before });
+  // The session time zone far east and far west of Lusaka: "today" is the Zambian date in both (current_date would not be).
+  const EAST = "set local time zone 'Pacific/Kiritimati';";
+  const WEST = "set local time zone 'Pacific/Pago_Pago';";
+  const EID = { test_type: 'EID' };
+  const VL = { test_type: 'VL' };
+  const W10 = { from: '2026-06-10', to: '2026-06-10' };
+  const W11 = { from: '2026-06-11' };
+  const W09 = { to: '2026-06-09' };
+  const WMAY = { from: '2026-05-01', to: '2026-05-31' };
+  const W2025 = { from: '2025-01-01', to: '2025-12-31' };
+  const unfinishedLab = [lr('Unfinished Lab', 2026, 2, 5, 19, [1, 2, Math.trunc((td('05-07') + 4) / 2), td('05-11'), td('05-04')])];
+  const weekRows = (make) => [
+    make(2022, 1, 1, 1), make(2022, 1, 1, 2), make(2022, 4, 12, 53),
+    make(2023, 1, 1, 1), make(2023, 1, 1, 2),
+    make(2024, 1, 2, 9),
+    make(2025, 4, 12, 53),
+    make(2026, 1, 1, 1), make(2026, 1, 1, 2), make(2026, 1, 3, 14), make(2026, 2, 4, 14), make(2026, 4, 12, 53),
+    make(2027, 1, 1, 1), make(2027, 1, 1, 2),
+  ];
+  const ZERO = [0, 0, 0, 0, 0];
+  const NULLS = [null, null, null, null, null];
+
+  const suites29 = [
+    { name: 't29b-setup', setup, count: 0, check: () => [] },
+    // -- Declared shape --
+    shape('t29b-shape-lab', 'lab', ['test_type', 'from', 'to'], ['select', 'text', 'text']),
+    shape('t29b-shape-prov', 'prov', ['test_type', 'from', 'to'], ['select', 'text', 'text']),
+    shape('t29b-shape-month', 'month', ['from', 'to'], ['text', 'text']),
+    optionsAre('t29b-options-lab', 'lab', ['all', 'EID', 'VL']),
+    optionsAre('t29b-options-prov', 'prov', ['all', 'EID', 'VL']),
+    orderHas('t29b-order-lab', 'lab', ['g.k', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.cr', 'g.rr', 'g.rt', 'g.ta', 'g.tot']),
+    orderHas('t29b-order-prov', 'prov', ['g.k', 'g.y', 'g.qt', 'g.mo', 'g.wk', 'g.cr', 'g.rr', 'g.rt', 'g.ta', 'g.tot']),
+    orderHas('t29b-order-month', 'month', ['g.y', 'g.mo', 'g.k', 'g.tot']),
+    // -- Types: a year, quarter, month, week and each average is an integer (v1: datepart and avg of an int) --
+    valueSuite('t29b-types-lab', 'lab', (s) => `select json_build_object(${T29B_COLUMNS.lab.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+      Object.fromEntries(T29B_COLUMNS.lab.map((c, i) => [c, i === 0 ? 'text' : 'integer']))),
+    valueSuite('t29b-types-prov', 'prov', (s) => `select json_build_object(${T29B_COLUMNS.prov.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+      Object.fromEntries(T29B_COLUMNS.prov.map((c, i) => [c, i === 0 ? 'text' : 'integer']))),
+    valueSuite('t29b-types-month', 'month', (s) => `select json_build_object(${T29B_COLUMNS.month.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(s, NONE)}) q limit 1`,
+      { Year: 'integer', Month: 'integer', LabFacility: 'text', TATTotal: 'integer' }),
+
+    // ===== By hand: lab view =====
+    // The five steps, TL lines 25-33. Registered 11 May: week 20. VL: bucket is the collection date, 4 May: week 19 (TVL line 8).
+    L('step', {}, [lr('Step Lab', 2026, 2, 5, 20, [4, 3, 2, 7, 16])], 'Step Lab'),
+    L('step-vl', VL, [lr('Step Lab', 2026, 2, 5, 19, [4, 3, 2, 7, 16])], 'Step Lab'),
+    L('step-eid', EID, [], 'Step Lab'),
+    // AVG of an int is an int, cut toward zero: 1.5, 1, 1.5, 3.5, 7.5 give 1, 1, 1, 3, 7.
+    L('trunc', {}, [lr('Trunc Lab', 2026, 2, 5, 20, [1, 1, 1, 3, 7])], 'Trunc Lab'),
+    // -1.5, -1.5, 0.5, -2, -4.5 give -1, -1, 0, -2, -4 (never -2, -2, 0, -2, -5).
+    L('negative', {}, [lr('Negative Lab', 2026, 2, 5, 20, [-1, -1, 0, -2, -4])], 'Negative Lab'),
+    // -0.5 gives 0, -1.5 gives -1.
+    L('mixed', {}, [lr('Mixed Lab', 2026, 2, 5, 20, [0, -1, 0, 0, -1])], 'Mixed Lab'),
+    // Unfinished steps are measured to today: registered to tested of the first request (no analysis date), tested to authorised of the second.
+    L('unfinished', {}, unfinishedLab, 'Unfinished Lab'),
+    L('unfinished-vl', VL, unfinishedLab, 'Unfinished Lab'),
+    // Today is the Zambian date whatever the session zone. The rows above cannot tell Lusaka's date from UTC's between 00:00 and 22:00 UTC, so
+    // the next check reads the SQL (as Task 26 does).
+    {
+      name: 't29b-today-lusaka',
+      count: 3,
+      check: () => Object.values(Q29B).filter((nm) => !t29bquery(nm)?.sql.includes("(now() at time zone 'Africa/Lusaka')::date")).map((nm) => `${nm}: today must be (now() at time zone 'Africa/Lusaka')::date`),
+    },
+    L('unfinished-tz-east', {}, unfinishedLab, 'Unfinished Lab', EAST),
+    L('unfinished-tz-west', {}, unfinishedLab, 'Unfinished Lab', WEST),
+    // Not dates: '' and a month give NULL steps, 'garbage' as the authorised date is unfinished (today).
+    L('odd', {}, [lr('Odd Lab', 2026, 2, 5, 20, [null, null, 2, td('05-14'), null])], 'Odd Lab'),
+    L('odd-vl', VL, [lr('Odd Lab', 2026, 2, 5, 20, [null, null, 2, td('05-14'), null])], 'Odd Lab'),
+    // Weeks around 1 January, local dates (a +02:00 stamp stays on its local day). The Sunday 2026-01-04 at 00:30 is week 2.
+    L('week', {}, weekRows((y, q, m, w) => lr('Week Lab', y, q, m, w, ZERO)), 'Week Lab'),
+    // Two reports of one lab are one request: CR 2 and 8 average 5 (counted per report it would be 4).
+    L('multi', {}, [lr('Multi Lab', 2026, 2, 5, 19, [5, -1, 4, 2, 10])], 'Multi Lab'),
+    L('fold', {}, [lr('Fold Lab', 2026, 2, 5, 22, [12, 3, 1, 2, 18])], 'Fold Lab'),
+    L('two-one', {}, [lr('Two One', 2026, 2, 5, 19, [null, null, 2, 2, 8])], 'Two One'),
+    L('two-two', {}, [lr('Two Two', 2026, 2, 5, 19, [null, 2, 2, 2, null])], 'Two Two'),
+    // Four rows on one request number (and one with none) are four rows: CR 1, 3, 8, 13 average 6.25, cut to 6 (7 if the repeated number counted once).
+    L('dup', {}, [lr('Dup Lab', 2026, 2, 5, 20, [6, 1, 1, 2, 10])], 'Dup Lab'),
+    L('shared', {}, [lr('Shared Lab', 2026, 2, 5, 20, [3, 4, 1, 2, 10])], 'Shared Lab'),
+    L('names', {}, [lr('Name A', 2026, 2, 5, 20, [3, 4, 1, 2, 10])], 'Name A'),
+    L('zulu', {}, [lr('Zulu Lab', 2026, 2, 5, 20, [3, 4, 1, 2, 10])], 'Zulu Lab'),
+    L('mapped', {}, [lr('Mapped Lab Name', 2026, 2, 5, 20, [1, 6, 1, 2, 10])], 'Mapped Lab Name'),
+    L('nolab', {}, [], 'Blank Lab'),
+    L('nolab-none', {}, [], 'No Code Lab'),
+    // Panels. TL: no panel filter. TEL: HIVPC, bucket analysed. TVL: HIVVL and VIRAL, bucket collection else registered.
+    L('panel-all', {}, [
+      lr('Panel Lab', 2026, 1, 3, 10, [1, 29, 33, 2, 65]),
+      lr('Panel Lab', 2026, 1, 3, 11, [2, 28, 53, 2, 85]),
+      lr('Panel Lab', 2026, 2, 6, 23, [null, 2, 2, 4, null]),
+      lr('Panel Lab', 2026, 3, 7, 27, [1, 1, 4, 3, 9]),
+      lr('Panel Lab', 2026, 3, 8, 32, [6, 1, 4, 1, 12]),
+      lr('Panel Lab', 2026, 3, 9, 36, [1, 2, 4, 1, 8]),
+      lr('Panel Lab', 2026, 4, 10, 40, [1, 0, 3, 1, 5]),
+    ], 'Panel Lab'),
+    L('panel-eid', EID, [
+      lr('Panel Lab', 2026, 2, 4, 15, [1, 29, 33, 2, 65]),
+      lr('Panel Lab', 2026, 3, 7, 28, [1, 1, 4, 3, 9]),
+    ], 'Panel Lab'),
+    L('panel-vl', VL, [
+      lr('Panel Lab', 2026, 1, 2, 7, [2, 28, 53, 2, 85]),
+      lr('Panel Lab', 2026, 2, 6, 23, [null, 2, 2, 4, null]),
+      lr('Panel Lab', 2026, 3, 7, 31, [6, 1, 4, 1, 12]),
+    ], 'Panel Lab'),
+    // Rejected requests (a code that is not blank) are out of every lab view. The three kept ones average CR 2 and RR 14.
+    L('reject-all', {}, [lr('Reject Lab', 2026, 2, 5, 21, [2, 14, 1, 1, 18])], 'Reject Lab'),
+    L('reject-eid', EID, [lr('Reject Lab', 2026, 2, 5, 21, [4, 12, 1, 1, 18])], 'Reject Lab'),
+    L('reject-vl', VL, [lr('Reject Lab', 2026, 2, 5, 19, [1, 15, 1, 1, 18])], 'Reject Lab'),
+    // No fallbacks in the lab views. The request with no registered date has a NULL bucket in the all view (first row).
+    L('fallback-all', {}, [
+      lr('Fallback Lab', null, null, null, null, [2, null, null, 7, 15]),
+      lr('Fallback Lab', 2026, 2, 5, 19, [null, 2, 4, 7, 14]),
+    ], 'Fallback Lab'),
+    L('fallback-eid', EID, [lr('Fallback Lab', 2026, 2, 5, 20, [null, 2, 4, 7, null])], 'Fallback Lab'),
+    L('fallback-vl', VL, [lr('Fallback Lab', 2026, 2, 5, 19, [2, null, 4, 7, 14])], 'Fallback Lab'),
+    // A group with nothing to average: five NULLs, not 0 and not an error.
+    L('empty', {}, [lr('Empty Lab', null, null, null, null, NULLS)], 'Empty Lab'),
+    L('empty-vl', VL, [lr('Empty Lab', null, null, null, null, NULLS)], 'Empty Lab'),
+    L('empty-eid', EID, [], 'Empty Lab'),
+    // Window on the bucket date, local days: registered for all. Four requests are registered on 10 June.
+    L('window10', W10, [lr('Window Lab', 2026, 2, 6, 24, [1, 1, 0, 3, 7])], 'Window Lab'),
+    L('window10-eid', { ...W10, ...EID }, [lr('Window Lab', 2026, 2, 6, 24, [1, 12, -4, 5, 14])], 'Window Lab'),
+
+    // ===== By hand: province view =====
+    Pv('step', {}, [pr('Step Province', 2026, 2, 5, 20, [4, 3, 2, 7, 16])], 'Step Province'),
+    Pv('step-vl', VL, [pr('Step Province', 2026, 2, 5, 20, [4, 3, 2, 7, 16])], 'Step Province'),
+    Pv('step-eid', EID, [], 'Step Province'),
+    Pv('trunc', {}, [pr('Trunc Province', 2026, 2, 5, 20, [1, 1, 1, 3, 7])], 'Trunc Province'),
+    Pv('negative', {}, [pr('Negative Province', 2026, 2, 5, 20, [-1, -1, 0, -2, -4])], 'Negative Province'),
+    Pv('mixed', {}, [pr('Mixed Province', 2026, 2, 5, 20, [0, -1, 0, 0, -1])], 'Mixed Province'),
+    // The bucket is the analysed date: the request with none has a NULL bucket (first row).
+    Pv('unfinished', {}, [
+      pr('Unfinished Province', null, null, null, null, [1, 2, td('05-07'), null, td('05-04')]),
+      pr('Unfinished Province', 2026, 2, 5, 20, [1, 2, 4, td('05-11'), td('05-04')]),
+    ], 'Unfinished Province'),
+    Pv('unfinished-tz-east', {}, [
+      pr('Unfinished Province', null, null, null, null, [1, 2, td('05-07'), null, td('05-04')]),
+      pr('Unfinished Province', 2026, 2, 5, 20, [1, 2, 4, td('05-11'), td('05-04')]),
+    ], 'Unfinished Province', EAST),
+    Pv('unfinished-tz-west', {}, [
+      pr('Unfinished Province', null, null, null, null, [1, 2, td('05-07'), null, td('05-04')]),
+      pr('Unfinished Province', 2026, 2, 5, 20, [1, 2, 4, td('05-11'), td('05-04')]),
+    ], 'Unfinished Province', WEST),
+    // The province view for all requests falls back: no collection date and a month as received date give 0 days, and the total starts at
+    // the registered date. EID and VL do not.
+    Pv('odd', {}, [pr('Odd Province', 2026, 2, 5, 20, [0, 0, 2, td('05-14'), td('05-12')])], 'Odd Province'),
+    Pv('odd-vl', VL, [pr('Odd Province', 2026, 2, 5, 20, [null, null, 2, td('05-14'), null])], 'Odd Province'),
+    Pv('week', {}, weekRows((y, q, m, w) => pr('Week Province', y, q, m, w, ZERO)), 'Week Province'),
+    Pv('multi', {}, [pr('Multi Province', 2026, 2, 5, 20, [5, -1, 4, 2, 10])], 'Multi Province'),
+    Pv('fold', {}, [pr('Fold Province', 2026, 2, 5, 22, [12, 3, 1, 2, 18])], 'Fold Province'),
+    Pv('two', {}, [pr('Two Province', 2026, 2, 5, 20, [2, 2, 2, 2, 8])], 'Two Province'),
+    Pv('dup', {}, [pr('Dup Province', 2026, 2, 5, 20, [6, 1, 1, 2, 10])], 'Dup Province'),
+    Pv('shared', {}, [pr('Shared Province', 2026, 2, 5, 20, [3, 4, 1, 2, 10])], 'Shared Province'),
+    listSuite('t29b-hand-prov-nowhere', 'prov', {}, [pr(null, 2026, 2, 5, 20, [2, 5, 1, 2, 10])], { where: 'z."ProvinceName" is null' }),
+    Pv('ghost', {}, [], 'Ghost'),
+    // Panels. The bucket is the analysed date for every type. Only the all view falls back (the VIRAL request has no collection date).
+    Pv('panel-all', {}, [
+      pr('Panel Province', 2026, 2, 4, 15, [1, 29, 33, 2, 65]),
+      pr('Panel Province', 2026, 2, 5, 19, [2, 28, 53, 2, 85]),
+      pr('Panel Province', 2026, 2, 6, 23, [0, 2, 2, 4, 6]),
+      pr('Panel Province', 2026, 3, 7, 28, [1, 1, 4, 3, 9]),
+      pr('Panel Province', 2026, 3, 8, 33, [6, 1, 4, 1, 12]),
+      pr('Panel Province', 2026, 3, 9, 37, [1, 2, 4, 1, 8]),
+      pr('Panel Province', 2026, 4, 10, 41, [1, 0, 3, 1, 5]),
+    ], 'Panel Province'),
+    Pv('panel-eid', EID, [
+      pr('Panel Province', 2026, 2, 4, 15, [1, 29, 33, 2, 65]),
+      pr('Panel Province', 2026, 3, 7, 28, [1, 1, 4, 3, 9]),
+    ], 'Panel Province'),
+    Pv('panel-vl', VL, [
+      pr('Panel Province', 2026, 2, 5, 19, [2, 28, 53, 2, 85]),
+      pr('Panel Province', 2026, 2, 6, 23, [null, 2, 2, 4, null]),
+      pr('Panel Province', 2026, 3, 8, 33, [6, 1, 4, 1, 12]),
+    ], 'Panel Province'),
+    // The province view for all requests keeps rejected requests (TP has no where); EID and VL drop them (TEP line 43, TVP line 44).
+    Pv('reject-all', {}, [pr('Reject Province', 2026, 2, 5, 21, [7, 8, 1, 3, 20])], 'Reject Province'),
+    Pv('reject-eid', EID, [pr('Reject Province', 2026, 2, 5, 21, [4, 12, 1, 1, 18])], 'Reject Province'),
+    Pv('reject-vl', VL, [pr('Reject Province', 2026, 2, 5, 21, [1, 15, 1, 1, 18])], 'Reject Province'),
+    // The fallbacks of TP lines 25, 27 and 33, the three columns with a coalesce. All: 1.25, 0.67, 4, 7, 12.75 cut to 1, 0, 4, 7, 12.
+    Pv('fallback-all', {}, [pr('Fallback Province', 2026, 2, 5, 20, [1, 0, 4, 7, 12])], 'Fallback Province'),
+    Pv('fallback-eid', EID, [pr('Fallback Province', 2026, 2, 5, 20, [null, 2, 4, 7, null])], 'Fallback Province'),
+    Pv('fallback-vl', VL, [pr('Fallback Province', 2026, 2, 5, 20, [2, null, 4, 7, 14])], 'Fallback Province'),
+    Pv('empty', {}, [pr('Empty Province', null, null, null, null, NULLS)], 'Empty Province'),
+    Pv('empty-eid', EID, [], 'Empty Province'),
+    // Window on the analysed date. 10 June: three requests; the averages -1.33 and 3.67 cut to -1 and 3.
+    Pv('window10', W10, [pr('Window Province', 2026, 2, 6, 24, [1, 3, -1, 3, 7])], 'Window Province'),
+    Pv('window10-eid', { ...W10, ...EID }, [pr('Window Province', 2026, 2, 6, 24, [1, 12, -4, 5, 14])], 'Window Province'),
+    Pv('window10-vl', { ...W10, ...VL }, [pr('Window Province', 2026, 2, 6, 24, [1, 0, 0, 3, 3])], 'Window Province'),
+
+    // ===== By hand: month view =====
+    // TM: year, month, lab, total. May 2026 holds two weeks (10 and 15 days average 12.5, cut to 12); the request with no collection date
+    // is in the month of its registered date but has no total; the EID request and the rejected one are out.
+    M('month', {}, [mo(2025, 5, 'Month Lab', 3), mo(2026, 5, 'Month Lab', 12)], 'Month Lab'),
+    M('panel', {}, [mo(2026, 2, 'Panel Lab', 85), mo(2026, 6, 'Panel Lab', null), mo(2026, 7, 'Panel Lab', 12)], 'Panel Lab'),
+    M('reject', {}, [mo(2026, 5, 'Reject Lab', 18)], 'Reject Lab'),
+    M('fallback', {}, [mo(2026, 5, 'Fallback Lab', 14)], 'Fallback Lab'),
+    M('step', {}, [mo(2026, 5, 'Step Lab', 16)], 'Step Lab'),
+    // The month view also runs to today for a request not yet authorised: the total of the two Unfinished requests (collected 4 May).
+    M('unfinished', {}, [mo(2026, 5, 'Unfinished Lab', td('05-04'))], 'Unfinished Lab'),
+    M('unfinished-tz-east', {}, [mo(2026, 5, 'Unfinished Lab', td('05-04'))], 'Unfinished Lab', EAST),
+    M('unfinished-tz-west', {}, [mo(2026, 5, 'Unfinished Lab', td('05-04'))], 'Unfinished Lab', WEST),
+    M('empty', {}, [mo(null, null, 'Empty Lab', null)], 'Empty Lab'),
+    M('window2025', W2025, [mo(2025, 5, 'Month Lab', 3)], 'Month Lab'),
+    M('windowmay', WMAY, [mo(2026, 5, 'Month Lab', 12)], 'Month Lab'),
+
+    // ===== Whole results against the model =====
+    ...['', 'all', 'All  ', 'EID', 'eid ', 'Eid', 'VL', 'vl', ' VL', 'TB', 'viral'].flatMap((tt, i) => [
+      modelSuite(`t29b-lab-type-${i}`, 'lab', { test_type: tt }),
+      modelSuite(`t29b-prov-type-${i}`, 'prov', { test_type: tt }),
+    ]),
+    ...[['w10', W10], ['w11', W11], ['w09', W09], ['wmay', WMAY], ['w2025', W2025]].flatMap(([label, w]) => [
+      ...['', 'EID', 'VL'].map((tt) => modelSuite(`t29b-lab-${label}-${tt || 'all'}`, 'lab', { ...w, test_type: tt })),
+      ...['', 'EID', 'VL'].map((tt) => modelSuite(`t29b-prov-${label}-${tt || 'all'}`, 'prov', { ...w, test_type: tt })),
+      modelSuite(`t29b-month-${label}`, 'month', w),
+    ]),
+    modelSuite('t29b-month-all', 'month'),
+  ];
+  return { name: 't29b', suites: suites29, probe: { labRowsOf, provRowsOf, modelRows } };
+}
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27(), group28(), group29a(), group29b()];

@@ -551,6 +551,8 @@ export const localDate = (x) => `(case when ${x} ~ ${DATE_START} then left(${x},
 export const localTs = (x) => `coalesce(substring(${x} from '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?)')::timestamp, ${localDate(x)}::timestamp)`;
 /** SQL for a UTC timestamp of a full stamp (NULL otherwise), for hour differences; the offsets are fixed whole hours. */
 export const utcTs = (x) => `(case when ${x} ~ ${FULL_STAMP} then ${x}::timestamptz at time zone 'UTC' end)`;
+/** SQL for today's date in Zambia, v1's getdate() (the clock of Zambia's SQL Server). Not current_date, which follows the session zone. */
+export const TODAY_ZM = `(now() at time zone 'Africa/Lusaka')::date`;
 
 // The age bands of the hivvl and tbgnx copy tables (HIVVL lines 56-70, sp_getTBsLastHour lines 35-49):
 // '<01', '01-04', ... '45-49', '50+'. Not the dbo.Agegroup of the other reports (ageGroupSql). A negative or

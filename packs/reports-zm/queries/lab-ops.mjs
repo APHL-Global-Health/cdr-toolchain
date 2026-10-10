@@ -3,7 +3,7 @@
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
-  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, tbgnxCte, testedAtSql, testingCodeSql,
+  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql,
 } from '../zm-sql.mjs';
 import { labMonthSource, rateCutSql } from './vl.mjs';
 
@@ -469,7 +469,6 @@ const D_EXCLUDED = ['ZXZ', 'ZZZ', 'MZM', 'MNC', 'XXX', 'ZNA', 'ZNC', 'ZLA', '005
   'MDR', 'ZCX', 'ZLX', 'ZMR', '094', '095', '068', '108', '001', '015', '073', '054', '009', '055', '091', '128', '131', '153', '154', '155',
   '125', '132', '161', '074', '026', '115', '097'];
 const PREREG = 'prereg-registration-facility';
-const TODAY_ZM = `(now() at time zone 'Africa/Lusaka')::date`;
 
 // The final select and ORDER BY over `res`, whose columns are c01, c02, ... in output order. `kinds`: 'text' or 'number'. `orderIdx`: the
 // indexes of the columns in ORDER BY order (default: output order), all of them.
@@ -1438,6 +1437,157 @@ export const labCompletenessSql = () => completenessSql({ level: 'lab', panels: 
 export const labFacilityCompletenessSql = () => completenessSql({ level: 'labfacility', panels: 'required', labels: ['LabFacility'] });
 export const labAreaCompletenessSql = () => completenessSql({ level: 'labarea', panels: null, labels: ['LabName'] });
 
+// ---- Turnaround times (Task 29b) ----
+//
+// Replaces seven v1 views, which fall into three column sets (the Task 10, 24 and 29a ruling: the column set decides the query count):
+//   Turnaround times by lab       vTATLab (TL), vTATEIDLab (TEL), vTATVLoadLab (TVL)      LabFacility, Year, Quarter, Month, Week + 5 steps
+//   Turnaround times by province  vTATProvince (TP), vTATEIDProvince (TEP), vTATVLoadProvince (TVP)   ProvinceName, Year, Quarter, Month, Week + 5 steps
+//   VL turnaround by month        vTATVLoadLabMonth (TM)                                  Year, Month, LabFacility, TATTotal
+// One local helper, tatSql, builds all three. A `test_type` parameter (all, EID, VL; blank is all) switches the real differences of the views
+// of one column set together:
+//
+//                      lab: all (TL)       lab: EID (TEL)      lab: VL (TVL)               province: all (TP)   province: EID (TEP)   province: VL (TVP)
+//   panel              any (also NULL)     HIVPC (TEL 42)      HIVVL, VIRAL (TVL 48)       any                  HIVPC (TEP 43)        HIVVL, VIRAL (TVP 44)
+//   rejected requests  out (TL 41)         out                 out                         IN (no where)        out                   out
+//   bucket date        registered          analysed            collection, else registered analysed             analysed              analysed
+//   missing dates      no fallback         no fallback         no fallback                 fallbacks (TP 25, 27, 33)   none           none
+//
+// The month view is the VL lab view reduced to the total, grouped by year and month only (TM 25-28, 38, 53-56): no test_type, no weeks.
+//
+// Steps (TL 25-33; each is AVG of an integer DATEDIFF(d), so SQL Server cuts the average toward zero to a whole number, measured on the
+// local SQL Server: AVG of -1 and -2 is -1, of -7, -8, -8 is -7, of -3 and 1 is -1; the port does sum / count in integers, which cuts the same):
+//   TATCollectedReceived   received - collection         TP 25: coalesce(collection, coalesce(received, registered)) to coalesce(received, registered)
+//   TATReceivedRegistered  registered - received         TP 27: coalesce(received, registered) to registered
+//   TATRegisteredTested    coalesce(analysed, today) - registered
+//   TATTestedAuthorized    coalesce(authorised, today) - analysed
+//   TATTotal               coalesce(authorised, today) - collection     TP 33: from coalesce(collection, registered)
+// DATEDIFF(d) counts date boundaries on LOCAL dates (a stamp's own first ten characters, so a +02:00 stamp stays on its day). A step with a
+// NULL end is NULL and AVG skips it; a group with nothing to average gives NULL, not 0. An unfinished step runs to "today", v1's getdate(),
+// the Zambian date (TODAY_ZM, as Task 26). A stamp that is not a date ('', '2026-07', 'garbage') is NULL, as a v1 datetime column cannot hold it.
+// Year, Quarter, Month and Week are DATEPART of the bucket date; Week is the US week (dateWeekSql: Sunday first, week 1 holds 1 January).
+// A request with no bucket date is a group of its own with NULL Year, Quarter, Month and Week (SQL Server groups NULLs together).
+//
+// Rows. One row per request row: a request with two reports in one lab is one row (the earliest date of each column among its reports), a
+// request with reports from two labs counts for each lab (v1 has one testing code per row). Province level: one row per request, the
+// earliest date of each column among its reports. The same request number on two rows is two rows; a NULL request number is a row.
+//
+// Joins (CE gaps, ruling 7):
+//   - FacilityList is the ZMFAC register mapping (requesterJoin, an exact code). A request whose requester is not mapped to a register row
+//     is out (v1's inner join). ProvinceName is the mapped row's region; groups fold case and trailing spaces (SQL Server's collation) and
+//     show the smaller spelling in byte order. A NULL region is one NULL group.
+//   - LabList is not in the script. The lab is the report's performer (cdr: OPENLDR_LAB_CODE, v2-transform.ts:401); LabFacility is the lab's
+//     register name from the shared labNamesCte (one name per code, the Task 16 rule), chosen among the rows the view lists. A blank or
+//     missing performer, or a request with no report, is in no row. Two codes with one name are one row.
+//   - The VL views fall back to ReceivingFacilityCode when TestingFacilityCode is '' (TVL 42-46, TM 44-48). CE has no receiving code, so such
+//     a request has no lab and is left out. The lab views therefore lose those requests; v1 would count them for the receiving lab.
+//
+// Window (ruling 5): v1 has none. `from` and `to` are optional (blank is all history), YYYY-MM-DD, on the local date of the view's bucket
+// date (optionalWindowSql); a request with no bucket date is out as soon as one side is given. The date parameters are not validated here.
+//
+// Rejected: a rejection code that is not blank (rtrim length above 0). NULL, '' and spaces are not rejections (TL 41: is null or = '').
+// Order: v1 has none; the port orders by every output column (name in SQL Server's text order, then the rest, NULL first), so CE can page.
+const TAT_EID = ['HIVPC'];
+const TAT_VL = ['HIVVL', 'VIRAL'];
+const TAT_STEPS = ['cr', 'rr', 'rt', 'ta', 'tot'];
+// AVG of an integer: sum and count are integers, the division cuts toward zero. NULL when there is nothing to average.
+const avgDays = (x) => `(sum(${x}) / nullif(count(${x}), 0))::int`;
+
+function tatSql({ level }) {
+  const isLab = level !== 'province';
+  const isMonth = level === 'month';
+  // The month view is the VL view: no test_type.
+  const t = foldSql('{{param.test_type}}');
+  const isAll = `${t} in ('', 'all')`;
+  const panel = isMonth
+    ? inListSql('lr.panel_code', TAT_VL)
+    : `(${isAll} or (${t} = 'eid' and ${inListSql('lr.panel_code', TAT_EID)}) or (${t} = 'vl' and ${inListSql('lr.panel_code', TAT_VL)}))`;
+  const notRejected = `not coalesce(${rejectedSql('lr.rejection_code')}, false)`;
+  const rejectionOk = level === 'province' ? `(${isAll} or ${notRejected})` : notRejected;
+  const rows = isLab
+    ? `rr as (
+  select lr.id as row_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name,
+    ${localDate('dr.effective')} as spec, ${localDate('s.received_time')} as recv, ${localDate('dr.issued')} as auth,
+    ${localDate('lr.authored_at')} as reg, ${localDate('lr.analysis_at')} as ana
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${panel} and ${rejectionOk}
+),
+rq as (
+  select r.row_id, min(r.code collate "C") as code,
+    (array_agg(r.report_name order by ${foldSql('r.report_name')} = ${foldSql('r.code')}, r.report_name collate "C"))[1] as report_name,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.auth) as auth, min(r.reg) as reg, min(r.ana) as ana
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
+)`
+    : `rq as (
+  select lr.id as row_id, fmr.region as k,
+    (select min(${localDate('d.effective')}) from diagnostic_reports d where d.based_on_id = lr.id) as spec,
+    (select min(${localDate('x.received_time')}) from diagnostic_reports d join specimens x on x.id = d.specimen_id where d.based_on_id = lr.id) as recv,
+    (select min(${localDate('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth,
+    ${localDate('lr.authored_at')} as reg, ${localDate('lr.analysis_at')} as ana
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  where ${panel} and ${rejectionOk}
+)`;
+  // The bucket date of each view (TL 21-24, TEL 22-25, TVL 24-27, TP 21-24, TM 25-27).
+  const bucket = level === 'province' ? 'q.ana'
+    : isMonth ? 'coalesce(q.spec, q.reg)'
+      : `case when ${isAll} then q.reg when ${t} = 'eid' then q.ana else coalesce(q.spec, q.reg) end`;
+  // The province view for all requests falls back where a date is missing (TP 25, 27, 33); every other view takes the dates as they are.
+  const fallback = (withFallback, plain) => (level === 'province' ? `case when ${isAll} then ${withFallback} else ${plain} end` : plain);
+  const steps = {
+    cr: fallback('coalesce(q.recv, q.reg) - coalesce(q.spec, q.recv, q.reg)', 'q.recv - q.spec'),
+    rr: fallback('q.reg - coalesce(q.recv, q.reg)', 'q.reg - q.recv'),
+    rt: `coalesce(q.ana, ${TODAY_ZM}) - q.reg`,
+    ta: `coalesce(q.auth, ${TODAY_ZM}) - q.ana`,
+    tot: fallback(`coalesce(q.auth, ${TODAY_ZM}) - coalesce(q.spec, q.reg)`, `coalesce(q.auth, ${TODAY_ZM}) - q.spec`),
+  };
+  const used = isMonth ? ['tot'] : TAT_STEPS;
+  const calc = `calc as (
+  select q.*, ${bucket} as bucket, ${used.map((c) => `${steps[c]} as ${c}`).join(',\n    ')}
+  from rq q
+),
+sel as (
+  select c.*, extract(year from c.bucket)::int as y, extract(quarter from c.bucket)::int as qt, extract(month from c.bucket)::int as mo,
+    ${dateWeekSql('c.bucket')} as wk
+  from calc c
+  where ${optionalWindowSql("to_char(c.bucket, 'YYYY-MM-DD')")}
+)`;
+  const nameCtes = isLab ? `,
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()}` : '';
+  const keyExpr = isLab ? 'n.lab_name' : 'c.k';
+  const parts = isMonth ? ['c.y', 'c.mo'] : ['c.y', 'c.qt', 'c.mo', 'c.wk'];
+  const grouped = `g as (
+  select min(${keyExpr} collate "C") as k, ${parts.map((p) => `${p}`).join(', ')}, ${used.map((c) => `${avgDays(`c.${c}`)} as ${c}`).join(', ')}
+  from sel c${isLab ? `\n  join names n on n.code_key = ${foldSql('c.code')}` : ''}
+  group by ${foldSql(keyExpr)}, ${parts.join(', ')}
+)`;
+  const keyOrder = `${ssTextKey('g.k')} collate "C" nulls first, g.k collate "C" nulls first`;
+  const partOrder = isMonth ? ['g.y', 'g.mo'] : ['g.y', 'g.qt', 'g.mo', 'g.wk'];
+  const stepOrder = used.map((c) => `g.${c}`);
+  const order = (isMonth ? [...partOrder, keyOrder, ...stepOrder] : [keyOrder, ...partOrder, ...stepOrder])
+    .map((x) => (x.includes('nulls first') ? x : `${x} nulls first`));
+  const select = isMonth
+    ? 'g.y as "Year", g.mo as "Month", g.k as "LabFacility", g.tot as "TATTotal"'
+    : `g.k as "${level === 'province' ? 'ProvinceName' : 'LabFacility'}", g.y as "Year", g.qt as "Quarter", g.mo as "Month", g.wk as "Week", g.cr as "TATCollectedReceived", g.rr as "TATReceivedRegistered", g.rt as "TATRegisteredTested", g.ta as "TATTestedAuthorized", g.tot as "TATTotal"`;
+  return `with ${rows},
+${calc}${nameCtes},
+${grouped}
+select ${select}
+from g
+order by ${order.join(',\n  ')}`;
+}
+
+export const labTurnaroundSql = () => tatSql({ level: 'lab' });
+export const provinceTurnaroundSql = () => tatSql({ level: 'province' });
+export const monthTurnaroundSql = () => tatSql({ level: 'month' });
+
 const windowParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
 
 // The test type of the two completeness queries that have v1 variants. Facility: v1 has the all view, so blank is all. Lab facility: v1 has
@@ -1472,5 +1622,8 @@ export function queries() {
     { name: 'Date completeness by lab', sql: labCompletenessSql(), params: windowParams() },
     { name: 'Date completeness by lab facility', sql: labFacilityCompletenessSql(), params: [completenessTypeParam(false), ...windowParams()] },
     { name: 'Date completeness by lab area', sql: labAreaCompletenessSql(), params: windowParams() },
+    { name: 'Turnaround times by lab', sql: labTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'Turnaround times by province', sql: provinceTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'VL turnaround by month', sql: monthTurnaroundSql(), params: windowParams() },
   ];
 }
