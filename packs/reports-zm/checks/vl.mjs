@@ -2974,6 +2974,8 @@ const zmDay = (offsetDays) => {
   d.setUTCDate(d.getUTCDate() + offsetDays);
   return d.toISOString().slice(0, 10);
 };
+// Known flake: the two days are read once, when the check starts. If midnight in Lusaka passes before this group's psql runs, "today"
+// is already yesterday and one suite can fail once. Run the check again. (README, HONEST NON-PROOF, "Checks that read the clock".)
 const TODAY_30 = zmDay(0);
 const TOMORROW_30 = zmDay(1);
 const g30 = [];

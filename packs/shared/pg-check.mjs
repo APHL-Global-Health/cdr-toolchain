@@ -111,11 +111,21 @@ export function runSuites(suites) {
 
 // Runs { name, suites }[] groups. Each group is its own psql call with its own begin ... rollback,
 // so one group's fixture rows never reach another group's queries. One combined report at the end.
+// When psql fails for a group (an SQL error stops its whole script), the report names the group and
+// the error, counts that group's checks as not run, and the other groups still run. The exit is 1.
 export function runSuiteGroups(groups) {
   let total = 0;
   const failures = [];
   for (const g of groups) {
-    const r = executeSuites(g.suites);
+    let r;
+    try {
+      r = executeSuites(g.suites);
+    } catch (err) {
+      const checks = g.suites.reduce((n, s) => n + s.count, 0);
+      total += checks;
+      failures.push(`${g.name}: psql failed, so its ${checks} checks did not run: ${err.message}`);
+      continue;
+    }
     total += r.total;
     for (const f of r.failures) failures.push(`${g.name}/${f}`);
   }
