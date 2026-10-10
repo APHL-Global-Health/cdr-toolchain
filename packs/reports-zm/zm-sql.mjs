@@ -39,6 +39,11 @@ export function dateParamSql(id, { optional = false } = {}) {
 }
 export const dateTextParamSql = (id, opts) => `to_char(${dateParamSql(id, opts)}::timestamp, 'YYYY-MM-DD')`;
 
+// True when the text `v` is a real calendar date (the rules of dateParamSql), then optionally a T or a space and a time HH:MM with
+// optional :SS (hours 00 to 23). Used by the COVID-19 daily line list's date-time parameters.
+const TIME_OK = '([T ]([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?)?$';
+export const dateTimeOkSql = (v) => `(${v} ~ ${sqlLit(DATE_OK.replace(/\$$/, TIME_OK))} or ${v} ~ ${sqlLit(DATE_LEAP.replace(/\$$/, TIME_OK))})`;
+
 // A window on a date column: `expr ~ <date pattern> and left(expr, 10) >= from and left(expr, 10) <= to`. The date is the first ten
 // characters of the stamp's own text (YYYY-MM-DD), so it is the LOCAL date: '2026-05-31T23:30:00+02:00' and
 // '2026-05-31T23:59:59Z' are both on 05-31. A NULL stamp is outside, and so is a stamp that does not start with a full date (a partial

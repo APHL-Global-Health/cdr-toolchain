@@ -191,8 +191,8 @@ each, if wrong, is in the spec.
   `invalid input syntax for type integer:`. The error is raised at plan time because the integer cast
   is immutable and Postgres folds it. A date cast is only stable and would run per row, so a window
   over an empty table would never see a bad date. A blank required date raises. A blank optional one
-  is no limit. The COVID-19 daily line list checks `YYYY-MM-DDTHH:MM` its own way, and its error
-  starts `invalid input syntax for type timestamp:`. The `year` of "VL throughput by lab and month"
+  is no limit. The COVID-19 daily line list checks `YYYY-MM-DDTHH:MM` its own way (`dateTimeOkSql`:
+  a real date, hours 00 to 23), with the same integer cast, so its error also comes at plan time. The `year` of "VL throughput by lab and month"
   is not a date. It is cast with `::int`, and a bad value gives Postgres' own message.
 - **Where the last day counts only its first instant.** v1 compares a datetime column with a date
   parameter, so `to` means `to` 00:00:00. The port keeps this in: VL results for a facility's clients,

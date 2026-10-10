@@ -5,7 +5,7 @@ import {
   ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
   requesterJoin, sqlLit, ssTextKey, testingCodeSql, hmisCodeSql, registryRowJoin, optionsListSql,
   dateParamSql,
-  oneRowSql,
+  oneRowSql, dateTimeOkSql,
 } from '../zm-sql.mjs';
 
 // ---- The COVID-19 counts (Task 22) -----------------------------------------------------------------------------------------------
@@ -310,10 +310,10 @@ export const positiveListParams = () => [
 // today, target line 221). `from` and `to` take that 04:00 as text, YYYY-MM-DDTHH:MM (a space for the T, and seconds, also work; a date alone is
 // midnight). CE custom queries have three parameter types: text, select and daterange, and daterange only carries a date (custom-query-run.ts
 // assertDate rejects a time), so a date and time is a text parameter. The text is checked against YYYY-MM-DD, then an optional T or space and
-// HH:MM, then optional :SS; anything else raises an error that names the parameter and shows the value (the message is cast to a
-// timestamp, so Postgres reports "invalid input syntax" with the message in it). Without the check, ::timestamp reads '01/06/2026 04:00' as
+// HH:MM, then optional :SS; anything else raises an error that names the parameter and shows the value (the message is cast to an
+// integer, so Postgres reports "invalid input syntax for type integer" with the message in it, while it plans the query). Without the check, ::timestamp reads '01/06/2026 04:00' as
 // 6 January, accepts 'yesterday', and drops the offset of '2026-06-01T04:00+05' silently. A blank value is refused by CE (required). A
-// well-formed but impossible date such as 2026-02-30 is refused by Postgres' own range error. The stamp's own local wall time is compared (localTs: offset and fraction dropped,
+// well-formed but impossible date such as 2026-02-30, or an hour over 23, is refused by the same check. The stamp's own local wall time is compared (localTs: offset and fraction dropped,
 // a date-only stamp is midnight, a partial stamp such as '2026-07' is outside). v1 `between` is inclusive at both ends and so is this. A
 // DISA stamp has no fraction, so dropping it changes nothing.
 //
@@ -457,13 +457,16 @@ function distinctParts(columns) {
   };
 }
 
-// A date-time parameter as a timestamp, or an error that names the parameter. The pattern is YYYY-MM-DD with an optional T or space and
-// HH:MM, and optional :SS. The cast sits outside the CASE: a bad value turns into the message text, and casting the message fails with the
-// message inside Postgres' error text. (A cast of the value inside the THEN branch would be folded at plan time and raise Postgres' own error first.)
+// A date-time parameter as a timestamp, or an error that names the parameter. The value is a real calendar date (dateParamSql's rules), then
+// optionally a T or a space and HH:MM (hours 00 to 23) with optional :SS (dateTimeOkSql). A bad value takes the ELSE branch, which casts the message text to integer, as dateParamSql does: the integer
+// cast is IMMUTABLE, so Postgres folds it while PLANNING and the error comes even when no row reaches the test, with the message inside
+// Postgres' error text ('invalid input syntax for type integer: "from must be YYYY-MM-DDTHH:MM, got ..."'). The value is cast to timestamp
+// outside the CASE. (A timestamp cast is only STABLE and is not folded: on an empty warehouse a bad value gave no error. A cast of the value
+// inside the THEN branch would be folded and raise Postgres' own error first.)
 const dateTimeParamSql = (id) => {
   const v = `{{param.${id}}}`;
-  return `(case when ${v} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?$' then ${v}
-      else '${id} must be YYYY-MM-DDTHH:MM, got ' || ${v} end)::timestamp`;
+  return `(case when ${dateTimeOkSql(v)} then ${v}
+      else (('${id} must be YYYY-MM-DDTHH:MM, got ' || ${v})::int)::text end)::timestamp`;
 };
 
 export function lineListSql() {

@@ -56,8 +56,8 @@ are refused. The error names the parameter and shows the value, for example
 `from must be YYYY-MM-DD, got 09/10/2026`. CE puts Postgres wording in front of it, so the message
 starts `invalid input syntax for type integer:`. Read the part after the colon. The error comes when
 CE plans the query, so you see it even when no rows match. A blank optional date means no limit. The
-COVID-19 daily line list takes `YYYY-MM-DDTHH:MM`, the 04:00 to 04:00 window of v1. Its error starts
-`invalid input syntax for type timestamp:`.
+COVID-19 daily line list takes `YYYY-MM-DDTHH:MM`, the 04:00 to 04:00 window of v1. Its error starts the
+same way, and also comes when no rows match.
 
 **Which day a stamp is on.** A stamp counts on the date written in it. DISA*Lab writes `+02:00`, so a
 result at `2026-05-31T23:30:00+02:00` is on 31 May. Several v1 reports compare a datetime column with

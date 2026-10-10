@@ -1771,7 +1771,27 @@ const suitesFx = [
   ], SETUP_FX),
 ];
 
+// ============================================================================================
+// Group fx5 (final review, minor 5): the line list's date-time check raises while Postgres PLANS the query, so a bad value is an error even
+// when no row reaches it. The bad message is cast to integer (as dateParamSql does), which Postgres folds at plan time. A cast to timestamp
+// is not folded: on the empty dev warehouse a bad value gave 0 rows and no error. These suites run EXPLAIN, which plans and never runs the
+// query, so only a plan-time error shows. The group has no fixture rows.
+// ============================================================================================
+
+const planOnly = (name) => (query(name) ? { ...query(name), sql: `explain ${query(name).sql}` } : undefined);
+const suitesFx5 = [
+  errorSuiteOf('fx5-plan-from-bad', planOnly(LINE_LIST), { ...LINE_PARAMS(EDGE_DAY), from: 'yesterday' }, badTime('from', 'yesterday')),
+  errorSuiteOf('fx5-plan-to-bad', planOnly(LINE_LIST), { ...LINE_PARAMS(EDGE_DAY), to: '01/06/2026 04:00' }, badTime('to', '01/06/2026 04:00')),
+  errorSuiteOf('fx5-plan-ok', planOnly(LINE_LIST), LINE_PARAMS(EDGE_DAY), null),
+  // A well-formed but impossible date or time is a bad value too, refused at plan time (before, Postgres' own timestamp error came only
+  // when a row reached the cast).
+  errorSuiteOf('fx5-plan-feb-30', planOnly(LINE_LIST), { ...LINE_PARAMS(EDGE_DAY), from: '2026-02-30T04:00' }, badTime('from', '2026-02-30T04:00')),
+  errorSuiteOf('fx5-plan-hour-25', planOnly(LINE_LIST), { ...LINE_PARAMS(EDGE_DAY), to: '2026-06-01T25:00' }, badTime('to', '2026-06-01T25:00')),
+  errorSuiteOf('fx5-plan-leap-day', planOnly(LINE_LIST), { ...LINE_PARAMS(EDGE_DAY), from: '2028-02-29 04:00:30' }, null),
+];
+
 export const groups = [{ name: 't22', suites }, { name: 't23', suites: suites23 }, { name: 't24', suites: suites24 },
   { name: 't30c', suites: suites30c },
   { name: 'fx', suites: suitesFx },
+  { name: 'fx5', suites: suitesFx5 },
 ];
