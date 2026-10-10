@@ -1250,8 +1250,19 @@ export const uniqueClientsRatesParams = () => [
 //
 // Deviations (spec ruling 2): none.
 export function labMonthSql() {
-  const lab = foldSql('dr.performer');
   const rangeBlank = `({{param.from}} = '' or left(lr.authored_at, 10) >= {{param.from}}) and ({{param.to}} = '' or left(lr.authored_at, 10) <= {{param.to}})`;
+  return `${labMonthSource(rangeBlank, 'g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"')}
+order by g."Year" nulls first, g."Month" nulls first, ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Requests", coalesce(t.n, 0)`;
+}
+
+// The view's rows, shared by "VL requests and tests by lab and month" and "VL throughput by lab and month" (Task 27, which reads the same view
+// through fn_annualrequestsTestsTrend). Returns SQL from `with` to the join of the monthly Tested counts (g is the group per year, month and
+// lab; t holds Tested), with `columns` as the select list; the caller adds an optional `where` and the `order by`.
+//   requestCond  the condition on the REQUESTS (lr, dr): a date window here, a year there. It never reaches Tested, which keeps counting
+//                every year (the month-only quirk above).
+//   columns      the select list over g (Year, Month, Laboratory, Requests, lab_key) and t (n).
+export function labMonthSource(requestCond, columns) {
+  const lab = foldSql('dr.performer');
   return `with sent as (
   select extract(year from ${localDate('lr.authored_at')})::int as yr, extract(month from ${localDate('lr.authored_at')})::int as mo,
     ${lab} as lab_key, dr.performer, lr.request_id
@@ -1259,7 +1270,7 @@ export function labMonthSql() {
   join diagnostic_reports dr on dr.based_on_id = lr.id
   where ${foldSql('lr.panel_code')} = 'hivvl'
     and length(rtrim(dr.performer)) > 0
-    and ${rangeBlank}
+    and ${requestCond}
 ),
 tested as (
   select extract(month from ${localDate('dr.issued')})::int as mo, ${lab} as lab_key, count(distinct ${foldSql('lr.request_id')}) as n
@@ -1272,15 +1283,14 @@ tested as (
     and length(rtrim(dr.performer)) > 0
   group by 1, 2
 )
-select g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"
+select ${columns}
 from (
   select s.yr as "Year", s.mo as "Month", min(s.performer collate "C") as "Laboratory", count(distinct ${foldSql('s.request_id')}) as "Requests",
     s.lab_key
   from sent s
   group by s.yr, s.mo, s.lab_key
 ) g
-left join tested t on t.mo = g."Month" and t.lab_key = g.lab_key
-order by g."Year" nulls first, g."Month" nulls first, ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Requests", coalesce(t.n, 0)`;
+left join tested t on t.mo = g."Month" and t.lab_key = g.lab_key`;
 }
 
 export const labMonthParams = () => dateParams(false);

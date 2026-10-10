@@ -1509,4 +1509,600 @@ insert into facility_map (id, source_system, performer_system, source_code, regi
   return { name: 't26', suites: suites26 };
 }
 
-export const groups = [{ name: 't5-vleid', suites }, group25(), group26()];
+// ==========================================================================================================================
+// Group t27: VL and EID weekly stats, Tests authorised by lab and type, VL throughput by lab and month (v1 sp_getVLEIDstats over
+// fn_WeeklyLISUpdate, sp_LabTestingSummary, sp_LabThroughputTrendbyYear over fn_annualrequestsTestsTrend and vVLRequestsTestsByMonth).
+// Fixture ids start with "t27w-" (weekly stats), "t27s-" (testing summary) and "t27t-" (throughput). The three queries read the same
+// tables, so every suite first deletes the rows of the other two (isolate) and runs inside a savepoint.
+// "F line N", "S line N" and "M line N" mean a line of UserDefinedFunction__dbo_fn_WeeklyLISUpdate.sql,
+// StoredProcedure__dbo_sp_LabTestingSummary.sql and View__dbo_vVLRequestsTestsByMonth.sql. sp_getVLEIDstats ("W line N") only calls the function.
+
+const WS_Q = 'VL and EID weekly stats';
+const SUM_Q = 'Tests authorised by lab and type';
+const THR_Q = 'VL throughput by lab and month';
+const t27query = (name) => queries().find((q) => q.name === name);
+
+const WS_COLUMNS = ['TestType', 'Lab', 'LabName', 'Requests', 'Tests', 'TestedAuthorised', 'BacklogTests', 'BacklogTestsAuthorised', 'Rejects', 'ORejects',
+  'Invalids', 'Suppressed', 'Positives', 'Indeterminates', 'LabTAT'];
+const SUM_LEAD = ['Province', 'District', 'Facility', 'FacilityCode', 'FacilityType', 'LabCode'];
+// The 16 test-type columns of S lines 9-93, in order.
+const SUM_TYPES = ['Full Blood Count', 'ALT', 'Creatinine', 'AST', 'Total Bilirubin', 'Direct Bilirubin', 'HIV Rapid', 'RPR', 'Hepatitis B', 'HIV VL',
+  'HIV EID', 'HPV', 'TB', 'Malaria Rapid', 'TB Microscopy', 'Glucose'];
+const SUM_COLUMNS = [...SUM_LEAD, ...SUM_TYPES];
+const THR_COLUMNS = ['Laboratory', 'Month', 'MonthDescription', 'Requests', 'Tested'];
+
+// S lines 9-93, typed by panel code: the columns each panel code is counted in. HSDUO is in two (S lines 36-37 and 41-42).
+const SUM_MAP = {
+  FBC: ['Full Blood Count'], FBCP: ['Full Blood Count'], FBCD4: ['Full Blood Count'], ALT: ['ALT'], CREA: ['Creatinine'], AST: ['AST'],
+  TBIL: ['Total Bilirubin'], DBIL: ['Direct Bilirubin'], HIVR: ['HIV Rapid'], HSDUO: ['HIV Rapid', 'RPR'], RPR: ['RPR'], HEPB: ['Hepatitis B'],
+  HIVVL: ['HIV VL'], POCVR: ['HIV VL'], POHVL: ['HIV VL'], POEID: ['HIV EID'], POCGH: ['HIV EID'], HIVPC: ['HIV EID'], HPV: ['HPV'], POHPV: ['HPV'],
+  HPVGT: ['HPV'], TBGNX: ['TB'], POCGT: ['TB'], POCML: ['Malaria Rapid'], MALRD: ['Malaria Rapid'], TBA1: ['TB Microscopy'], TBA2: ['TB Microscopy'],
+  TBA3: ['TB Microscopy'], TBZ1: ['TB Microscopy'], TBZ2: ['TB Microscopy'], TBZ3: ['TB Microscopy'], GLUCR: ['Glucose'], GLUCF: ['Glucose'],
+  POCGL: ['Glucose'], GLUC: ['Glucose'], GLUCS: ['Glucose'],
+};
+// S line 112: the testing codes left out.
+const SUM_OUT = ['ZXZ', 'POC', '000', 'ZZZ', 'XXX'];
+// W lines 23-32: the constant lab names (the dictionary name is used for every other lab).
+const WS_CONSTANT = [['ZUL', 'UTH Virology'], ['ZUX', 'UTH High Cost'], ['ZUC', 'UTH Cytology'], ['ZUP', 'UTH Pediatrics'], ['ZUA', 'UTH-HAP ACOE'],
+  ['ZUE', 'UTH-HAP PCOE'], ['ZLP', 'Livingstone Main Lab'], ['ZLR', 'Livingstone PCR']];
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+function group27() {
+  const requests = [];
+  const reports = [];
+  const results = [];
+  const maps = [];
+  const regs = [];
+  let n = 0;
+  const num = (v) => (v === null || v === undefined ? 'null' : String(v));
+
+  // One request row with one report (noReport for none). The ids start with `prefix`. `results`: [{ obs, text, num, cmp, coded }].
+  function add(prefix, o) {
+    const s = { panel: 'HIVVL', obr: 1, ...o };
+    n += 1;
+    const qid = `${prefix}q${n}`;
+    requests.push(`(${lit(qid)}, ${lit(s.id)}, ${lit(s.panel)}, ${lit(s.reg ?? null)}, ${lit(s.ana ?? null)}, ${num(s.obr)}, ${lit(s.rej ?? null)})`);
+    if (!s.noReport) reports.push(`(${lit(`${prefix}d${n}`)}, ${lit(qid)}, ${lit(s.status ?? 'final')}, ${lit(s.iss ?? null)}, ${lit(s.perf ?? null)}, ${lit(s.display ?? null)}, ${lit(s.ss ?? null)}, ${lit(s.ps ?? null)})`);
+    (s.results ?? []).forEach((x, i) => results.push(`(${lit(`${prefix}r${n}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)}, ${num(x.num)}, ${lit(x.cmp ?? null)}, ${lit(x.coded ?? null)})`));
+    return qid;
+  }
+  // One facility_map row (id given, or numbered). `regId` null: the code is not in the register.
+  function map(id, code, regId, name, region, district, national, { ss = '', ps = '' } = {}) {
+    maps.push(`(${lit(id)}, ${lit(ss)}, ${lit(ps)}, ${lit(code)}, ${lit(regId)}, ${lit(name)}, ${lit(region)}, ${lit(district)}, ${lit(national)})`);
+  }
+
+  // =========================================================================================================================
+  // VL and EID weekly stats (prefix t27w-)
+  // =========================================================================================================================
+  const W = 't27w-';
+  const REG = '2026-05-10T08:00:00+02:00';
+  const ANA = '2026-05-11T09:00:00+02:00';
+  const ISS = '2026-05-12T10:00:00+02:00';
+  const RB = '2026-04-30T23:59:59+02:00'; // registered the second before the window: v1 RegisteredDateTime < @From
+  const E0 = '2026-05-01T00:00:00+02:00'; // the first instant of the window
+  const E1 = '2026-05-31T23:59:59+02:00'; // the last second of the window
+  const J1 = '2026-06-01T00:00:00+02:00'; // the first instant after it: v1 < dateadd(dd, 1, @To)
+  const BA0 = '2026-05-02T09:00:00+02:00';
+  const VLR = { obs: 'HIVVL', text: '1500' };
+
+  const stats = { EID: new Map(), HIVVL: new Map() };
+  const names = new Map(); // lab key -> expected LabName (a dictionary: one name per lab, in both halves)
+  const keyOf = (lab) => lab.toLowerCase().trimEnd();
+  function rec(type, lab) {
+    const m = stats[type];
+    const k = keyOf(lab);
+    if (!m.has(k)) m.set(k, { lab, rq: 0, te: 0, ta: 0, bk: 0, ba: 0, rj: 0, orj: 0, inv: 0, su: 0, po: 0, id: 0, tat: [] });
+    return m.get(k);
+  }
+  let wn = 0;
+  // A request of `lab` in the VL half (panel HIVVL, test type HIVVL) or the EID half (panel HIVPC); `spec` overrides the bare request
+  // (registered REG, no analysis, no authorisation, no results); `d` is what v1 counts for it, worked out by hand.
+  function row(type, lab, spec, d = {}) {
+    wn += 1;
+    add(W, { id: `T27W-${lab.trim()}-${wn}`, panel: type === 'EID' ? 'HIVPC' : 'HIVVL', reg: REG, perf: lab, display: `Lab ${lab.trim().toUpperCase()}`, ...spec });
+    const r = rec(type, lab);
+    for (const k of ['rq', 'te', 'ta', 'bk', 'ba', 'rj', 'orj', 'inv', 'su', 'po', 'id']) r[k] += d[k] ?? 0;
+    if (d.tat !== undefined) r.tat.push(d.tat);
+    if (!names.has(keyOf(lab))) names.set(keyOf(lab), `Lab ${lab.trim().toUpperCase()}`);
+  }
+  const vl = (lab, spec, d) => row('HIVVL', lab, spec, d);
+  const eid = (lab, spec, d) => row('EID', lab, spec, d);
+
+  // -- WR1: Requests and the window (F lines 16 and 260-262): RegisteredDateTime >= @From and < @To + 1 day, on LOCAL time --
+  vl('WR1', { reg: E0 }, { rq: 1 });                                  // the first instant is in
+  vl('WR1', { reg: '2026-05-01T00:30:00+02:00' }, { rq: 1 });         // local May 1 (UTC says April 30)
+  vl('WR1', { reg: E1 }, { rq: 1 });                                  // the last second is in
+  vl('WR1', { reg: J1 }, {});                                         // out (UTC says May 31 and would count it)
+  vl('WR1', { reg: RB }, {});                                         // out
+  vl('WR1', { reg: '2026-05-15' }, { rq: 1 });                        // a date alone is midnight of that day
+  vl('WR1', { reg: null }, {});                                       // no registered stamp
+  vl('WR1', { id: 'T27W-WR1-DUP', obr: 1 }, { rq: 1 });               // one lab number in two OBR sets and two spellings is ONE request
+  vl('WR1', { id: 'T27W-WR1-DUP', obr: 2 }, {});
+  vl('WR1', { id: 't27w-wr1-dup ', obr: 3 }, {});
+  vl('WR1', { panel: 'TBGNX' }, {});                                  // another panel is in neither half
+  vl('WR1', { panel: 'hivvl ' }, { rq: 1 });                          // the panel compares ignoring case and trailing spaces
+  vl('WR1', { noReport: true }, {});                                  // no report, no testing lab
+  vl('WR1', { perf: '' }, {});                                        // no testing lab: v1 would use the receiving lab, CE has none
+  vl('WR1', { perf: '   ' }, {});
+  vl('WR1', { perf: null }, {});
+
+  // -- WT1: Tests (F lines 18-38): registered AND analysed in the window, with a result of observation HIVV_ --
+  const tests = (spec, d) => vl('WT1', { ana: ANA, ...spec }, { rq: 1, ...d });
+  tests({ results: [VLR] }, { te: 1 });
+  tests({ results: [{ obs: 'hivvc', text: '1500' }] }, { te: 1 });   // LIKE ignores case
+  tests({ results: [{ obs: 'HIVVD ', text: '1500' }] }, { te: 1 });  // and a trailing blank fills the underscore
+  tests({ results: [{ obs: 'HIVPC', text: '1500' }] }, {});          // HIVP_ is the EID pattern
+  tests({ results: [{ obs: 'HIVV', text: '1500' }] }, {});           // one character too short
+  tests({ results: [{ obs: 'HIVVLX', text: '1500' }] }, {});         // one too long
+  tests({ ana: E0, results: [VLR] }, { te: 1 });                     // analysed at the first instant
+  tests({ ana: E1, results: [VLR] }, { te: 1 });                     // and the last second
+  tests({ ana: J1, results: [VLR] }, {});                            // the first instant after
+  tests({ ana: '2026-04-30T23:59:59+02:00', results: [VLR] }, {});   // the last second before
+  tests({ ana: '2026-05-12', results: [VLR] }, { te: 1 });           // a date alone
+  tests({ results: [VLR, { obs: 'HIVVC', text: '900' }] }, { te: 1 });         // two results, one test
+  tests({ results: [{ obs: 'HIVPC', text: '1500' }, VLR] }, { te: 1 });
+  tests({ ana: null, results: [VLR] }, {});
+  tests({ results: [] }, {});
+
+  // -- WA1: TestedAuthorised (F lines 40-65), and what LabTAT averages (F line 253) --
+  const auth = (spec, d) => vl('WA1', { ana: ANA, iss: ISS, results: [VLR], ...spec }, { rq: 1, te: 1, ta: 1, tat: 2, ...d });
+  auth({}, {});                                                      // a final report, a valid text
+  auth({ status: 'preliminary' }, { ta: 0 });                        // HL7ResultStatusCode = 'F' only
+  auth({ status: 'FINAL ' }, {});                                    // compared ignoring case and trailing spaces
+  auth({ status: 'cancelled' }, { ta: 0 });
+  auth({ iss: J1 }, { ta: 0, tat: 22 });                             // authorised the first instant after
+  auth({ iss: '2026-04-30T23:59:59+02:00' }, { ta: 0, tat: -10 });  // and the last second before
+  auth({ iss: E0 }, { tat: -9 });                                    // the first instant is in
+  auth({ iss: E1 }, { tat: 21 });                                    // and the last second
+  auth({ iss: null }, { ta: 0, tat: undefined });                    // not authorised: no turnaround either
+  auth({ results: [{ obs: 'HIVVL' }] }, { ta: 0 });                  // a result with no value: NOT IN of NULL is unknown
+  auth({ results: [{ obs: 'HIVVL', text: 'Haemolysed' }, VLR] }, { orj: 1 });   // one valid result is enough
+  auth({ ana: '2026-06-02T09:00:00+02:00' }, { te: 0, ta: 0 });      // analysed after the window
+  auth({ results: [{ obs: 'HIVPC', text: '1500' }] }, { te: 0, ta: 0 });
+
+  // -- WB1: BacklogTests and BacklogTestsAuthorised (F lines 66-112): analysed in the window, registered before @From --
+  const back = (spec, d) => vl('WB1', { reg: RB, ana: BA0, results: [VLR], ...spec }, d);
+  back({}, { bk: 1 });
+  back({ reg: '2026-04-15T08:00:00+02:00', iss: '2026-05-03T10:00:00+02:00' }, { bk: 1, ba: 1 });
+  back({ iss: '2026-05-03T10:00:00+02:00', status: 'preliminary' }, { bk: 1 });
+  back({ iss: '2026-05-03T10:00:00+02:00', results: [{ obs: 'HIVVL', text: 'FAIL' }] }, { bk: 1, orj: 1 });
+  back({ iss: J1 }, { bk: 1 });
+  back({ ana: E0 }, { bk: 1 });
+  back({ ana: E1 }, { bk: 1 });
+  back({ ana: J1 }, {});
+  back({ results: [] }, {});
+  back({ results: [{ obs: 'HIVPC', text: '1500' }] }, {});
+  back({ id: 'T27W-WB1-DUP', obr: 1 }, { bk: 1 });                  // one lab number in two OBR sets counts once
+  back({ id: 'T27W-WB1-DUP', obr: 2 }, {});
+  back({ reg: null }, {});                                           // no registered stamp is not "before"
+  back({ reg: '2026-04' }, {});                                      // nor is a partial one (as text it sorts before the window)
+  // registered in the window: a test, not a backlog (the first instant, and 00:30 local, which is April 30 in UTC)
+  vl('WB1', { reg: E0, ana: BA0, results: [VLR] }, { rq: 1, te: 1 });
+  vl('WB1', { reg: '2026-05-01T00:30:00+02:00', ana: BA0, results: [VLR] }, { rq: 1, te: 1 });
+
+  // -- WK1: a lab with a backlog test and no request registered in the period is not listed (F lines 255-262) --
+  vl('WK1', { reg: RB, ana: BA0, results: [VLR] }, { bk: 1 });
+
+  // -- WJ1: Rejects (F lines 113-130): analysed in the window with a rejection code; no result and no registered stamp needed --
+  const rej = (spec, d) => vl('WJ1', { reg: RB, ana: ANA, ...spec }, d);
+  vl('WJ1', {}, { rq: 1 });                                          // the lab's first request
+  rej({ rej: 'R01' }, { rj: 1 });
+  vl('WJ1', { rej: 'R02', ana: ANA }, { rq: 1, rj: 1 });
+  vl('WJ1', { rej: '  ', ana: ANA }, { rq: 1 });                     // LEN of spaces is 0
+  vl('WJ1', { rej: '', ana: ANA }, { rq: 1 });
+  vl('WJ1', { rej: null, ana: ANA }, { rq: 1 });
+  vl('WJ1', { rej: 'R03', ana: '2026-06-02T09:00:00+02:00' }, { rq: 1 });   // analysed after the window
+  vl('WJ1', { rej: 'R04', ana: null }, { rq: 1 });
+  rej({ rej: 'R05', id: 'T27W-WJ1-DUP', obr: 1 }, { rj: 1 });        // two OBR sets, one request
+  rej({ rej: 'R05', id: 'T27W-WJ1-DUP', obr: 2 }, {});
+  vl('WJ1', { rej: 'R06', ana: ANA, results: [VLR] }, { rq: 1, te: 1, rj: 1 });
+  rej({ rej: 'R07', ana: E1 }, { rj: 1 });
+  rej({ rej: 'R08', ana: J1 }, {});
+  rej({ rej: ' R09' }, { rj: 1 });                                   // a leading space counts
+  rej({ rej: 'R10', status: 'cancelled' }, { rj: 1 });               // no status test
+
+  // -- WX: ORejects (F lines 131-154), Invalids (155-177), Suppressed (178-203), Positives and Indeterminates by result text --
+  // Each row: a request registered, analysed and authorised in the window with a final report and one result. [ta, orj, inv, su] by hand:
+  //   ta   not in the 13 invalid texts (F lines 56, 101, 192)         orj  not numeric and not in the 15 known texts (F line 145)
+  //   inv  not numeric and LIKE 'INV%' (F line 168)                   su   not invalid and (one of 10 texts, a number under 1000, or a coded value)
+  const text = (t, ta, orj, inv, su, extra = {}) => ({ r: { obs: 'HIVVL', text: t, ...extra }, ta, orj, inv, su });
+  const WX = [
+    // the 13 invalid texts (F line 56)
+    text('INVAL', 0, 0, 1, 0), text('Please repeat', 0, 1, 0, 0), text('Insufficient serum received', 0, 1, 0, 0),
+    text('Insufficient for further tests', 0, 1, 0, 0), text('Indeterminate', 0, 1, 0, 0), text('Haemolysed', 0, 1, 0, 0), text('FAIL', 0, 1, 0, 0),
+    text('Absent', 0, 1, 0, 0), text('Haemolysed ++', 0, 1, 0, 0), text('Icteric ++++', 0, 1, 0, 0), text('INV', 0, 0, 1, 0),
+    text('This result has been checked', 0, 1, 0, 0), text('to confirm patient identity.', 0, 1, 0, 0),
+    // the 15 known texts (F line 145) that are not invalid texts
+    text('NDET', 1, 0, 0, 1), text('<30 copies/mL', 1, 0, 0, 1), text('<30 copies/ml', 1, 0, 0, 1), text('Target Not Detected', 1, 0, 0, 1),
+    text('TAR', 1, 0, 0, 1), text('RNA not detected', 1, 0, 0, 1), text('< 20', 1, 0, 0, 1), text('<20', 1, 0, 0, 0), text('<20 copies/ml', 1, 0, 0, 1),
+    text('> 10000000', 1, 0, 0, 0), text('Target Not Detected.', 1, 0, 0, 0), text('INVALID', 1, 0, 1, 0), text('ND', 1, 0, 0, 1),
+    // the suppressed texts (F line 194) that are not known texts
+    text('TARG', 1, 1, 0, 1), text('<20 copies/mL', 1, 0, 0, 1),
+    // spellings: case and trailing spaces are ignored, a leading space is not
+    text('target not detected  ', 1, 0, 0, 1), text('nd ', 1, 0, 0, 1), text('ndet', 1, 0, 0, 1), text('haemolysed ', 0, 1, 0, 0), text('inv', 0, 0, 1, 0),
+    text(' INV', 1, 1, 0, 0), text(' nd', 1, 1, 0, 0),
+    // other texts
+    text('Positive', 1, 1, 0, 0), text('Negative', 1, 1, 0, 0), text('inv123', 1, 1, 1, 0), text('XINV', 1, 1, 0, 0), text('', 1, 1, 0, 0), text('  ', 1, 1, 0, 0),
+    // numbers: ISNUMERIC is true, so not an ORejects text; under 1000 is suppressed (F line 195)
+    text('1500', 1, 0, 0, 0), text('999', 1, 0, 0, 1), text('1000', 1, 0, 0, 0), text('0', 1, 0, 0, 1), text('-5', 1, 0, 0, 1), text(' 12 ', 1, 0, 0, 1),
+    // v1 stops with a conversion error on a decimal (cast to bigint); the port reads the number (spec ruling 2)
+    text('999.5', 1, 0, 0, 1), text('1200.5', 1, 0, 0, 0),
+    // a value held as a number (the comparator and the number make the text)
+    { r: { obs: 'HIVVL', num: 500 }, ta: 1, orj: 0, inv: 0, su: 1 },
+    { r: { obs: 'HIVVL', num: 1000 }, ta: 1, orj: 0, inv: 0, su: 0 },
+    { r: { obs: 'HIVVL', cmp: '<', num: 20 }, ta: 1, orj: 0, inv: 0, su: 1 },
+    { r: { obs: 'HIVVL', cmp: '>', num: 10000000 }, ta: 1, orj: 0, inv: 0, su: 0 },
+    // a coded value: any non-empty one is suppressed (F line 195), a blank one is not
+    text('Positive', 1, 1, 0, 1, { coded: 'X' }), text('Positive', 1, 1, 0, 0, { coded: '  ' }), text('Positive', 1, 1, 0, 0, { coded: '' }),
+    text('FAIL', 0, 1, 0, 0, { coded: 'X' }), text('1500', 1, 0, 0, 1, { coded: 'N' }),
+    { r: { obs: 'HIVVL', coded: 'X' }, ta: 1, orj: 1, inv: 0, su: 1 },                          // only a coded value: the text is the code
+    { r: { obs: 'HIVVL', coded: 'P' }, ta: 1, orj: 1, inv: 0, su: 1, po: 1 },
+    { r: { obs: 'HIVVL', text: 'Positive', coded: 'POS' }, ta: 1, orj: 1, inv: 0, su: 1, po: 1 },
+    { r: { obs: 'HIVVL', text: 'Indet', coded: 'I' }, ta: 1, orj: 1, inv: 0, su: 1, id: 1 },
+  ];
+  WX.forEach((x) => vl('WX', { ana: ANA, iss: ISS, results: [x.r] }, { rq: 1, te: 1, ta: x.ta, orj: x.orj, inv: x.inv, su: x.su, po: x.po ?? 0, id: x.id ?? 0, tat: 2 }));
+  // not final: only ORejects and Invalids (no status test) count
+  vl('WX', { ana: ANA, iss: ISS, status: 'preliminary', results: [{ obs: 'HIVVL', text: 'ND' }] }, { rq: 1, te: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, status: 'preliminary', results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, te: 1, orj: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, status: 'preliminary', results: [{ obs: 'HIVVL', text: 'inv9' }] }, { rq: 1, te: 1, orj: 1, inv: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, status: 'cancelled', results: [{ obs: 'HIVVL', text: '999' }] }, { rq: 1, te: 1, tat: 2 });
+  // authorised after the window, analysed after the window, not authorised, wrong observation: none of the five counts
+  vl('WX', { ana: ANA, iss: J1, results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, te: 1, tat: 22 });
+  vl('WX', { ana: ANA, iss: J1, results: [{ obs: 'HIVVL', text: 'inv9' }] }, { rq: 1, te: 1, tat: 22 });
+  vl('WX', { ana: ANA, iss: J1, results: [{ obs: 'HIVVL', text: 'ND' }] }, { rq: 1, te: 1, tat: 22 });
+  vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, tat: 2 });
+  vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'ND' }] }, { rq: 1, tat: 2 });
+  vl('WX', { ana: J1, iss: ISS, results: [{ obs: 'HIVVL', text: 'inv9' }] }, { rq: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: null, results: [{ obs: 'HIVVL', text: 'Garbage' }] }, { rq: 1, te: 1 });
+  vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'Garbage' }] }, { rq: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'inv9' }] }, { rq: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'ND' }] }, { rq: 1, tat: 2 });
+  // two results of one request: counted once, and each count looks at its own result
+  vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVVL', text: 'Garbage' }, { obs: 'HIVVC', text: 'Other' }] }, { rq: 1, te: 1, ta: 1, orj: 1, tat: 2 });
+  vl('WX', { ana: ANA, iss: ISS, results: [{ obs: 'HIVVL', text: 'ND' }, { obs: 'HIVVC', text: 'Garbage' }] }, { rq: 1, te: 1, ta: 1, orj: 1, su: 1, tat: 2 });
+
+  // -- WP1: Positives (F lines 204-228) and Indeterminates (229-252): the coded value, no status test, no registered stamp needed --
+  const coded = (c, spec, d) => vl('WP1', { ana: ANA, iss: ISS, status: 'preliminary', results: [{ obs: 'HIVVL', text: '1500', coded: c }], ...spec }, { rq: 1, te: 1, tat: 2, ...d });
+  coded('P', {}, { po: 1 });
+  coded('pos ', {}, { po: 1 });
+  coded('DTS', {}, { po: 1 });
+  coded('POSITIVE', {}, {});
+  coded('N', {}, {});
+  coded(' P', {}, {});
+  coded('P', { iss: J1 }, { tat: 22 });
+  coded('P', { iss: null }, { tat: undefined });
+  coded('P', { ana: J1 }, { te: 0 });
+  coded('P', { results: [{ obs: 'HIVPC', text: '1500', coded: 'P' }] }, { te: 0 });
+  coded('P', { reg: RB }, { rq: 0, te: 0, po: 1, bk: 1, tat: undefined });
+  coded('P', { results: [{ obs: 'HIVVL', text: '1500', coded: 'P' }, { obs: 'HIVVC', text: '1500', coded: 'P' }] }, { po: 1 });
+  coded('I', {}, { id: 1 });
+  coded('i ', {}, { id: 1 });
+  coded('IND', {}, {});
+  coded(' I', {}, {});
+  coded('I', { iss: J1 }, { tat: 22 });
+  coded('I', { ana: J1 }, { te: 0 });
+  coded('I', { results: [{ obs: 'HIVPC', text: '1500', coded: 'I' }] }, { te: 0 });
+  coded('I', { reg: RB }, { rq: 0, te: 0, id: 1, bk: 1, tat: undefined });
+  coded('P', { results: [{ obs: 'HIVVL', text: '1500', coded: 'P' }, { obs: 'HIVVC', text: '1500', coded: 'I' }] }, { po: 1, id: 1 });
+
+  // -- WL1 to WL8: LabTAT (F line 253): the whole-day average of local dates, cut toward zero, over the requests registered in the window --
+  const noTat = (lab, reg, iss) => vl(lab, { reg, iss }, { rq: 1 });
+  const tatDays = (lab, reg, iss, days) => vl(lab, { reg, iss }, { rq: 1, tat: days });
+  tatDays('WL1', '2026-05-10T08:00:00+02:00', '2026-05-11T09:00:00+02:00', 1);
+  tatDays('WL1', '2026-05-10T08:00:00+02:00', '2026-05-12T09:00:00+02:00', 2);
+  tatDays('WL1', '2026-05-10T08:00:00+02:00', '2026-05-12T10:00:00+02:00', 2);          // 5 / 3 = 1.67 gives 1 (rounding gives 2)
+  tatDays('WL2', '2026-05-10T08:00:00+02:00', '2026-05-09T09:00:00+02:00', -1);
+  tatDays('WL2', '2026-05-10T08:00:00+02:00', '2026-05-08T09:00:00+02:00', -2);         // -3 / 2 = -1.5 gives -1 (flooring gives -2)
+  noTat('WL3', REG, null);                                                               // nothing authorised: NULL
+  tatDays('WL4', '2026-05-10T08:00:00+02:00', '2026-05-13T08:00:00+02:00', 3);
+  vl('WL4', { reg: RB, ana: BA0, iss: '2026-05-30T08:00:00+02:00' }, {});               // registered before: not in the average
+  tatDays('WL5', '2026-05-10T08:00:00+02:00', '2026-05-13T08:00:00+02:00', 3);
+  noTat('WL5', REG, null);                                                               // NULL is left out (an average of 3, 4 and 0 would be 2)
+  tatDays('WL5', '2026-05-10T08:00:00+02:00', '2026-05-14T08:00:00+02:00', 4);
+  vl('WL6', { id: 'T27W-WL6-X', obr: 1, iss: '2026-05-11T08:00:00+02:00' }, { rq: 1, tat: 1 });   // one request in two OBR sets: two rows in the average
+  vl('WL6', { id: 'T27W-WL6-X', obr: 2, iss: '2026-05-11T08:00:00+02:00' }, { tat: 1 });
+  vl('WL6', { id: 'T27W-WL6-Y', iss: '2026-05-15T08:00:00+02:00' }, { rq: 1, tat: 5 });          // (1 + 1 + 5) / 3 = 2; per request it would be 3
+  tatDays('WL7', '2026-05-10T23:30:00+02:00', '2026-05-11T00:30:00+02:00', 1);          // an hour apart across midnight: 1 date boundary (UTC says 0)
+  tatDays('WL8', '2026-05-10T08:00:00+02:00', '2026-05-10T09:00:00+02:00', 0);          // the same day: 0, not NULL
+
+  // -- WD1: the end day is a whole day (F line 262). The one-day suite asks for May 12 only. --
+  ['2026-05-11T23:59:59+02:00', '2026-05-12T00:00:00+02:00', '2026-05-12T23:59:59+02:00', '2026-05-13T00:00:00+02:00'].forEach((reg) => vl('WD1', { reg }, { rq: 1 }));
+
+  // -- Both halves, one dictionary: the EID half (panel HIVPC, observations HIVP_) --
+  const geid = (lab, spec, d) => eid(lab, { ana: ANA, iss: ISS, results: [{ obs: 'HIVPC', text: 'Negative', coded: 'N' }], ...spec }, d);
+  geid('WE1', {}, { rq: 1, te: 1, ta: 1, orj: 1, su: 1, tat: 2 });
+  geid('WE1', { results: [{ obs: 'HIVPC', text: 'Positive', coded: 'P' }] }, { rq: 1, te: 1, ta: 1, orj: 1, su: 1, po: 1, tat: 2 });
+  geid('WE1', { results: [{ obs: 'HIVPC', text: 'Inconclusive', coded: 'I' }] }, { rq: 1, te: 1, ta: 1, orj: 1, su: 1, id: 1, tat: 2 });
+  geid('WE1', { results: [{ obs: 'HIVPR', text: '1500' }] }, { rq: 1, te: 1, ta: 1, tat: 2 });          // HIVP_ matches
+  geid('WE1', { results: [{ obs: 'HIVVL', text: '1500' }] }, { rq: 1, tat: 2 });                           // HIVV_ is the VL pattern
+  geid('WE1', { status: 'preliminary' }, { rq: 1, te: 1, orj: 1, tat: 2 });
+  geid('WE1', { reg: RB, ana: BA0, iss: '2026-05-03T10:00:00+02:00' }, { bk: 1, ba: 1, orj: 1, su: 1 });
+  geid('WE1', { reg: RB, ana: BA0, iss: null, results: [{ obs: 'HIVPC', text: '1500' }], rej: 'R01' }, { bk: 1, rj: 1 });
+  geid('WE1', { results: [{ obs: 'HIVPC', text: 'INVALID' }] }, { rq: 1, te: 1, ta: 1, inv: 1, tat: 2 });
+  vl('WE1', { ana: ANA, iss: ISS, results: [VLR] }, { rq: 1, te: 1, ta: 1, tat: 2 });                      // the same lab in the VL half
+  vl('WE1', { reg: RB, ana: BA0, iss: null, results: [VLR] }, { bk: 1 });
+  // the panel decides the half, not the observation: an EID request with a VL result has no test
+  eid('WE2', { ana: ANA, iss: ISS, results: [VLR] }, { rq: 1, tat: 2 });
+
+  // -- Lab spellings: case and trailing spaces are one lab; the spelling shown is the smallest in byte order --
+  vl('WC1', { ana: ANA, iss: ISS, results: [VLR], perf: 'WC1' }, { rq: 1, te: 1, ta: 1, tat: 2 });
+  vl('WC1', { ana: ANA, iss: ISS, results: [VLR], perf: 'wc1 ', display: 'Case Lab' }, { rq: 1, te: 1, ta: 1, tat: 2 });
+  names.set('wc1', 'Case Lab');
+  // the same request number at two spellings of the lab is one request of that lab
+  vl('WC2', { id: 'T27W-WC2-S', perf: 'WC2' }, { rq: 1 });
+  vl('WC2', { id: 'T27W-WC2-S', perf: 'wc2 ', obr: 2 }, {});
+
+  // -- Lab names (spec ruling 8): the constant CASE of W lines 23-32 (every constant lab, in both halves; the dictionary name must lose
+  // to the constant; three are spelled another way), then the dictionary (labNamesCte) --
+  WS_CONSTANT.forEach(([code, constant]) => {
+    const spelled = { ZUX: 'zux', ZUC: 'ZUC  ', ZLR: 'zlr ' }[code] ?? code;
+    vl(spelled, { display: `Dict ${code}` }, { rq: 1 });
+    eid(spelled, { display: `Dict ${code}` }, { rq: 1 });
+    names.set(keyOf(spelled), constant);
+  });
+  // a lab named by its report in one half only: one name for the lab in both halves
+  vl('WN1', { display: 'Name One' }, { rq: 1 });
+  eid('WN1', { display: null }, { rq: 1 });
+  names.set('wn1', 'Name One');
+  // no report name: the register name of the mapped code
+  vl('WN2', { display: null }, { rq: 1 });
+  map('t27w-fm-n2', 'WN2', 't27w-reg-n2', 'Mapped Name Two', 'Lusaka', 'Lusaka', '9');
+  names.set('wn2', 'Mapped Name Two');
+  // neither: the code; a blank report name counts as missing
+  vl('WN3', { display: null }, { rq: 1 });
+  names.set('wn3', 'WN3');
+  vl('WN4', { display: '  ' }, { rq: 1 });
+  names.set('wn4', 'WN4');
+  // two names: the smallest in byte order; a name that is only the code loses to a real one
+  vl('WN5', { display: 'Zeta Name' }, { rq: 1 });
+  vl('WN5', { display: 'Alpha Name' }, { rq: 1 });
+  names.set('wn5', 'Alpha Name');
+  vl('WN6', { display: 'WN6' }, { rq: 1 });
+  vl('WN6', { display: 'Real Name' }, { rq: 1 });
+  names.set('wn6', 'Real Name');
+
+  // The expected rows. v1 lists a lab only when it has a request registered in the window (F lines 255-262).
+  const wsRows = [];
+  for (const type of ['EID', 'HIVVL']) {
+    for (const [k, r] of stats[type]) {
+      if (r.rq === 0) continue;
+      wsRows.push({
+        TestType: type, Lab: r.lab, LabName: names.get(k), Requests: r.rq, Tests: r.te, TestedAuthorised: r.ta, BacklogTests: r.bk, BacklogTestsAuthorised: r.ba,
+        Rejects: r.rj, ORejects: r.orj, Invalids: r.inv, Suppressed: r.su, Positives: r.po, Indeterminates: r.id,
+        LabTAT: r.tat.length === 0 ? null : Math.trunc(r.tat.reduce((a, b) => a + b, 0) / r.tat.length),
+      });
+    }
+  }
+  const wsDayRow = { TestType: 'HIVVL', Lab: 'WD1', LabName: 'Lab WD1', Requests: 2, Tests: 0, TestedAuthorised: 0, BacklogTests: 0, BacklogTestsAuthorised: 0,
+    Rejects: 0, ORejects: 0, Invalids: 0, Suppressed: 0, Positives: 0, Indeterminates: 0, LabTAT: null };
+
+  // =========================================================================================================================
+  // Tests authorised by lab and type (prefix t27s-)
+  // =========================================================================================================================
+  const S = 't27s-';
+  const SANA = '2026-05-06T09:00:00+02:00';
+  const SISS = '2026-05-07T10:00:00+02:00';
+  const NO_LEAD = [null, null, null, null, null];
+  const sums = new Map(); // lab key -> { lead, counts }
+  let sn = 0;
+  // A request of lab `lab` (as stored) with panel `panel`, authorised SISS unless `o` says otherwise; `types` are the columns v1 counts it in.
+  // `lead` is the lab's expected six leading columns, or null for a request that has no row (it is left out, or its lab has none).
+  function sreq(lab, lead, panel, types, o = {}) {
+    sn += 1;
+    add(S, { id: `T27S-${sn}`, panel, reg: '2026-05-01T08:00:00+02:00', ana: SANA, iss: SISS, perf: lab, ...o });
+    if (lead === null) return;
+    const key = lab.toLowerCase().trimEnd();
+    if (!sums.has(key)) sums.set(key, { lead, counts: Object.fromEntries(SUM_TYPES.map((t) => [t, 0])) });
+    for (const t of types) sums.get(key).counts[t] += 1;
+  }
+
+  // register rows and the mapping of the labs to them (the lab's own facility)
+  const ZM = 'urn:openldr:zm:facilities';
+  const reg = (id, code, name, extras) => regs.push(`(${lit(id)}, ${lit(ZM)}, ${lit(code)}, ${lit(name)}, 'in_register', ${lit(extras)})`);
+  reg('t27s-reg1', '1001', 'Choma General Hospital', '{"hims_code":"30010001","type":"Hospital"}');
+  reg('t27s-reg2', '1002', 'Chilenje Clinic', '{ "type" : "Clinic" , "hims_code":"x"}');
+  reg('t27s-reg4', '1004', 'No Extras Clinic', null);
+  reg('t27s-reg5', '1005', 'Own Type Post', '{"ownership_type":"Public","type":"Health Post"}');
+  reg('t27s-reg8', '1008', 'Case Hospital', '{"type":"District Hospital"}');
+  reg('t27s-reg9', '1009', 'Second Mapping Hospital', '{"type":"Other Type"}');
+  reg('t27s-reg10', '1010', 'Src Hospital', '{"type":"Provincial Hospital"}');
+  map('t27s-fm-sl1-a', 'SL1', 't27s-reg1', 'Choma General Hospital', 'Southern', 'Choma', '1001');
+  map('t27s-fm-sl1-b', 'SL1', 't27s-reg9', 'Second Mapping Hospital', 'Western', 'Mongu', '1009');   // the later id loses
+  map('t27s-fm-sl2', 'SL2', 't27s-reg2', 'Chilenje Clinic', 'Lusaka', 'Lusaka', '1002');
+  map('t27s-fm-sl4', 'SL4', 't27s-reg4', 'No Extras Clinic', 'Central', 'Kabwe', '1004');
+  map('t27s-fm-sl5', 'SL5', 't27s-reg5', 'Own Type Post', 'Copperbelt', 'Kitwe', '1005');
+  map('t27s-fm-sl6', 'SL6', null, 'Unregistered Name', 'Northern', 'Kasama', '1006');               // not in the register
+  map('t27s-fm-sl7', 'SL7', 't27s-reg1', 'Wrong System', 'Southern', 'Choma', '1001', { ps: 'urn:other' });
+  map('t27s-fm-sl8', 'SL8', 't27s-reg8', 'Case Hospital', 'Eastern', 'Chipata', '1008');
+  map('t27s-fm-sl10', 'SL10', 't27s-reg10', 'Src Hospital', 'North-Western', 'Solwezi', '1010', { ss: 'urn:src', ps: 'urn:perf' });
+  map('t27s-fm-sl11', 'SL11', 't27s-reg10', 'Src Hospital', 'North-Western', 'Solwezi', '1010', { ss: 'urn:src' });
+
+  const L1 = ['Southern', 'Choma', 'Choma General Hospital', '1001', 'Hospital', 'SL1'];
+  // SL1: request rows, not distinct requests (S line 9 sums rows); the window is the local date of the authorised stamp (S line 109)
+  sreq('SL1', L1, 'ALT', ['ALT']);
+  sreq('SL1', L1, 'ALT', ['ALT'], { id: 'T27S-DUP', obr: 1 });
+  sreq('SL1', L1, 'ALT', ['ALT'], { id: 'T27S-DUP', obr: 2 });                                      // the same lab number twice counts twice
+  sreq('SL1', L1, 'fbc', ['Full Blood Count']);                                                      // case and trailing spaces are ignored
+  sreq('SL1', L1, 'FBCD4 ', ['Full Blood Count']);
+  sreq('SL1', L1, 'CREA', ['Creatinine'], { iss: '2026-05-04T00:00:00+02:00' });                     // the first instant
+  sreq('SL1', L1, 'CREA', ['Creatinine'], { iss: '2026-05-04T00:30:00+02:00' });                     // local May 4 (UTC says May 3)
+  sreq('SL1', L1, 'CREA', ['Creatinine'], { iss: '2026-05-10T23:59:59+02:00' });                     // the last second
+  sreq('SL1', L1, 'CREA', [], { iss: '2026-05-03T23:59:59+02:00' });                                 // the second before
+  sreq('SL1', L1, 'CREA', [], { iss: '2026-05-11T00:00:00+02:00' });                                 // the first instant after (UTC says May 10)
+  sreq('SL1', L1, 'AST', [], { ana: null });                                                         // not analysed (S line 110)
+  sreq('SL1', L1, 'AST', [], { iss: null });                                                         // not authorised (S line 111)
+  sreq('SL1', L1, 'AST', [], { iss: '2026-05' });                                                    // a partial stamp has no date
+  sreq('SL1', L1, 'TBGXP', []);                                                                      // a panel that is not listed
+  sreq('SL1', L1, 'HEPB', ['Hepatitis B'], { status: 'cancelled' });                                 // no status test (S line 114 is commented out)
+  sreq('SL1', L1, 'HEPB', ['Hepatitis B'], { status: 'preliminary' });
+  sreq('SL1', L1, 'GLUC', ['Glucose'], { reg: null });                                               // the registered stamp is not read
+  // the other labs
+  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', '1002', 'Clinic', 'SL2'], 'HIVVL', ['HIV VL']);
+  sreq('SL2', ['Lusaka', 'Lusaka', 'Chilenje Clinic', '1002', 'Clinic', 'SL2'], 'POCVR', ['HIV VL']);
+  sreq('SL3', [...NO_LEAD, 'SL3'], 'AST', ['AST']);                                                  // not mapped: NULL province, district, facility
+  sreq('SL4', ['Central', 'Kabwe', 'No Extras Clinic', '1004', null, 'SL4'], 'ALT', ['ALT']);        // no extras: NULL type
+  sreq('SL5', ['Copperbelt', 'Kitwe', 'Own Type Post', '1005', 'Health Post', 'SL5'], 'ALT', ['ALT']);   // "ownership_type" is not "type"
+  sreq('SL6', [...NO_LEAD, 'SL6'], 'ALT', ['ALT']);                                                  // the mapping has no register row
+  sreq('SL7', [...NO_LEAD, 'SL7'], 'ALT', ['ALT']);                                                  // the mapping is for another performer system
+  sreq('SL8', ['Eastern', 'Chipata', 'Case Hospital', '1008', 'District Hospital', 'SL8'], 'ALT', ['ALT']);
+  sreq('sl8 ', ['Eastern', 'Chipata', 'Case Hospital', '1008', 'District Hospital', 'SL8'], 'ALT', ['ALT']);   // another spelling: the same lab
+  sreq('SL10', ['North-Western', 'Solwezi', 'Src Hospital', '1010', 'Provincial Hospital', 'SL10'], 'ALT', ['ALT'], { ss: 'urn:src', ps: 'urn:perf' });
+  sreq('SL11', [...NO_LEAD, 'SL11'], 'ALT', ['ALT'], { ps: null, ss: null });                        // the mapping needs the report's source system too
+  sreq('XXXX', [...NO_LEAD, 'XXXX'], 'ALT', ['ALT']);                                                // only the five codes are left out, not a longer one
+  // no testing code: v1 falls back to the receiving lab, which CE does not carry. The counts stay, in a row with no lab.
+  sreq('', [null, null, null, null, null, null], 'ALT', ['ALT']);
+  sreq('   ', [null, null, null, null, null, null], 'ALT', ['ALT']);
+  sreq(null, null, 'ALT', []);                                                                       // NULL: left out (S line 112: NOT IN of NULL is unknown)
+  // the five excluded testing codes, in other spellings too
+  SUM_OUT.forEach((code, i) => sreq(i === 1 ? `${code.toLowerCase()} ` : i === 2 ? code.toLowerCase() : code, null, 'ALT', []));
+  sreq('SX1', null, 'ALT', [], { noReport: true });                                                  // no report: not authorised
+  // every panel code, one lab each, so a code in the wrong column shows (the first three spelled another way)
+  Object.entries(SUM_MAP).forEach(([code, types], i) => {
+    const panel = i % 3 === 1 ? code.toLowerCase() : i % 3 === 2 ? `${code} ` : code;
+    sreq(`SP-${code}`, [...NO_LEAD, `SP-${code}`], panel, types);
+  });
+  // panel codes that are not listed: a lab with only those has no row
+  ['TBGXP', 'COVID', 'HIVR2', 'FBC1', ' ', ''].forEach((panel) => sreq('SOUT', null, panel, []));
+
+  const sumRows = [...sums.values()].map((s) => ({
+    Province: s.lead[0], District: s.lead[1], Facility: s.lead[2], FacilityCode: s.lead[3], FacilityType: s.lead[4], LabCode: s.lead[5], ...s.counts,
+  }));
+  const sumDayRows = [{ Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', FacilityCode: '1001', FacilityType: 'Hospital', LabCode: 'SL1',
+    ...Object.fromEntries(SUM_TYPES.map((t) => [t, t === 'Creatinine' ? 1 : 0])) }];
+
+  // =========================================================================================================================
+  // VL throughput by lab and month (prefix t27t-)
+  // =========================================================================================================================
+  const T = 't27t-';
+  let tn = 0;
+  // A VL request of `lab` registered `reg`; a result row of observation `obs` makes it a test once the report is final.
+  const treq = (lab, reg, o = {}) => { tn += 1; return add(T, { id: `T27T-${tn}`, perf: lab, reg, ...o }); };
+  const fin = (iss, obs = 'HIVVL', o = {}) => ({ iss, results: [{ obs }], ...o });
+  treq('TA1', '2026-05-03T10:00:00+02:00', fin('2026-05-04T10:00:00+02:00'));                                  // r1: tested in May
+  treq('TA1', '2026-05-31T23:30:00+02:00', fin('2026-06-02T10:00:00+02:00', 'HIVVC'));                         // r2: registered in May, tested in June
+  treq('TA1', '2026-05-20T10:00:00+02:00', fin('2026-05-21T10:00:00+02:00', 'HIVVL', { status: 'preliminary' }));   // r3: not final
+  treq('TA1', '2026-06-01T00:30:00+02:00');                                                                    // r4: June in Zambia (UTC says May)
+  treq('TA1', '2025-05-10T10:00:00+02:00', fin('2025-05-12T10:00:00+02:00'));                                  // r5: May 2025
+  treq('TA1', '2025-05-15T10:00:00+02:00');                                                                    // r6
+  treq('TA1', '2024-06-05T10:00:00+02:00', fin('2024-06-06T10:00:00+02:00'));                                  // r7: June 2024
+  treq('TA1', '2026-07-01T10:00:00+02:00', fin('2026-07-02T10:00:00+02:00', 'HIVPC'));                         // r8: a result that is not HIVVL or HIVVC
+  treq('TA1', '2026-05-12T10:00:00+02:00', fin('2026-05-13T10:00:00+02:00', 'HIVVL', { panel: 'HIVPC' }));     // r9: another panel
+  treq('ta1 ', '2026-05-07T10:00:00+02:00', fin('2026-05-08T10:00:00+02:00'));                                 // r11: another spelling of the lab
+  treq('TA1', null, fin('2026-05-09T10:00:00+02:00'));                                                         // r15: no registered stamp: Tested only
+  treq('TA1', '2026-01-01T01:00:00+02:00');                                                                    // r17: January 2026 (UTC says December 2025)
+  treq('TA1', '2025-12-31T23:30:00+02:00');                                                                    // r18
+  treq('TA1', '2026-12-31T23:59:59+02:00');                                                                    // r19
+  treq('TA1', '2026-05-25T10:00:00+02:00', { iss: '2026-05-26T10:00:00+02:00', results: [{ obs: 'HIVVL' }, { obs: 'HIVVC' }] });   // r21: two results, one test
+  treq('TA2', '2026-05-05T10:00:00+02:00', fin('2026-05-06T10:00:00+02:00'));                                  // r10
+  treq('TA2', '2026-06-10T10:00:00+02:00', fin('2026-06-01T00:30:00+02:00'));                                  // tested at 00:30 on June 1 (UTC says May)
+  treq('TA1', '2026-08-03T10:00:00+02:00', { id: 'T27T-DUP' });                                                // one request number, two spellings: one request
+  treq('TA1', '2026-08-04T10:00:00+02:00', { id: 't27t-dup ' });
+  treq('TA1', '2026-09-03T10:00:00+02:00', { panel: 'hivvl ' });                                               // the panel compares ignoring case and spaces
+  treq('  ', '2026-05-09T10:00:00+02:00', fin('2026-05-10T10:00:00+02:00'));                                   // no testing lab
+  treq(null, '2026-05-09T10:00:00+02:00', fin('2026-05-10T10:00:00+02:00'));
+  treq('TA1', '2026-05-09T10:00:00+02:00', { noReport: true });                                                // no report
+  treq('TB1', '2025-03-03T10:00:00+02:00', fin('2025-03-04T10:00:00+02:00'));                                  // r20
+  MONTH_NAMES.forEach((_, i) => treq('TM1', `2027-${String(i + 1).padStart(2, '0')}-15T12:00:00+02:00`));      // every month of 2027
+  const thr = (lab, month, requests, tested) => ({ Laboratory: lab, Month: month, MonthDescription: MONTH_NAMES[month - 1], Requests: requests, Tested: tested });
+  const thrRows = {
+    // The Tested of a month is every year's tests of that month (M line 31), so May 2026 holds r1, r11, r15, r21 and May 2025's r5.
+    2026: [thr('TA1', 1, 1, 0), thr('TA1', 5, 5, 5), thr('TA1', 6, 1, 2), thr('TA1', 7, 1, 0), thr('TA1', 8, 1, 0), thr('TA1', 9, 1, 0), thr('TA1', 12, 1, 0),
+      thr('TA2', 5, 1, 1), thr('TA2', 6, 1, 1)],
+    2025: [thr('TA1', 5, 2, 5), thr('TA1', 12, 1, 0), thr('TB1', 3, 1, 1)],
+    2024: [thr('TA1', 6, 1, 2)],
+    2027: MONTH_NAMES.map((_, i) => thr('TM1', i + 1, 1, 0)),
+    2023: [],
+  };
+
+  // =========================================================================================================================
+  // The warehouse rows
+  // =========================================================================================================================
+  const setup = `insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, obr_set_id, rejection_code) values
+  ${requests.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, issued, performer, performer_display, source_system, performer_system) values
+  ${reports.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
+  ${results.join(',\n  ')};
+insert into facility_registry (id, facility_system, facility_code, name, register_state, extras) values
+  ${regs.join(',\n  ')};
+insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district, national_code) values
+  ${maps.join(',\n  ')};`;
+
+  // =========================================================================================================================
+  // Suites
+  // =========================================================================================================================
+  // Remove the rows of the other two queries, so a suite sees only its own fixture (ids start with the prefix).
+  const isolate = (keep) => ['lab_results', 'diagnostic_reports', 'lab_requests', 'facility_map', 'facility_registry']
+    .map((t) => `delete from ${t} where id not like '${keep}%';`).join('\n');
+  let sp = 0;
+  // The exact rows in order. `only` keeps the rows of those values of one column.
+  function listSuite(name, queryName, params, columns, wanted, keep, { only, onlyColumn } = {}) {
+    const q = t27query(queryName);
+    const sqlText = q?.sql ?? `select 'x'::text as "${onlyColumn ?? 'x'}"`;
+    const text2 = only ? `select z.* from (${sqlText}) z where z."${onlyColumn}" in (${only.map(lit).join(', ')})` : sqlText;
+    const s = orderedSuite(name, text2, params, columns, wanted);
+    if (!q) {
+      const check = s.check;
+      s.check = (got) => [`query "${queryName}" is missing`, ...check(got)];
+    }
+    sp += 1;
+    s.sql = `savepoint t27sp${sp};\n${isolate(keep)}\n${s.sql}\nrollback to savepoint t27sp${sp};`;
+    return s;
+  }
+  // A suite that prints one JSON object of values and compares it.
+  function valueSuite(name, queryName, keep, selectExpr, want) {
+    const q = t27query(queryName);
+    sp += 1;
+    if (!q) return { name, count: 1, check: () => [`query "${queryName}" is missing`] };
+    return {
+      name,
+      count: 1,
+      sql: `savepoint t27sp${sp};\n${isolate(keep)}\nselect ${lit(name)} || chr(9) || (${selectExpr(q.sql)})::text;\nrollback to savepoint t27sp${sp};`,
+      check: (got) => (JSON.stringify(got) === JSON.stringify([want]) ? [] : [`expected ${JSON.stringify([want])}, got ${JSON.stringify(got)}`]),
+    };
+  }
+  const shape = (name, queryName, ids) => shapeSuite(name, t27query(queryName), ids, ids.map(() => 'text'));
+  // CE pages a result with LIMIT and OFFSET, so the ORDER BY must be total: it names every output column.
+  const orderSuite = (name, queryName, count, idOf = (i) => `res.c${String(i).padStart(2, '0')}`) => ({
+    name,
+    count,
+    check() {
+      const q = t27query(queryName);
+      if (!q) return [`query "${queryName}" is missing`];
+      const tail = q.sql.slice(q.sql.lastIndexOf('order by'));
+      const bad = [];
+      for (let i = 1; i <= count; i += 1) if (!tail.includes(idOf(i))) bad.push(`ORDER BY must list ${idOf(i)}`);
+      return bad;
+    },
+  });
+
+  const MAY = { from: '2026-05-01', to: '2026-05-31' };
+  const WEEK = { from: '2026-05-04', to: '2026-05-10' };
+  const wsOrder = byColumns([['TestType', 'text'], ['Lab', 'text'], ['LabName', 'text'], ...WS_COLUMNS.slice(3).map((c) => [c, 'number'])]);
+  const sumOrder = byColumns([...SUM_LEAD.map((c) => [c, 'text']), ...SUM_TYPES.map((c) => [c, 'number'])]);
+  const thrOrder = byColumns([['Laboratory', 'text'], ['Month', 'number'], ['MonthDescription', 'text'], ['Requests', 'number'], ['Tested', 'number']]);
+  const typesOf = (columns, params) => (sqlText) => `select json_build_object(${columns.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(sqlText, params)}) q limit 1`;
+
+  const suites27 = [
+    { name: 't27-setup', setup, count: 0, check: () => [] },
+    shape('t27-shape-ws', WS_Q, ['from', 'to']),
+    shape('t27-shape-sum', SUM_Q, ['from', 'to']),
+    shape('t27-shape-thr', THR_Q, ['year']),
+    orderSuite('t27-order-ws', WS_Q, 15),
+    orderSuite('t27-order-sum', SUM_Q, 22),
+    orderSuite('t27-order-thr', THR_Q, 4, (i) => ['g."Laboratory"', 'g."Month"', 'g."Requests"', 'coalesce(t.n, 0)'][i - 1]),
+    listSuite('t27-ws-all', WS_Q, MAY, WS_COLUMNS, [...wsRows].sort(wsOrder), W),
+    // The end day is a whole day: May 12 alone holds the 00:00:00 and the 23:59:59 request and neither neighbour.
+    listSuite('t27-ws-day', WS_Q, { from: '2026-05-12', to: '2026-05-12' }, WS_COLUMNS, [wsDayRow], W, { only: ['WD1'], onlyColumn: 'Lab' }),
+    listSuite('t27-sum-all', SUM_Q, WEEK, SUM_COLUMNS, [...sumRows].sort(sumOrder), S),
+    listSuite('t27-sum-day', SUM_Q, { from: '2026-05-10', to: '2026-05-10' }, SUM_COLUMNS, sumDayRows, S, { only: ['SL1'], onlyColumn: 'LabCode' }),
+    ...[2026, 2025, 2024, 2027, 2023].map((year) => listSuite(`t27-thr-${year}`, THR_Q, { year: String(year) }, THR_COLUMNS, [...thrRows[year]].sort(thrOrder), T)),
+    // Types: counts are bigint and the turnaround an integer (SQL Server int), the month an integer.
+    valueSuite('t27-ws-type', WS_Q, W, typesOf(WS_COLUMNS.slice(3), MAY), Object.fromEntries(WS_COLUMNS.slice(3).map((c) => [c, c === 'LabTAT' ? 'integer' : 'bigint']))),
+    valueSuite('t27-sum-type', SUM_Q, S, typesOf(SUM_TYPES, WEEK), Object.fromEntries(SUM_TYPES.map((c) => [c, 'bigint']))),
+    valueSuite('t27-thr-type', THR_Q, T, typesOf(['Month', 'Requests', 'Tested'], { year: '2026' }), { Month: 'integer', Requests: 'bigint', Tested: 'bigint' }),
+  ];
+  return { name: 't27', suites: suites27 };
+}
+
+export const groups = [{ name: 't5-vleid', suites }, group25(), group26(), group27()];

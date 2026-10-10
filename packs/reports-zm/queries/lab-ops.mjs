@@ -1,11 +1,11 @@
 // Custom queries for the lab-ops reports. Each task adds { name, sql, params } entries to the list.
 
-import { foldSql, inListSql, isNumericSql } from '../../vl-reports-mz/vl-queries.mjs';
+import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  ATTR_SYSTEM, count1, dateParams, eidCte, hivvlCte, labNameSql, labNamesCte, localDate, localTs, requestAttrSql, sqlLit, ssTextKey, tbgnxCte, testedAtSql,
-  testingCodeSql,
+  ATTR_SYSTEM, count1, dateParams, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql, requestAttrSql, sqlLit,
+  ssTextKey, tbgnxCte, testedAtSql, testingCodeSql,
 } from '../zm-sql.mjs';
-import { rateCutSql } from './vl.mjs';
+import { labMonthSource, rateCutSql } from './vl.mjs';
 
 // ---- The three lab performance dashboards (Task 25) ----------------------------------------------------------------------------------
 //
@@ -712,6 +712,291 @@ ${finalSelect26(['Facility', 'New Registrations', 'Tested', 'Reviewed', 'Tested 
     ['text', 'number', 'number', 'number', 'number', 'number'])}`;
 }
 
+// ---- VL and EID weekly stats (Task 27) -------------------------------------------------------------------------------------------------
+//
+// Replaces sp_getVLEIDstats (W below, StoredProcedure__dbo_sp_getVLEIDstats.sql) and the function it calls twice, fn_WeeklyLISUpdate (F below,
+// UserDefinedFunction__dbo_fn_WeeklyLISUpdate.sql). Per laboratory and per test type: how many requests came in during the period and what became
+// of them. Columns (v1 names and order, 15): TestType, Lab, LabName, Requests, Tests, TestedAuthorised, BacklogTests, BacklogTestsAuthorised,
+// Rejects, ORejects, Invalids, Suppressed, Positives, Indeterminates, LabTAT. Parameters: `from` and `to` (@StartDate, @EndDate), both required.
+//
+// What v1 does (lines):
+//   W 21-49, 54-82  the function for panel HIVPC (TestType 'EID', observations HIVP_) and for panel HIVVL (TestType 'HIVVL', observations
+//                   HIVV_), joined by UNION ALL; the lab names of W 23-33 and 56-66 are a constant CASE on the lab code, else the dictionary name.
+//   F 255-268       the lab list: the requests of the panel registered in the period (F 260-262), per lab, inner joined to the dictionary of
+//                   laboratories (F 255-259). Requests (F 16) counts distinct request numbers; LabTAT (F 253) averages the whole days from
+//                   registration to authorisation over those request rows.
+//   F 18-252        ten counts, each a correlated sub-select over the same panel, repeating the lab test (F 31-37, 58-64, ...). Each is a count of
+//                   distinct request numbers. They are rebuilt as FILTER counts over one grouped set of request rows (rws). A result-based count
+//                   asks "has the request row a result of observation HIVV_ (or HIVP_) that meets the condition", so each row carries that fact (exists).
+//                   All ten share the period test "stamp >= @From and stamp < @To + 1 day" (a whole local day at both ends).
+//   Tests              F 18-38    registered AND analysed in the period, with a result of the observation pattern.
+//   TestedAuthorised   F 40-65    the same, and authorised in the period, report status F, and a result text that is not one of the 13 invalid texts.
+//   BacklogTests       F 66-85    analysed in the period, registered before @From, with a result of the pattern (no authorisation needed).
+//   BacklogTestsAuthorised F 87-112  as BacklogTests, plus authorised in the period, status F and a text that is not invalid.
+//   Rejects            F 113-130  analysed in the period and a rejection code with a length over 0. No result and no registered stamp.
+//   ORejects           F 131-154  analysed and authorised in the period, a result that is not numeric (ISNUMERIC = 0) and not one of 15 known texts.
+//   Invalids           F 155-177  analysed and authorised in the period, a non-numeric result that starts with INV.
+//   Suppressed         F 178-203  analysed and authorised in the period, status F, a text that is not invalid, and (one of 10 suppressed texts, or a
+//                                 number under 1000, or any non-empty coded value).
+//   Positives          F 204-228  analysed and authorised in the period, coded value P, POS or DTS. No status test.
+//   Indeterminates     F 229-252  the same with coded value I.
+//
+// Kept v1 quirks (spec ruling 1; the controller's ruling for this task):
+//   - The definitions are v1's, word for word, including their gaps: Backlog needs no authorisation; Rejects reads no result; ORejects, Invalids,
+//     Positives and Indeterminates have no status test; Positives and Indeterminates do not look at the result text; ORejects and Invalids need no
+//     registered stamp; and Tests and TestedAuthorised need the registered stamp in the period but the backlog counts need it before. A lab is
+//     listed only when it has a request registered in the period (F 260-262): a lab with backlog or tests and no new request is not.
+//   - The period test is `>= @From and < dateadd(dd, 1, @To)` on datetimes: the whole end day is in. It is the LOCAL date of the stamp's own text
+//     (inRange). Unlike the dashboard reports, no day is added to the end.
+//   - The result conditions look at the result's text (LIMSRptResult, rpt()), and compare ignoring case and trailing spaces. `NOT IN` of a
+//     result with no text is unknown, so a result with no value is in no "valid" count and no ORejects count. An empty text counts: '' is not in
+//     any list and is not numeric.
+//   - Suppressed counts any non-empty coded value, with a number of 1000 or more beside it, and a coded value alone (the text is then the coded
+//     value, as rpt() reads it). A coded value on an invalid text does not count: the invalid test comes first.
+//   - LabTAT is AVG of an int: the whole-day (date boundary) differences of the LOCAL dates, summed and divided as integers, so it is cut toward
+//     zero (1.67 is 1, -1.5 is -1). Rows with no authorisation are left out of the average (AVG skips NULL). It averages request ROWS: one request
+//     number in two OBR sets gives two values. Only requests registered in the period are in it.
+//   - A request number that appears in two OBR sets counts once in every count (count(distinct RequestID)); the spellings compare ignoring case.
+//   - The lab is the group: two spellings of one code ('WC1', 'wc1 ') are one lab and the smallest spelling in byte order is shown.
+//   - The invalid list of TestedAuthorised, BacklogTestsAuthorised and Suppressed (13 texts), the known list of ORejects (15 texts) and the
+//     suppressed list (10 texts) are separate lists, kept as written, duplicates and all ('<30 copies/mL' and '<30 copies/ml' are one text under
+//     v1's collation).
+//
+// Deviations (spec ruling 2 and 3):
+//   - v1 tests a number with `cast(rpt as bigint) < 1000` (F 195). A decimal ('999.5'), a text with a thousands comma or an exponent makes that cast
+//     fail, and v1 stops with a conversion error (the same finding as Tasks 5 and 7). The port reads the number (numberOfTextSql), so '999.5' is
+//     suppressed and '1200.5' is not. A text with a currency sign has no number here, so it is never suppressed. These expectations are intent.
+//   - `from` and `to` are required parameters (v1's @StartDate and @EndDate are required too).
+//
+// CE gaps (spec ruling 7 and 8):
+//   - v1's lab is the testing code, else the receiving code (F 11-14, W). CE has no receiving code: the lab is the report's performer (cdr writes
+//     OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401). A request whose report has a blank testing code, or no report, has no
+//     lab and is in no count (a rejected request with no report is not counted in Rejects).
+//   - v1 inner joins its dictionary of laboratories (F 255-259), so a lab missing from it is not listed. CE has no dictionary: every testing code
+//     is a laboratory.
+//   - LabName. W 23-33 is a constant CASE and is kept as written, on the folded lab code (ZUL, ZUX, ZUC, ZUP, ZUA, ZUE, ZLP, ZLR). Any other lab has
+//     the dictionary name; CE has no dictionary, so it is the report's name with ONE name per testing code (labNamesCte, the Task 16 rule): the
+//     report's display, else the register name of the mapped code, else the code. The names are read from every report of the lab, not only the
+//     rows listed here, because a dictionary does not depend on the period, and one lab has one name in both halves.
+//   - A request with two reports counts once per report row in the average (one testing lab per report); the counts are of distinct request numbers
+//     per lab. The window columns come from CE's stamps: registered = lab_requests.authored_at, analysed = lab_requests.analysis_at, authorised =
+//     diagnostic_reports.issued, status F = report status final.
+//   - vleidRequestsCte is not used: its header says fn_WeeklyLISUpdate reads OpenLDRData.dbo.Requests, which holds every panel, and the builder
+//     keeps no row id to join the results on. The query reads lab_requests and lab_results.
+//
+// Row order: v1 has no ORDER BY (the union keeps EID first); the rows come ordered by every column, EID first, with the lab in SQL Server's
+// text order.
+const WS_INVALID = ['INVAL', 'Please repeat', 'Insufficient serum received', 'Insufficient for further tests', 'Indeterminate', 'Haemolysed', 'FAIL',
+  'Absent', 'Haemolysed ++', 'Icteric ++++', 'INV', 'This result has been checked', 'to confirm patient identity.'];
+const WS_KNOWN = ['NDET', '<30 copies/mL', '<30 copies/ml', 'Target Not Detected', 'TAR', 'RNA not detected', '< 20', '<20', '<20 copies/ml', '> 10000000',
+  'Target Not Detected.', 'INV', 'INVAL', 'INVALID', 'ND'];
+const WS_SUPPRESSED = ['ND', '<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml', '<30 copies/mL', 'NDET'];
+const WS_NAMES = [['ZUL', 'UTH Virology'], ['ZUX', 'UTH High Cost'], ['ZUC', 'UTH Cytology'], ['ZUP', 'UTH Pediatrics'], ['ZUA', 'UTH-HAP ACOE'],
+  ['ZUE', 'UTH-HAP PCOE'], ['ZLP', 'Livingstone Main Lab'], ['ZLR', 'Livingstone PCR']];
+
+export function weeklyStatsSql() {
+  // A stamp in the period (the local date, whole end day); a missing or partial stamp is outside.
+  const inPeriod = (stamp) => `coalesce(${inRange(stamp)}, false)`;
+  const reg = inPeriod('lr.authored_at');
+  const ana = inPeriod('lr.analysis_at');
+  const auth = inPeriod('dr.issued');
+  const regBefore = `coalesce(${localDate('lr.authored_at')} < ({{param.from}})::date, false)`;
+  // The request rows of one panel: the facts every count reads. The result facts are `exists` over the request row's results of the pattern.
+  const rows = (testType, panel, prefix) => {
+    const result = rpt('y');
+    const valid = `${result} is not null and not (${inListSql(result, WS_INVALID)})`;
+    const ex = (cond) => `exists (select 1 from lab_results y where y.request_id = lr.id and ${likeVarcharSql('y.observation_code', prefix, 1)} and ${cond})`;
+    return `  select ${sqlLit(testType)}::text as test_type, lr.request_id, dr.performer as code,
+    ${reg} as reg_in, ${ana} as ana_in, ${auth} as auth_in, ${regBefore} as reg_before,
+    coalesce(${foldSql('dr.status')} = 'final', false) as is_final,
+    ${localDate('dr.issued')} - ${localDate('lr.authored_at')} as tat,
+    coalesce(length(rtrim(lr.rejection_code)) > 0, false) as has_rej,
+    ${ex('true')} as has_obs,
+    ${ex(valid)} as is_valid,
+    ${ex(`not ${isNumericSql(result)} and ${result} is not null and not (${inListSql(result, WS_KNOWN)})`)} as is_other,
+    ${ex(`not ${isNumericSql(result)} and ${result} ilike 'INV%'`)} as is_inv,
+    ${ex(`${valid} and (${inListSql(result, WS_SUPPRESSED)} or coalesce(${numberOfTextSql(result)} < 1000, false) or length(rtrim(y.coded_value)) > 0)`)} as is_supp,
+    ${ex(inListSql('y.coded_value', ['P', 'POS', 'DTS']))} as is_pos,
+    ${ex(`${foldSql('y.coded_value')} = 'i'`)} as is_ind
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${foldSql('lr.panel_code')} = ${sqlLit(panel.toLowerCase())}
+    and ${testingCodeSql('dr')} is not null
+    and (${reg} or ${ana})`;
+  };
+  const rid = foldSql('r.request_id');
+  const n = (cond) => `count(distinct ${rid}) filter (where ${cond})`;
+  const labels = ['TestType', 'Lab', 'LabName', 'Requests', 'Tests', 'TestedAuthorised', 'BacklogTests', 'BacklogTestsAuthorised', 'Rejects', 'ORejects',
+    'Invalids', 'Suppressed', 'Positives', 'Indeterminates', 'LabTAT'];
+  return `with lab_dist as (
+  select distinct dr.performer, dr.performer_display, dr.source_system, dr.performer_system
+  from diagnostic_reports dr
+  where ${testingCodeSql('dr')} is not null
+),
+src as (
+  select x.performer as code, ${labNameSql('x')} as report_name
+  from lab_dist x
+),
+${labNamesCte()},
+rws as (
+${rows('EID', 'HIVPC', 'HIVP')}
+  union all
+${rows('HIVVL', 'HIVVL', 'HIVV')}
+),
+g as (
+  select r.test_type, ${foldSql('r.code')} as k, min(r.code collate "C") as lab,
+    ${n('r.reg_in')} as requests,
+    ${n('r.reg_in and r.ana_in and r.has_obs')} as tests,
+    ${n('r.reg_in and r.ana_in and r.auth_in and r.is_final and r.is_valid')} as tested_authorised,
+    ${n('r.ana_in and r.reg_before and r.has_obs')} as backlog,
+    ${n('r.ana_in and r.auth_in and r.is_final and r.is_valid and r.reg_before')} as backlog_authorised,
+    ${n('r.ana_in and r.has_rej')} as rejects,
+    ${n('r.ana_in and r.auth_in and r.is_other')} as other_rejects,
+    ${n('r.ana_in and r.auth_in and r.is_inv')} as invalids,
+    ${n('r.ana_in and r.auth_in and r.is_final and r.is_supp')} as suppressed,
+    ${n('r.ana_in and r.auth_in and r.is_pos')} as positives,
+    ${n('r.ana_in and r.auth_in and r.is_ind')} as indeterminates,
+    trunc(avg(r.tat) filter (where r.reg_in))::int as lab_tat
+  from rws r
+  group by r.test_type, ${foldSql('r.code')}
+  having count(*) filter (where r.reg_in) > 0
+),
+res as (
+  select g.test_type as c01, g.lab as c02, ${labCase('g.k', WS_NAMES)} as c03,
+    g.requests as c04, g.tests as c05, g.tested_authorised as c06, g.backlog as c07, g.backlog_authorised as c08, g.rejects as c09,
+    g.other_rejects as c10, g.invalids as c11, g.suppressed as c12, g.positives as c13, g.indeterminates as c14, g.lab_tat as c15
+  from g
+  left join names n on n.code_key = g.k
+)
+${finalSelect26(labels, ['text', 'text', 'text', ...Array(12).fill('number')])}`;
+}
+
+// ---- Tests authorised by lab and type (Task 27) ----------------------------------------------------------------------------------------
+//
+// Replaces sp_LabTestingSummary (S below, StoredProcedure__dbo_sp_LabTestingSummary.sql). The tests authorised in a period, per laboratory, in 16
+// test-type columns. Columns (v1 names and order, 22): Province, District, Facility, FacilityCode, FacilityType, LabCode, Full Blood Count, ALT,
+// Creatinine, AST, Total Bilirubin, Direct Bilirubin, HIV Rapid, RPR, Hepatitis B, HIV VL, HIV EID, HPV, TB, Malaria Rapid, TB Microscopy,
+// Glucose (the inventory says 14 test types; S has 16). Parameters: `from` and `to`, both required.
+//
+// What v1 does (lines):
+//   S 94-103   Requests, left joined to the laboratory dictionary on the lab (testing code, else receiving code, S 96-97), to the facility of the
+//              lab (S 98-99) and to the healthcare areas for the province and the district (S 100-103).
+//   S 104-112  36 panel codes; authorised on a date within the window (S 109); analysed and authorised not NULL (S 110-111); the TESTING code (not
+//              the lab of S 96) not in ZXZ, POC, 000, ZZZ, XXX (S 112). No status test (S 114 is commented out).
+//   S 9-93     per column, a sum of 1 for each request row whose panel is one of the column's codes; HSDUO is in both HIV Rapid (S 36-37) and RPR
+//              (S 41-42). The WHERE list (S 104-107) is the union of the column lists.
+//   S 116-120  grouped by province, district, facility, facility code, facility type and lab code; ordered by the first four.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - It counts REQUEST ROWS, not distinct requests: a lab number in two OBR sets is counted twice (S 9-93 are plain sums).
+//   - HSDUO counts in HIV Rapid and in RPR. Every other code is in one column.
+//   - The panel-to-type map is v1's own content (Zambia's), kept as lists in this query: SUMMARY_COLUMNS (the columns) and SUMMARY_PANELS (the
+//     WHERE list), typed as v1 has them.
+//   - The window is on the LOCAL date of the authorised stamp (S 109 casts it to a date). v1's window is getdate()-7 to getdate(), which compared
+//     with dates is the 7 days today-6 to today; the port takes the same days as `from` and `to`, both inclusive.
+//   - The five excluded codes are tested on the TESTING code only. A NULL testing code is out (NOT IN of NULL is unknown); a blank one is not.
+//   - The panel, the testing code and the lab compare ignoring case and trailing spaces.
+//
+// Deviations (spec ruling 3): the rolling 7 days become the required `from` and `to`.
+//
+// CE gaps (spec ruling 7 and 8):
+//   - The lab key. v1 uses the testing code, else the receiving code (S 96-97). CE has no receiving code, so the lab is the report's performer.
+//     A request whose testing code is blank is in the row with no lab (all six leading columns NULL); v1 would put it with its receiving lab.
+//     That row also holds v1's labs missing from the dictionary (v1 shows NULL province, district, facility and lab code for those).
+//   - Province, District, Facility, FacilityCode, FacilityType. CE has no laboratory dictionary. The lab's facility is the register row its
+//     testing code is mapped to (facility_map: source system, performer system and source code equal to the report's; registry_id set; the first
+//     row by id when several match): Province and District are that mapped row's region and district, Facility its register name, FacilityCode its
+//     national code (the MFL code; v1's code is a DISA code of the lab's facility, which CE does not hold) and FacilityType the register's `type`
+//     (the MFL "Type", kept in facility_registry.extras under "type" by build.mjs). A lab with no such row has NULL in all five. The lab code is
+//     shown as stored (the smallest spelling in byte order).
+//   - FacilityType is read from the JSON text of the extras with a pattern, so odd JSON never fails the query (a type with an escaped quote is cut).
+//   - A request with two reports counts once per report (one testing lab per report).
+//
+// Row order: Province, District, Facility, FacilityCode (v1 orders by 1 to 4), then every other column, in SQL Server's text order, NULL first.
+const SUMMARY_COLUMNS = [
+  ['Full Blood Count', ['FBC', 'FBCP', 'FBCD4']], ['ALT', ['ALT']], ['Creatinine', ['CREA']], ['AST', ['AST']], ['Total Bilirubin', ['TBIL']],
+  ['Direct Bilirubin', ['DBIL']], ['HIV Rapid', ['HIVR', 'HSDUO']], ['RPR', ['RPR', 'HSDUO']], ['Hepatitis B', ['HEPB']],
+  ['HIV VL', ['HIVVL', 'POCVR', 'POHVL']], ['HIV EID', ['POEID', 'POCGH', 'HIVPC']], ['HPV', ['HPV', 'POHPV', 'HPVGT']], ['TB', ['TBGNX', 'POCGT']],
+  ['Malaria Rapid', ['POCML', 'MALRD']], ['TB Microscopy', ['TBA1', 'TBA2', 'TBA3', 'TBZ1', 'TBZ2', 'TBZ3']],
+  ['Glucose', ['GLUCR', 'GLUCF', 'POCGL', 'GLUC', 'GLUCS']],
+];
+const SUMMARY_PANELS = ['FBC', 'FBCP', 'FBCD4', 'ALT', 'CREA', 'AST', 'TBIL', 'DBIL', 'HIVR', 'HSDUO', 'RPR', 'HEPB', 'HIVVL', 'POCVR', 'POHVL', 'POEID',
+  'HIVPC', 'POCGH', 'HPV', 'POHPV', 'HPVGT', 'TBGNX', 'POCGT', 'POCML', 'MALRD', 'TBA1', 'TBA2', 'TBA3', 'TBZ1', 'TBZ2', 'TBZ3', 'GLUC', 'GLUCR', 'GLUCF',
+  'GLUCS', 'POCGL'];
+const SUMMARY_OUT = ['ZXZ', 'POC', '000', 'ZZZ', 'XXX'];
+
+export function labSummarySql() {
+  const typeSql = `substring(fre.extras from ${sqlLit(String.raw`"type"\s*:\s*"([^"]*)"`)})`;
+  const counts = SUMMARY_COLUMNS.map(([, codes], i) => `count(*) filter (where ${inListSql('r.panel', codes)}) as c${String(i + 7).padStart(2, '0')}`);
+  const labels = ['Province', 'District', 'Facility', 'FacilityCode', 'FacilityType', 'LabCode', ...SUMMARY_COLUMNS.map(([label]) => label)];
+  return `with rws as (
+  select ${testingCodeSql('dr')} as code, lr.panel_code as panel, dr.source_system, dr.performer_system
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', SUMMARY_PANELS)}
+    and ${inRange('dr.issued')}
+    and lr.analysis_at is not null
+    and dr.performer is not null
+    and not (${inListSql('dr.performer', SUMMARY_OUT)})
+),
+labs as (
+  select distinct on (x.k) x.k, fm.region, fm.district, fm.name, fm.national_code, fm.registry_id
+  from (select distinct ${foldSql('d.code')} as k, d.source_system, d.performer_system from rws d where d.code is not null) x
+  join facility_map fm on ${foldSql('fm.source_code')} = x.k
+    and fm.source_system = coalesce(x.source_system, '') and fm.performer_system = coalesce(x.performer_system, '') and fm.registry_id is not null
+  order by x.k, fm.id
+),
+res as (
+  select l.region as c01, l.district as c02, l.name as c03, l.national_code as c04, ${typeSql} as c05, min(r.code collate "C") as c06,
+    ${counts.join(',\n    ')}
+  from rws r
+  left join labs l on l.k = ${foldSql('r.code')}
+  left join facility_registry fre on fre.id = l.registry_id
+  group by ${foldSql('r.code')}, l.region, l.district, l.name, l.national_code, fre.extras
+)
+${finalSelect26(labels, [...Array(6).fill('text'), ...Array(16).fill('number')])}`;
+}
+
+// ---- VL throughput by lab and month (Task 27) ---------------------------------------------------------------------------------------------
+//
+// Replaces sp_LabThroughputTrendbyYear (T below, StoredProcedure__dbo_sp_LabThroughputTrendbyYear.sql), which selects from the function
+// fn_annualrequestsTestsTrend (N, UserDefinedFunction__dbo_fn_annualrequestsTestsTrend.sql), which selects from the view vVLRequestsTestsByMonth
+// (M). Task 12 ported the view as "VL requests and tests by lab and month"; this query reads the same rows through the shared labMonthSource
+// (queries/vl.mjs), so the view's logic and its quirks are not copied. Columns (v1 names and order): Laboratory, Month, MonthDescription,
+// Requests, Tested. Parameter: `year` (@Year, required).
+//
+// What v1 does (lines):
+//   N 28       the view's rows of the year @Year (the view's Year is the year of RegisteredDateTime, M 21).
+//   N 22       MonthDescription: DATENAME(month, ...) of a month of 2018 (the base date '2018-01-01' only gives the month names; it is not a data
+//              filter, and the function's default year 2019 is replaced by the parameter).
+//   T 27       ordered by the first column, the laboratory.
+//   M 21-48    per year, month and lab: Requests = distinct HIVVL request numbers registered in the month; Tested = distinct HIVVL requests with a
+//              result of observation HIVVL or HIVVC, status F, authorised in the MONTH of the row, at the same testing code.
+//
+// Kept v1 quirks (spec ruling 1, and the controller's ruling for this task: the year is NOT added to Tested):
+//   - Tested matches the authorised month only, not the year (M 31: datepart(mm, ...) = datepart(mm, ...)). The Tested of a month in the year asked
+//     for therefore counts every year's tests of that month: May 2026 holds May 2025's tests too. The year filters Requests (the function's
+//     `where [Year] = @Year`), not Tested. A request registered in one month and tested in another counts in the month it was authorised.
+//   - Tested has no registered stamp test: a final HIVVL test with no registered date still counts in its authorised month.
+//   - Tested is matched on the lab by the TESTING code only (M 32); CE holds only that code.
+//   - The lab (and the request number) compares ignoring case and trailing spaces; the laboratory shown is the smallest spelling in byte order.
+//   - The year and the month are the LOCAL date of the registered stamp, from the stamp's own text ('2026-01-01T01:00:00+02:00' is January 2026,
+//     where UTC says December 2025). A request with no registered stamp is in no year.
+//
+// CE gaps (spec ruling 7): the lab key. v1 uses the testing code, else the receiving code (M 39-43). CE has no receiving code, so the lab is the
+// report's performer (cdr writes OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401); a request with a blank testing code is out. v1's
+// inner join to the laboratory dictionary (which drops a lab missing from it) is not reproduced: every testing code is a laboratory. A request with
+// no report has no lab and is not counted.
+// Deviations (spec ruling 3): the default year of the function (2019) is the required parameter. MonthDescription is English month names
+// (to_char FMMonth), as DATENAME with SQL Server's default language.
+//
+// Row order: the laboratory (v1 orders by it) in SQL Server's text order, then the month, then the counts.
+export function throughputSql() {
+  const year = `extract(year from ${localDate('lr.authored_at')})::int = ({{param.year}})::int`;
+  return `${labMonthSource(year, `g."Laboratory", g."Month", to_char(make_date(2018, g."Month", 1), 'FMMonth') as "MonthDescription", g."Requests", coalesce(t.n, 0) as "Tested"`)}
+order by ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Month", g."Requests", coalesce(t.n, 0)`;
+}
+
 export function queries() {
   return [
     { name: 'VL lab performance', sql: vlLabPerformanceSql(), params: dateParams(true) },
@@ -720,5 +1005,8 @@ export function queries() {
     { name: 'Days since last transmission', sql: daysSinceSql(), params: [{ id: 'from', label: 'Registered after (YYYY-MM-DD; v1 used 2019-01-01)', type: 'text', required: true }] },
     { name: 'Suspect collection dates', sql: suspectDatesSql(), params: dateParams(true) },
     { name: 'DISA Link weekly stats', sql: disaLinkSql(), params: dateParams(true) },
+    { name: 'VL and EID weekly stats', sql: weeklyStatsSql(), params: dateParams(true) },
+    { name: 'Tests authorised by lab and type', sql: labSummarySql(), params: dateParams(true) },
+    { name: 'VL throughput by lab and month', sql: throughputSql(), params: [{ id: 'year', label: 'Year (YYYY)', type: 'text', required: true }] },
   ];
 }
