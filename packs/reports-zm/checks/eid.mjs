@@ -940,5 +940,482 @@ const suites13trend = [
   shape13(trendQuery13, 'trend', ['province', 'district', 'facility', 'from', 'to'], ['select', 'select', 'text', 'text', 'text'], [false, false, false, true, true]),
 ];
 
+
+// ============================================================================================
+// Group t14: "EID clients by province" (v1 sp_SPHO_eid_clients_month), "EID results" (fn_getEIDs, with vPCR), "EID request answers"
+// (vPCRInfo) and "EID tests on GeneXpert" (v_GxEIDTests). Fixture ids start with "t14-"; lab ids with "T14-". "C line N" is a line of
+// StoredProcedure__dbo_sp_SPHO_eid_clients_month.sql, "F line N" of UserDefinedFunction__dbo_fn_getEIDs.sql, "V line N" of
+// View__dbo_vPCR.sql, "I line N" of View__dbo_vPCRInfo.sql, "G line N" of View__dbo_v_GxEIDTests.sql. Expected rows are worked out by hand
+// from the v1 text.
+//
+// The queries read different months so their fixtures never meet: clients May and June 2026, results August, GeneXpert September. The
+// answers query reads panel HIVST, which no other query of the group reads, and its fixtures sit in December.
+// ============================================================================================
+
+const P14 = [];
+const R14 = [];
+const S14 = [];
+const D14 = [];
+const L14 = [];
+const A14 = [];
+let n14 = 0;
+const nz14 = (v) => (v === null || v === undefined ? 'null' : String(v));
+// One v1 Requests row with its patient, specimen, report, results and attributes. Returns the request row id and the report row id.
+// `years` and `days` are AgeInYears and AgeInDays; `results` are { obs, text, num, coded }; `attrs` are [code, value].
+function req14(labId, o = {}) {
+  const r = {
+    panel: 'HIVPC', status: 'final', req: 'ZSOUT', patient: true, first: 'Test', sur: 'Client', sex: 'F', dob: null,
+    days: 100, years: 0, analyzer: null, rej: null, obr: 1, report: true, recv: null, perf: 'LUS', disp: null,
+    auth: '2026-05-02T08:00:00Z', ana: '2026-05-02T09:00:00Z', eff: '2026-05-01T07:00:00Z', iss: '2026-05-10T10:00:00Z',
+    results: [{ obs: 'HIVPR', text: 'Not Detected' }], attrs: [], ...o,
+  };
+  const k = String(++n14).padStart(3, '0');
+  const qid = `t14-q${k}`;
+  const did = `t14-d${k}`;
+  let pid = null;
+  if (r.patient) {
+    pid = `t14-p${k}`;
+    P14.push(`(${lit(pid)}, ${lit(r.sur)}, ${lit(r.first)}, ${lit(r.sex)}, ${lit(r.dob)})`);
+  }
+  R14.push(`(${lit(qid)}, ${lit(labId)}, ${lit(r.panel)}, ${lit(r.auth)}, ${lit(r.ana)}, ${lit(r.req)}, ${lit(pid)}, ${nz14(r.days)}, ${nz14(r.years)}, ${lit(r.analyzer)}, ${lit(r.rej)}, ${nz14(r.obr)})`);
+  const sid = r.recv ? `t14-s${k}` : null;
+  if (sid) S14.push(`(${lit(sid)}, ${lit(r.recv)})`);
+  if (r.report) D14.push(`(${lit(did)}, ${lit(qid)}, ${lit(r.status)}, ${lit(r.eff)}, ${lit(r.iss)}, ${lit(r.perf)}, ${lit(sid)}, ${lit(r.disp)})`);
+  r.results.forEach((x, i) => {
+    L14.push(`(${lit(`t14-r${k}-${i + 1}`)}, ${lit(qid)}, ${lit(x.obs)}, ${lit(x.text ?? null)}, ${nz14(x.num)}, ${lit(x.cmp ?? null)}, ${lit(x.coded ?? null)})`);
+  });
+  r.attrs.forEach(([code, value], i) => {
+    A14.push(`(${lit(`t14-a${k}-${i + 1}`)}, ${lit(qid)}, ${lit(ATTR_SYSTEM)}, ${lit(code)}, ${lit(value)})`);
+  });
+  return { qid, did };
+}
+const hiv = (text, obs = 'HIVPR') => ({ obs, text });
+
+// A multiset comparison of a query's rows against the expected rows: column order and count, then every row. v1 has no ORDER BY on
+// these, so the order is not pinned here (the query orders by every column).
+function rows14(name, query, params, columns, expected, setup = '') {
+  const key = (r) => JSON.stringify(columns.map((c) => r[c] ?? null));
+  return {
+    name,
+    setup,
+    sql: `select ${lit(name)} || chr(9) || row_to_json(q)::text from (${query ? bind(query.sql, params) : 'select 1'}) q;`,
+    count: expected.length + 1,
+    check(got) {
+      if (!query) return [`query for ${name} is missing`];
+      const failures = [];
+      if (got.length !== expected.length) failures.push(`expected ${expected.length} rows, got ${got.length}`);
+      if (got[0]) {
+        failures.push(...inOrder(Object.keys(got[0]), columns));
+        if (Object.keys(got[0]).length !== columns.length) failures.push(`expected ${columns.length} columns, got ${Object.keys(got[0]).length}`);
+      }
+      const left = expected.map(key);
+      for (const h of got.map(key)) {
+        const i = left.indexOf(h);
+        if (i < 0) failures.push(`unexpected row ${h}`); else left.splice(i, 1);
+      }
+      for (const w of left) failures.push(`missing row ${w}`);
+      return failures;
+    },
+  };
+}
+const q14 = (name) => queries().find((q) => q.name === name);
+
+// ---- EID clients by province ----
+
+// The columns of C lines 9-18 (the first select of the union names them).
+const CLN = ['Province', 'District', 'Facility', 'LabID', 'Name', 'AgeInYears', 'Gender', 'UNIQUEID', 'HealthcareNo', 'HOSPID', 'REFNO',
+  'CollectedDate', 'RegisteredDate', 'TestedDate', 'Result'];
+const SOUTH14 = ['Southern', 'Choma', 'Choma General Hospital'];
+const LUSAKA14 = ['Lusaka', 'Lusaka', 'Chilenje Clinic'];
+const C_EFF = '2026-05-01T07:00:00Z';
+const C_AUTH = '2026-05-02T08:00:00Z';
+const C_ISS = '2026-05-10T10:00:00Z';
+// An expected row. `month` is the window it falls in (may or jun). HealthcareNo and HOSPID are never carried (ruling 7).
+const cl = (month, area, lab, name, age, gender, uid, ref, coll, reg, tested, result) => ({
+  month,
+  province: area[0],
+  row: Object.fromEntries(CLN.map((c, i) => [c, [...area, lab, name, age, gender, uid, null, null, ref, coll, reg, tested, result][i]])),
+});
+const clients = [];
+
+// -- Valid rows (C lines 7-30): the eid table joined to the patient, one row per lab id. Age is datediff(YY, dob, registered date), the
+// calendar-year boundaries between them, so a baby born in December is 1 in May (line 11). Result is the first flag set, in the order
+// Positive, Negative, Indeterminate, Error (lines 13-18); Invalid and a text on no list leave it NULL.
+const v01 = req14('T14-V01', { first: 'Mary', sur: 'Banda', sex: 'F', dob: '2025-12-10', results: [hiv('Positive')], attrs: [['unique-id', 'ZM-001'], ['reference-numbers', 'REF-1']] });
+clients.push(cl('may', SOUTH14, 'T14-V01', 'Mary Banda', 1, 'Female', 'ZM-001', 'REF-1', C_EFF, C_AUTH, C_ISS, 'Positive'));
+req14('T14-V02', { first: 'John', sur: 'Phiri', sex: 'M', dob: '2026-01-15', auth: '2026-05-03T08:00:00Z', eff: '2026-05-02T07:00:00Z', iss: '2026-05-12T10:00:00Z' });
+clients.push(cl('may', SOUTH14, 'T14-V02', 'John Phiri', 0, 'Male', null, null, '2026-05-02T07:00:00Z', '2026-05-03T08:00:00Z', '2026-05-12T10:00:00Z', 'Negative'));
+req14('T14-V03', { first: 'Ann', sur: 'Moyo', sex: 'I', dob: '2025-01-01', iss: '2026-05-13T10:00:00Z', results: [hiv('Indeterminate')] });
+clients.push(cl('may', SOUTH14, 'T14-V03', 'Ann Moyo', 1, 'Indeterminate', null, null, C_EFF, C_AUTH, '2026-05-13T10:00:00Z', 'Indeterminate'));
+req14('T14-V04', { first: 'Joy', sur: 'Bwalya', sex: 'U', dob: '2024-02-02', iss: '2026-05-14T10:00:00Z', results: [hiv('Error')] });
+clients.push(cl('may', SOUTH14, 'T14-V04', 'Joy Bwalya', 2, 'Unknown', null, null, C_EFF, C_AUTH, '2026-05-14T10:00:00Z', 'Error'));
+// Invalid has no branch in the case (lines 13-18): Result is NULL. A sex code outside F, M, I, U gives a NULL Gender (the eid table).
+req14('T14-V05', { first: 'Esther', sur: 'Daka', sex: 'X', dob: '2025-05-05', iss: '2026-05-15T10:00:00Z', results: [hiv('Invalid')] });
+clients.push(cl('may', SOUTH14, 'T14-V05', 'Esther Daka', 1, null, null, null, C_EFF, C_AUTH, '2026-05-15T10:00:00Z', null));
+// No date of birth: datediff of a NULL is NULL. A text on no list ('Reactive') leaves Result NULL.
+req14('T14-V06', { first: 'Grace', sur: 'Tembo', sex: null, dob: null, iss: '2026-05-16T10:00:00Z', results: [hiv('Reactive')] });
+clients.push(cl('may', SOUTH14, 'T14-V06', 'Grace Tembo', null, null, null, null, C_EFF, C_AUTH, '2026-05-16T10:00:00Z', null));
+// No patient row. v1 inner-joins Patients (line 20) and would not return the row; CE may hold a request without a patient, so the row stays
+// with an empty name (two NULLs and a space make one space), as slice 1's left join does. NORES is on the indeterminate list.
+req14('T14-V07', { patient: false, iss: '2026-05-17T10:00:00Z', results: [hiv('NORES')], attrs: [['unique-id', 'ZM-07']] });
+clients.push(cl('may', SOUTH14, 'T14-V07', ' ', null, null, 'ZM-07', null, C_EFF, C_AUTH, '2026-05-17T10:00:00Z', 'Indeterminate'));
+// A partial date of birth is not a date: the age is NULL and the query does not fail.
+req14('T14-V08', { first: 'Paul', sur: 'Sakala', sex: 'M', dob: '2026-01', iss: '2026-05-18T10:00:00Z', results: [hiv('Positive*')] });
+clients.push(cl('may', SOUTH14, 'T14-V08', 'Paul Sakala', null, 'Male', null, null, C_EFF, C_AUTH, '2026-05-18T10:00:00Z', 'Positive'));
+// The age counts the LOCAL year of the registered date: 2026-01-01T00:30+02:00 is 2026 (UTC says 2025, which would give 0).
+req14('T14-V09', { first: 'Lisa', sur: 'Mumba', sex: 'F', dob: '2025-06-01', auth: '2026-01-01T00:30:00+02:00', iss: '2026-05-19T10:00:00Z', results: [hiv('POS')] });
+clients.push(cl('may', SOUTH14, 'T14-V09', 'Lisa Mumba', 1, 'Female', null, null, C_EFF, '2026-01-01T00:30:00+02:00', '2026-05-19T10:00:00Z', 'Positive'));
+// Window edges on the LOCAL date of the tested date: 05-01 00:30+02:00 is in May (UTC says 04-30); 06-01 00:30+02:00 is June (UTC says
+// 05-31); 05-31 23:30+02:00 is in May.
+req14('T14-V10', { first: 'Rita', sur: 'Zulu', sex: 'F', dob: '2026-03-03', iss: '2026-05-01T00:30:00+02:00', results: [hiv('Detected')] });
+clients.push(cl('may', SOUTH14, 'T14-V10', 'Rita Zulu', 0, 'Female', null, null, C_EFF, C_AUTH, '2026-05-01T00:30:00+02:00', 'Positive'));
+req14('T14-V11', { first: 'Sam', sur: 'Lungu', sex: 'M', dob: '2025-11-11', iss: '2026-06-01T00:30:00+02:00', results: [hiv('Negative')] });
+clients.push(cl('jun', SOUTH14, 'T14-V11', 'Sam Lungu', 1, 'Male', null, null, C_EFF, C_AUTH, '2026-06-01T00:30:00+02:00', 'Negative'));
+req14('T14-V12', { first: 'Tom', sur: 'Mulenga', sex: 'M', dob: '2026-02-02', iss: '2026-05-31T23:30:00+02:00', results: [hiv('LDL')] });
+clients.push(cl('may', SOUTH14, 'T14-V12', 'Tom Mulenga', 0, 'Male', null, null, C_EFF, C_AUTH, '2026-05-31T23:30:00+02:00', 'Negative'));
+// A date of birth after the registered year gives a negative age.
+req14('T14-V13', { first: 'Neg', sur: 'Age', sex: 'F', dob: '2027-03-01', iss: '2026-05-20T10:00:00Z', results: [hiv('Negative*')] });
+clients.push(cl('may', SOUTH14, 'T14-V13', 'Neg Age', -1, 'Female', null, null, C_EFF, C_AUTH, '2026-05-20T10:00:00Z', 'Negative'));
+// A lab number with two requests: the eid table keeps the earlier tested one (row b, 05-08), so the patient, the ids and the dates are
+// row b's, not row a's.
+req14('T14-V14', { first: 'Pat', sur: 'One', sex: 'M', dob: '2025-01-01', auth: '2026-05-04T08:00:00Z', eff: '2026-05-03T07:00:00Z', iss: '2026-05-20T10:00:00Z', results: [hiv('Positive')], attrs: [['unique-id', 'U-A'], ['reference-numbers', 'R-A']] });
+const v14b = req14('T14-V14', { first: 'Pat', sur: 'Two', sex: 'F', dob: '2024-01-01', obr: 2, iss: '2026-05-08T10:00:00Z', attrs: [['unique-id', 'U-B'], ['reference-numbers', 'R-B']] });
+clients.push(cl('may', SOUTH14, 'T14-V14', 'Pat Two', 2, 'Female', 'U-B', 'R-B', C_EFF, C_AUTH, '2026-05-08T10:00:00Z', 'Negative'));
+// Two results on one request: the eid table keeps the first (lowest result id), Positive.
+req14('T14-V15', { first: 'Zed', sur: 'Ng', sex: 'F', dob: '2025-12-25', iss: '2026-05-21T10:00:00Z', results: [hiv('Positive'), hiv('Negative')] });
+clients.push(cl('may', SOUTH14, 'T14-V15', 'Zed Ng', 1, 'Female', null, null, C_EFF, C_AUTH, '2026-05-21T10:00:00Z', 'Positive'));
+// Panel POEID is in the eid table (valid) although the rejected part leaves it out (line 57).
+req14('T14-V16', { panel: 'POEID', first: 'Poe', sur: 'Id', sex: 'M', dob: '2025-07-07', iss: '2026-05-22T10:00:00Z', results: [hiv('Positive')] });
+clients.push(cl('may', SOUTH14, 'T14-V16', 'Poe Id', 1, 'Male', null, null, C_EFF, C_AUTH, '2026-05-22T10:00:00Z', 'Positive'));
+// Another province.
+req14('T14-L01', { req: 'ZLUSA', first: 'Peter', sur: 'Lungu', sex: 'M', dob: '2025-02-02', iss: '2026-05-14T10:00:00Z', results: [hiv('Positive')] });
+clients.push(cl('may', LUSAKA14, 'T14-L01', 'Peter Lungu', 1, 'Male', null, null, C_EFF, C_AUTH, '2026-05-14T10:00:00Z', 'Positive'));
+// A facility that is not in the register (mapped without a register row, or not mapped): no row in either part (the dictionary joins are
+// inner joins: lines 46-47 and the eid table's).
+req14('T14-X01', { req: 'ZUNMP', first: 'No', sur: 'Register', sex: 'F', dob: '2025-01-01', results: [hiv('Positive')] });
+req14('T14-X02', { req: 'ZNONE', first: 'No', sur: 'Row', sex: 'F', dob: '2025-01-01', results: [hiv('Positive')] });
+req14('T14-X03', { req: 'ZUNMP', first: 'No', sur: 'Register', sex: 'F', status: 'cancelled', iss: null, results: [] });
+
+// -- Rejected rows (C lines 31-64): a request registered in the window with report status X (cancelled), panel HIVPC or POCGH, whose
+// lab number is not among the valid rows of the same window and province. Gender is Missing, not NULL, when the sex is not F, M, U or I
+// (lines 38-39). The age is the request's own (AgeInYears). Y and Z cannot be told from other statuses in CE ('unknown'), so only
+// cancelled counts (README).
+req14('T14-R01', { first: 'Ruth', sur: 'Mwale', sex: 'F', years: 0, status: 'cancelled', auth: '2026-05-03T08:00:00Z', eff: '2026-05-02T08:00:00Z', iss: null, results: [], attrs: [['unique-id', 'ZM-77'], ['reference-numbers', 'REF-R']] });
+clients.push(cl('may', SOUTH14, 'T14-R01', 'Ruth Mwale', 0, 'Female', 'ZM-77', 'REF-R', '2026-05-02T08:00:00Z', '2026-05-03T08:00:00Z', null, 'REJECTED'));
+// Panel POCGH, compared ignoring case and trailing spaces; the sex X is Missing; the authorised date is shown when present.
+req14('T14-R02', { panel: 'pocgh ', first: 'Sam', sur: 'Phiri', sex: 'X', years: 1, status: 'cancelled', auth: '2026-05-04T08:00:00Z', eff: '2026-05-03T08:00:00Z', iss: '2026-05-05T10:00:00Z', results: [hiv('Positive')] });
+clients.push(cl('may', SOUTH14, 'T14-R02', 'Sam Phiri', 1, 'Missing', null, null, '2026-05-03T08:00:00Z', '2026-05-04T08:00:00Z', '2026-05-05T10:00:00Z', 'REJECTED'));
+// Other panels are not rejected EID requests (line 57).
+req14('T14-R03', { panel: 'POEID', status: 'cancelled', iss: null, results: [] });
+req14('T14-R04', { panel: 'HIVVL', status: 'cancelled', iss: null, results: [] });
+// A lab number that is also valid in the window is left out of the rejected part (line 63).
+req14('T14-R05', { first: 'Valid', sur: 'Both', sex: 'F', dob: '2025-03-03', iss: '2026-05-15T10:00:00Z', results: [hiv('Negative')], attrs: [['unique-id', 'U-R5']] });
+req14('T14-R05', { first: 'Valid', sur: 'Both', sex: 'F', status: 'cancelled', obr: 2, auth: '2026-05-04T08:00:00Z', iss: null, results: [] });
+clients.push(cl('may', SOUTH14, 'T14-R05', 'Valid Both', 1, 'Female', 'U-R5', null, C_EFF, C_AUTH, '2026-05-15T10:00:00Z', 'Negative'));
+// ... but only when the valid row is in the window: here the valid result is in June, so in May the cancelled request shows (and in June
+// the valid row does, with no rejected row since the cancelled request was registered in May).
+req14('T14-R06', { first: 'Late', sur: 'Valid', sex: 'M', dob: '2025-09-09', iss: '2026-06-10T10:00:00Z', results: [hiv('Positive')] });
+req14('T14-R06', { first: 'Late', sur: 'Valid', sex: 'M', years: 0, status: 'cancelled', obr: 2, auth: '2026-05-04T08:00:00Z', eff: '2026-05-03T08:00:00Z', iss: null, results: [] });
+clients.push(cl('may', SOUTH14, 'T14-R06', 'Late Valid', 0, 'Male', null, null, '2026-05-03T08:00:00Z', '2026-05-04T08:00:00Z', null, 'REJECTED'));
+clients.push(cl('jun', SOUTH14, 'T14-R06', 'Late Valid', 1, 'Male', null, null, C_EFF, C_AUTH, '2026-06-10T10:00:00Z', 'Positive'));
+// The window is on the registered date (lines 58-61), by local date.
+req14('T14-R07', { first: 'Jun', sur: 'Reject', sex: 'F', years: 3, status: 'cancelled', auth: '2026-06-15T08:00:00Z', eff: '2026-06-14T08:00:00Z', iss: null, results: [] });
+clients.push(cl('jun', SOUTH14, 'T14-R07', 'Jun Reject', 3, 'Female', null, null, '2026-06-14T08:00:00Z', '2026-06-15T08:00:00Z', null, 'REJECTED'));
+req14('T14-R08', { first: 'Edge', sur: 'In', sex: 'M', years: 0, status: 'cancelled', auth: '2026-05-01T00:30:00+02:00', eff: '2026-04-30T08:00:00Z', iss: null, results: [] });
+clients.push(cl('may', SOUTH14, 'T14-R08', 'Edge In', 0, 'Male', null, null, '2026-04-30T08:00:00Z', '2026-05-01T00:30:00+02:00', null, 'REJECTED'));
+req14('T14-R09', { first: 'Edge', sur: 'Out', sex: 'F', years: 0, status: 'cancelled', auth: '2026-06-01T00:30:00+02:00', eff: '2026-05-31T08:00:00Z', iss: null, results: [] });
+clients.push(cl('jun', SOUTH14, 'T14-R09', 'Edge Out', 0, 'Female', null, null, '2026-05-31T08:00:00Z', '2026-06-01T00:30:00+02:00', null, 'REJECTED'));
+// No patient: empty name, Missing gender, the request's own age.
+req14('T14-R10', { patient: false, years: 2, status: 'cancelled', iss: null, results: [], attrs: [['unique-id', 'ZM-10']] });
+clients.push(cl('may', SOUTH14, 'T14-R10', ' ', 2, 'Missing', 'ZM-10', null, C_EFF, C_AUTH, null, 'REJECTED'));
+// A status that is not cancelled (Y, Z and others are 'unknown' in CE) is not rejected here.
+req14('T14-R11', { status: 'unknown', iss: null, results: [] });
+// UNION removes repeated rows (line 66), comparing text ignoring case and trailing spaces: three requests of one lab number with the same
+// facts are one row, shown with the first spelling in byte order.
+req14('T14-R12', { first: 'Dup', sur: 'Licate', sex: 'F', years: 1, status: 'cancelled', iss: null, results: [] });
+req14('T14-R12', { first: 'Dup', sur: 'Licate', sex: 'F', years: 1, status: 'cancelled', obr: 2, iss: null, results: [] });
+req14('t14-r12 ', { first: 'Dup', sur: 'Licate', sex: 'F', years: 1, status: 'cancelled', obr: 3, iss: null, results: [] });
+clients.push(cl('may', SOUTH14, 'T14-R12', 'Dup Licate', 1, 'Female', null, null, C_EFF, C_AUTH, null, 'REJECTED'));
+// Two requests of one lab number that differ (the registered time) are two rows.
+req14('T14-R13', { first: 'Two', sur: 'Rows', sex: 'M', years: 0, status: 'cancelled', auth: '2026-05-06T08:00:00Z', iss: null, results: [] });
+req14('T14-R13', { first: 'Two', sur: 'Rows', sex: 'M', years: 0, status: 'cancelled', obr: 2, auth: '2026-05-06T09:00:00Z', iss: null, results: [] });
+clients.push(cl('may', SOUTH14, 'T14-R13', 'Two Rows', 0, 'Male', null, null, C_EFF, '2026-05-06T08:00:00Z', null, 'REJECTED'));
+clients.push(cl('may', SOUTH14, 'T14-R13', 'Two Rows', 0, 'Male', null, null, C_EFF, '2026-05-06T09:00:00Z', null, 'REJECTED'));
+req14('T14-R14', { req: 'ZLUSA', first: 'Lu', sur: 'Saka', sex: 'F', years: 4, status: 'cancelled', auth: '2026-05-05T08:00:00Z', iss: null, results: [] });
+clients.push(cl('may', LUSAKA14, 'T14-R14', 'Lu Saka', 4, 'Female', null, null, C_EFF, '2026-05-05T08:00:00Z', null, 'REJECTED'));
+
+const clientRows = (province, month) => clients
+  .filter((c) => c.month === month && (province.trim() === '' || c.province.toLowerCase() === province.trim().toLowerCase()))
+  .map((c) => c.row);
+const clientsQuery = q14('EID clients by province');
+const clientSuite = (name, province, from, to, month, setup = '') => rows14(name, clientsQuery, { province, from, to }, CLN, clientRows(province, month), setup);
+
+// ---- EID results ----
+
+// The columns of F lines 16-43. ProvinceID and DistrictCode have no CE source (the facility list is not in CE) and stay empty (ruling 7).
+const FCOLS = ['ProvinceID', 'ProvinceName', 'DistrictCode', 'DistrictName', 'RequestingFacilityCode', 'FacilityName', 'RequestID',
+  'SpecimenDateTime', 'RegisteredDateTime', 'Gender', 'AgeGroup', 'Result'];
+const FD = { eff: '2026-08-10T07:00:00Z', auth: '2026-08-11T08:00:00Z', ana: '2026-08-11T09:00:00Z', iss: '2026-08-15T10:00:00Z' };
+const SOUTHF = { code: 'ZSOUT', prov: 'Southern', dist: 'Choma', fac: 'Choma General Hospital' };
+const NOAREAF = (code) => ({ code, prov: null, dist: null, fac: null });
+const fr = (lab, o = {}) => ({
+  ProvinceID: null, ProvinceName: (o.area ?? SOUTHF).prov, DistrictCode: null, DistrictName: (o.area ?? SOUTHF).dist,
+  RequestingFacilityCode: (o.area ?? SOUTHF).code, FacilityName: (o.area ?? SOUTHF).fac, RequestID: lab,
+  SpecimenDateTime: 'eff' in o ? o.eff : FD.eff, RegisteredDateTime: 'auth' in o ? o.auth : FD.auth,
+  Gender: 'sex' in o ? o.sex : 'F', AgeGroup: 'age' in o ? o.age : '3 - 6 Months', Result: o.result,
+});
+const fnRows = [];   // fn_getEIDs, window 2026-08-01 to 2026-08-31
+const vRows = [];    // vPCR, the same window
+// One request (or several, in `reqs`): the rows fn_getEIDs and vPCR return for it. `v` defaults to the same rows as `fn`.
+function fcase(lab, reqs, fn, v = fn) {
+  for (const o of Array.isArray(reqs) ? reqs : [reqs]) req14(lab, { ...FD, ...o });
+  fnRows.push(...fn);
+  vRows.push(...v);
+}
+
+// Result classes (F lines 34-43, compared ignoring case and trailing spaces): DTS, POS, Positive are Detected; NDT, NEG, Negative are Not
+// Detected; Indeterminate; anything else, a missing result too, is Unknown. DISTINCT (line 15) removes repeated rows, so a request with
+// several results of one class is one row. There is no filter on the observation or the status (lines 53-55).
+fcase('T14-F01', { days: 30, results: [hiv('DTS')] }, [fr('T14-F01', { age: '< 6 Weeks', result: 'Detected' })], [fr('T14-F01', { age: '<3 Months', result: 'Detected' })]);
+fcase('T14-F02', { results: [hiv('POS'), hiv('Positive')] }, [fr('T14-F02', { result: 'Detected' })]);
+fcase('T14-F03', { results: [hiv('NDT'), hiv('NEG'), hiv('Negative')] }, [fr('T14-F03', { result: 'Not Detected' })]);
+fcase('T14-F04', { results: [hiv('indeterminate ')] }, [fr('T14-F04', { result: 'Indeterminate' })]);
+fcase('T14-F05', { results: [hiv('xyz'), { obs: 'HIVPR' }] }, [fr('T14-F05', { result: 'Unknown' })]);
+fcase('T14-F06', { results: [hiv('DTS'), hiv('NDT')] }, [fr('T14-F06', { result: 'Detected' }), fr('T14-F06', { result: 'Not Detected' })]);
+fcase('T14-F07', { results: [{ obs: 'XYZ', text: 'Positive' }] }, [fr('T14-F07', { result: 'Detected' })]);
+// A request with no result row has no row (inner join, line 48). Only panel HIVPC counts (line 53), compared ignoring case and spaces.
+fcase('T14-F08', { results: [] }, [], []);
+fcase('T14-F09', { panel: 'POCGH', results: [hiv('DTS')] }, [], []);
+fcase('T14-F10', { panel: 'hivpc ', results: [hiv('DTS')] }, [fr('T14-F10', { result: 'Detected' })]);
+// The facility comes from the facility list by DISA code (line 49, a left join): an unmapped code keeps the row with empty names. The mapped
+// register row stands in for the facility list.
+fcase('T14-F11', { req: 'ZUNMP', results: [hiv('DTS')] }, [fr('T14-F11', { area: NOAREAF('ZUNMP'), result: 'Detected' })]);
+fcase('T14-F12', { req: 'ZNONE', results: [hiv('DTS')] }, [fr('T14-F12', { area: NOAREAF('ZNONE'), result: 'Detected' })]);
+fcase('T14-F13', { req: 'ZLUSA', results: [hiv('DTS')] }, [fr('T14-F13', { area: { code: 'ZLUSA', prov: 'Lusaka', dist: 'Lusaka', fac: 'Chilenje Clinic' }, result: 'Detected' })]);
+// Gender is the raw sex code (line 25), not a word: a missing sex or patient is NULL.
+fcase('T14-F14', { sex: null, results: [hiv('DTS')] }, [fr('T14-F14', { sex: null, result: 'Detected' })]);
+fcase('T14-F15', { patient: false, results: [hiv('DTS')] }, [fr('T14-F15', { sex: null, result: 'Detected' })]);
+fcase('T14-F16', { sex: 'X', results: [hiv('DTS')] }, [fr('T14-F16', { sex: 'X', result: 'Detected' })]);
+fcase('T14-F17', { sex: 'M', results: [hiv('DTS')] }, [fr('T14-F17', { sex: 'M', result: 'Detected' })]);
+// Two request rows of one lab number with the same facts are one row (DISTINCT); sex codes F and 'f ' are equal in SQL Server, so a pair
+// of those is one row too, shown with the first spelling in byte order.
+fcase('T14-F18', [{ results: [hiv('DTS')] }, { obr: 2, results: [hiv('DTS')] }], [fr('T14-F18', { result: 'Detected' })]);
+fcase('T14-F19', [{ results: [hiv('DTS')] }, { obr: 2, sex: 'f ', results: [hiv('DTS')] }], [fr('T14-F19', { result: 'Detected' })]);
+// vPCR leaves out a request with a rejection code (V line 48): NULL, '' and spaces are no code; fn_getEIDs does not look at it. Neither
+// looks at the report status.
+fcase('T14-F20', { rej: 'R1', results: [hiv('DTS')] }, [fr('T14-F20', { result: 'Detected' })], []);
+fcase('T14-F21', { rej: '', results: [hiv('DTS')] }, [fr('T14-F21', { result: 'Detected' })]);
+fcase('T14-F22', { rej: '   ', results: [hiv('DTS')] }, [fr('T14-F22', { result: 'Detected' })]);
+fcase('T14-F23', { status: 'cancelled', results: [hiv('DTS')] }, [fr('T14-F23', { result: 'Detected' })]);
+// Age bands (F lines 26-33, V lines 24-28), by AgeInDays. Day 366 is in no band in either; a missing age has no band. vPCR also leaves
+// out ages of 763 days or more and a missing age (V line 49: NULL < 763 is not true).
+const FN_AGES = [[0, '< 6 Weeks'], [41, '< 6 Weeks'], [42, '< 3 Months'], [90, '< 3 Months'], [91, '3 - 6 Months'], [182, '3 - 6 Months'],
+  [183, '6 - 9 Months'], [272, '6 - 9 Months'], [273, '9 - 12 Months'], [365, '9 - 12 Months'], [366, null], [367, '12 - 24 Months'],
+  [762, '12 - 24 Months'], [763, '> 2 Years'], [5000, '> 2 Years'], [null, null], [-1, '< 6 Weeks']];
+const V_AGES = new Map([[0, '<3 Months'], [41, '<3 Months'], [42, '<3 Months'], [90, '<3 Months'], [91, '3 - 6 Months'], [182, '3 - 6 Months'],
+  [183, '6 - 12 Months'], [272, '6 - 12 Months'], [273, '6 - 12 Months'], [365, '6 - 12 Months'], [366, null], [367, '12 - 24 Months'],
+  [762, '12 - 24 Months'], [-1, '<3 Months']]);
+FN_AGES.forEach(([days, group]) => {
+  const lab = `T14-FA${days}`;
+  fcase(lab, { days, results: [hiv('Positive')] }, [fr(lab, { age: group, result: 'Detected' })],
+    V_AGES.has(days) ? [fr(lab, { age: V_AGES.get(days), result: 'Detected' })] : []);
+});
+// The window (F lines 54-55): coalesce(SpecimenDateTime, RegisteredDateTime) from `from` 00:00:00 to `to` 00:00:00. v1 compares a datetime
+// with a date, so the last day is out but for its first instant; the times are local (the stamp's own text). vPCR has no window in v1;
+// here it takes the same window with the whole last day.
+const w = (lab, o, fn, v = fn) => fcase(lab, { ...o, results: [hiv('Positive')] }, fn, v);
+const wr = (lab, o) => fr(lab, { ...o, result: 'Detected' });
+w('T14-FW01', { eff: '2026-08-01T00:30:00+02:00' }, [wr('T14-FW01', { eff: '2026-08-01T00:30:00+02:00' })]);                    // local 08-01 (UTC 07-31)
+w('T14-FW02', { eff: '2026-08-31T00:00:00Z' }, [wr('T14-FW02', { eff: '2026-08-31T00:00:00Z' })]);                                // exactly `to` 00:00:00
+w('T14-FW03', { eff: '2026-08-31T00:00:01Z' }, [], [wr('T14-FW03', { eff: '2026-08-31T00:00:01Z' })]);                            // one second later: out for fn
+w('T14-FW04', { eff: '2026-08-31T01:00:00+02:00' }, [], [wr('T14-FW04', { eff: '2026-08-31T01:00:00+02:00' })]);                  // local 01:00 (UTC 08-30 23:00): out for fn
+w('T14-FW05', { eff: null, auth: '2026-08-15T08:00:00Z' }, [wr('T14-FW05', { eff: null, auth: '2026-08-15T08:00:00Z' })]);       // no specimen date: the registered date
+w('T14-FW06', { report: false, auth: '2026-08-16T08:00:00Z' }, [wr('T14-FW06', { eff: null, auth: '2026-08-16T08:00:00Z' })]);   // no report: no specimen date
+w('T14-FW07', { eff: '2026-07-31T23:59:59Z', auth: '2026-08-02T08:00:00Z' }, []);                                                 // the specimen date wins over a later registered date
+w('T14-FW08', { eff: '2026-07-31T23:30:00-02:00', auth: '2026-07-31T23:30:00-02:00' }, []);                                       // local 07-31 (UTC 08-01)
+// A partial specimen date ('2026-07') is not a date: the registered date decides. Both partial: no date, out.
+w('T14-FW09', { eff: '2026-07', auth: '2026-08-21T08:00:00Z' }, [wr('T14-FW09', { eff: '2026-07', auth: '2026-08-21T08:00:00Z' })]);
+w('T14-FW10', { eff: '2026-08', auth: '2026-08' }, []);
+w('T14-FW11', { eff: '2026-08-31' }, [wr('T14-FW11', { eff: '2026-08-31' })]);                                                    // a date: midnight of 08-31
+w('T14-FW12', { eff: '2026-09-01T00:00:00Z' }, []);
+// A one-day window holds only the first instant for fn_getEIDs (the quirk), the whole day for vPCR.
+w('T14-FW13', { eff: '2026-08-20T00:00:00Z' }, [wr('T14-FW13', { eff: '2026-08-20T00:00:00Z' })]);
+w('T14-FW14', { eff: '2026-08-20T09:00:00Z' }, [wr('T14-FW14', { eff: '2026-08-20T09:00:00Z' })]);
+
+const ALL_FN = 'All requests';
+const V_LIST = 'Under 2 years, no rejected requests';
+const AUG = { from: '2026-08-01', to: '2026-08-31' };
+const resultsQuery = q14('EID results');
+const resultSuite = (name, params, rows, setup = '') => rows14(name, resultsQuery, params, FCOLS, rows, setup);
+const dayRows = (list) => (list === V_LIST
+  ? [wr('T14-FW13', { eff: '2026-08-20T00:00:00Z' }), wr('T14-FW14', { eff: '2026-08-20T09:00:00Z' })]
+  : [wr('T14-FW13', { eff: '2026-08-20T00:00:00Z' })]);
+
+// ---- EID request answers ----
+
+// The columns of I lines 10-26. Fixtures sit in December and use panel HIVST (and one HIVPC request, which is not read).
+const ICOLS = ['RequestID', 'CDHIV', 'CPMTC', 'INFBR', 'INFN', 'MOHIC', 'MPMTC', 'PCRT', 'PCRTT'];
+const ID14 = { eff: '2026-12-01T07:00:00Z', auth: '2026-12-02T08:00:00Z', ana: '2026-12-02T09:00:00Z', iss: '2026-12-05T10:00:00Z' };
+const answers = [];
+const ir = (lab, o = {}) => ({ RequestID: lab, CDHIV: null, CPMTC: null, INFBR: null, INFN: null, MOHIC: null, MPMTC: null, PCRT: null, PCRTT: null, ...o });
+const hst = (reqs, results, exp) => {
+  for (const o of Array.isArray(reqs) ? reqs : [reqs]) req14(o.lab, { ...ID14, panel: 'HIVST', results, ...o });
+  answers.push(...exp);
+};
+// Eight answers on one request (lines 11-26: the first result of each observation code on the request and its OBR set).
+hst({ lab: 'T14-I01' }, [{ obs: 'CDHIV', text: 'Y' }, { obs: 'CPMTC', text: 'N' }, { obs: 'INFBR', text: 'Breast' }, { obs: 'INFN', text: 'None' },
+  { obs: 'MOHIC', text: 'MC' }, { obs: 'MPMTC', text: 'Mp' }, { obs: 'PCRT', text: 'DBS' }, { obs: 'PCRTT', text: 'First' }],
+[ir('T14-I01', { CDHIV: 'Y', CPMTC: 'N', INFBR: 'Breast', INFN: 'None', MOHIC: 'MC', MPMTC: 'Mp', PCRT: 'DBS', PCRTT: 'First' })]);
+hst({ lab: 'T14-I02' }, [{ obs: 'CDHIV', text: 'Yes' }], [ir('T14-I02', { CDHIV: 'Yes' })]);
+// A request with no result row is out (the inner join, lines 28-29); a request whose only result is another observation is in, all NULL.
+hst({ lab: 'T14-I03' }, [], []);
+hst({ lab: 'T14-I04' }, [{ obs: 'OTHER', text: 'x' }], [ir('T14-I04')]);
+// Only panel HIVST (line 31).
+hst({ lab: 'T14-I05', panel: 'HIVPC' }, [{ obs: 'CDHIV', text: 'Y' }], []);
+// Two results for one code: v1 takes the top one with no order (arbitrary); the port takes the lowest result id.
+hst({ lab: 'T14-I06' }, [{ obs: 'CDHIV', text: 'A' }, { obs: 'CDHIV', text: 'B' }], [ir('T14-I06', { CDHIV: 'A' })]);
+// The lookup is by request and OBR set (lines 11-26): two request rows of one lab number are two rows.
+hst([{ lab: 'T14-I07', obr: 1 }], [{ obs: 'CDHIV', text: 'X1' }], [ir('T14-I07', { CDHIV: 'X1' })]);
+hst([{ lab: 'T14-I07', obr: 2 }], [{ obs: 'CDHIV', text: 'X2' }], [ir('T14-I07', { CDHIV: 'X2' })]);
+// Panel and observation codes compare ignoring case and trailing spaces.
+hst({ lab: 'T14-I08', panel: 'hivst ' }, [{ obs: 'cdhiv ', text: 'Lower' }], [ir('T14-I08', { CDHIV: 'Lower' })]);
+// LIMSRptResult: a number as text, a coded value, no value at all.
+hst({ lab: 'T14-I09' }, [{ obs: 'PCRT', num: 5 }, { obs: 'CPMTC' }, { obs: 'INFN', coded: 'C1' }], [ir('T14-I09', { PCRT: '5', INFN: 'C1' })]);
+// DISTINCT (line 10): repeated rows are one, ignoring case and trailing spaces.
+hst([{ lab: 'T14-I10', obr: 1 }, { lab: 'T14-I10', obr: 2 }], [{ obs: 'CDHIV', text: 'Same' }], [ir('T14-I10', { CDHIV: 'Same' })]);
+hst([{ lab: 'T14-I11', obr: 1 }, { lab: 't14-i11 ', obr: 2 }], [{ obs: 'CDHIV', text: 'Same' }], [ir('T14-I11', { CDHIV: 'Same' })]);
+const answersQuery = q14('EID request answers');
+
+// ---- EID tests on GeneXpert ----
+
+// The columns of the eid table (Table__dbo_EID.sql) and LabName (G line 8). Fixtures sit in September; the window is the month.
+const GCOLS = ['Province', 'District', 'Facility', 'LabID', 'Gender', 'AgeGroup', 'TestedDate', 'Positive', 'TAT', 'TATWithin14', 'RunDate',
+  'RecievedDate', 'RegisteredDate', 'CollectedDate', 'TestedAt', 'Referral', 'Disalink', 'Error', 'Invalid', 'Negative', 'Indeterminate',
+  'POC', 'POCW48H', 'LabName'];
+const GD = { eff: '2026-09-01T07:00:00Z', auth: '2026-09-02T08:00:00Z', ana: '2026-09-02T09:00:00Z', iss: '2026-09-10T10:00:00Z', recv: '2026-09-01T12:00:00Z', analyzer: 'G1234' };
+// What a default request gives, written out by hand from the eid rules: 100 days old is '7 weeks to 6 Months', 'Not Detected' is on the
+// negative list, TAT is 9 date boundaries (09-01 to 09-10), the lab code LUS has no name in CE so LabName is the code.
+const GXD = {
+  Province: 'Southern', District: 'Choma', Facility: 'Choma General Hospital', Gender: 'Female', AgeGroup: '7 weeks to 6 Months',
+  TestedDate: '2026-09-10T10:00:00Z', Positive: 0, TAT: 9, TATWithin14: 1, RunDate: '2026-09-02T09:00:00Z', RecievedDate: '2026-09-01T12:00:00Z',
+  RegisteredDate: '2026-09-02T08:00:00Z', CollectedDate: '2026-09-01T07:00:00Z', TestedAt: 'LUS', Referral: null, Disalink: 0, Error: 0, Invalid: 0,
+  Negative: 1, Indeterminate: 0, POC: 0, POCW48H: 0, LabName: 'LUS',
+};
+const gxRows = [];
+const gx = (lab, o = {}) => ({ ...GXD, ...o, LabID: lab });
+// `expect` is the list of rows the lab number gives (empty: none).
+function gcase(lab, reqs, expect) {
+  for (const o of Array.isArray(reqs) ? reqs : [reqs]) req14(lab, { ...GD, ...o });
+  gxRows.push(...expect);
+}
+// The analyser code matches 'G' + four characters (G line 15), ignoring case; SQL Server's LIKE also lets a trailing space count as the
+// fourth character and ignores further trailing spaces (measured on varchar: 'G123 ' matches, 'G1  ' does not). The lab name is the
+// report's display (ruling 8).
+gcase('T14-G01', { disp: 'Lusaka Lab' }, [gx('T14-G01', { LabName: 'Lusaka Lab' })]);
+// Panel POCGH; the analyser code in lower case with a trailing space; the lab name from the register (a mapped facility row for the code).
+gcase('T14-G02', { panel: 'POCGH', analyzer: 'g1234 ', perf: 'LUS2', results: [hiv('Positive')] },
+  [gx('T14-G02', { TestedAt: 'LUS2', LabName: 'Mapped Lab', Positive: 1, Negative: 0 })]);
+gcase('T14-G03', { analyzer: 'G123' }, []);
+gcase('T14-G04', { analyzer: 'G12345' }, []);
+gcase('T14-G05', { analyzer: 'G12 4' }, [gx('T14-G05')]);
+gcase('T14-G06', { analyzer: 'G123 ' }, [gx('T14-G06')]);
+gcase('T14-G07', { analyzer: 'G1  ' }, []);
+gcase('T14-G08', { analyzer: null }, []);
+gcase('T14-G09', { analyzer: 'Z1234' }, []);
+// A ZU code other than ZUE and ZUA is stored as ZUL (the eid table); the lab name is the report's lab ('ZUB'), where v1 names ZUL.
+gcase('T14-G10', { panel: 'POEID', perf: 'ZUB' }, [gx('T14-G10', { TestedAt: 'ZUL', LabName: 'ZUB' })]);
+// No testing code: TestedAt is NULL, and the inner join to the laboratory list (lines 12-13) drops it.
+gcase('T14-G11', { perf: '' }, []);
+gcase('T14-G12', { perf: null }, []);
+// The join to Requests (lines 10-11) repeats the test once per request row of the lab number that has the panel and the analyser code, with
+// the kept row's own facts: two such rows give two identical rows (v1 has no DISTINCT).
+gcase('T14-G13', [{ iss: '2026-09-08T10:00:00Z' }, { obr: 2, iss: '2026-09-12T10:00:00Z' }],
+  [gx('T14-G13', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7 }), gx('T14-G13', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7 })]);
+// The analyser code is a fact of any request row of the lab number, not of the row the eid table keeps.
+gcase('T14-G14', [{ analyzer: 'X1', iss: '2026-09-08T10:00:00Z' }, { obr: 2, analyzer: 'G1234', iss: '2026-09-12T10:00:00Z' }],
+  [gx('T14-G14', { TestedDate: '2026-09-08T10:00:00Z', TAT: 7 })]);
+// The other request row must be in panel HIVPC, POCGH or POEID.
+gcase('T14-G15', [{ analyzer: 'X1', iss: '2026-09-08T10:00:00Z' }, { obr: 2, panel: 'HIVVL', analyzer: 'G1234', iss: '2026-09-12T10:00:00Z' }], []);
+// The window is on the local date of TestedDate: 10-01 00:30+02:00 is October (UTC says 09-30); 09-01 00:30+02:00 is September (UTC says
+// 08-31); 09-30 23:30+02:00 is in.
+gcase('T14-G16', { iss: '2026-10-01T00:30:00+02:00' }, []);
+gcase('T14-G17', { iss: '2026-09-30T23:30:00+02:00' }, [gx('T14-G17', { TestedDate: '2026-09-30T23:30:00+02:00', TAT: 29, TATWithin14: 0 })]);
+gcase('T14-G18', { iss: '2026-09-01T00:30:00+02:00' }, [gx('T14-G18', { TestedDate: '2026-09-01T00:30:00+02:00', TAT: 0 })]);
+gcase('T14-G19', { iss: '2026-08-31T23:30:00Z' }, []);
+// A point-of-care test: a numeric testing code. Collected 14 hour boundaries before it was tested, so POCW48H is 1.
+gcase('T14-G20', { perf: '5551', eff: '2026-09-09T20:00:00Z', recv: '2026-09-09T21:00:00Z' },
+  [gx('T14-G20', { TestedAt: '5551', LabName: '5551', CollectedDate: '2026-09-09T20:00:00Z', RecievedDate: '2026-09-09T21:00:00Z', TAT: 1, POC: 1, POCW48H: 1 })]);
+// A facility that is not in the register has no eid row.
+gcase('T14-G21', { req: 'ZUNMP' }, []);
+gcase('T14-G22', { req: 'ZLUSA', sex: 'M', days: 10, results: [hiv('Indeterminate')] },
+  [gx('T14-G22', { Province: 'Lusaka', District: 'Lusaka', Facility: 'Chilenje Clinic', Gender: 'Male', AgeGroup: '1 - 6 Weeks', Negative: 0, Indeterminate: 1 })]);
+// Disalink reads the pre-registration facility attribute; Referral stays NULL (CE holds no receiving facility, ruling 7).
+gcase('T14-G23', { attrs: [['prereg-registration-facility', 'ZSOUT']] }, [gx('T14-G23', { Disalink: 1 })]);
+const SEP = { from: '2026-09-01', to: '2026-09-30' };
+const gxQuery = q14('EID tests on GeneXpert');
+
+// ---- The builder option rowIds ----
+// eidCte({ rowIds: true }) adds the request row id and the report row id of the kept row as the last two columns. The default columns
+// stay as group t3 pins them. T14-V14 has two requests; the second is kept.
+const rowIdsSuite = {
+  name: 'eid-row-ids',
+  sql: `with ${eidCte('ed', { rowIds: true })} select 'eid-row-ids' || chr(9) || row_to_json(q)::text from (select * from ed where lab_id in ('T14-V01', 'T14-V14')) q;`,
+  count: 5,
+  check(got) {
+    const failures = [];
+    const want = { 'T14-V01': [v01.qid, v01.did], 'T14-V14': [v14b.qid, v14b.did] };
+    if (got.length !== 2) failures.push(`expected 2 rows, got ${got.length}`);
+    for (const r of got) {
+      const keys = Object.keys(r);
+      if (keys.length !== COLUMNS.length + 2) failures.push(`${r.lab_id}: expected ${COLUMNS.length + 2} columns, got ${keys.length}`);
+      failures.push(...inOrder(keys, ['request_row_id', 'report_row_id']));
+      if (keys[keys.length - 2] !== 'request_row_id' || keys[keys.length - 1] !== 'report_row_id') failures.push(`${r.lab_id}: the ids are not the last two columns`);
+      const [qid, did] = want[r.lab_id] ?? [];
+      if (r.request_row_id !== qid || r.report_row_id !== did) failures.push(`${r.lab_id}: expected ids ${qid} and ${did}, got ${r.request_row_id} and ${r.report_row_id}`);
+    }
+    return failures;
+  },
+};
+
+// ---- The suites ----
+
+const SETUP14 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
+  ('t14-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
+  ('t14-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka'),
+  ('t14-fm3', '', '', 'ZUNMP', null, null, null, null),
+  ('t14-fm4', '', '', 'LUS2', 'reg-lab', 'Mapped Lab', 'Lusaka', 'Lusaka');
+insert into patients (id, surname, firstname, sex, date_of_birth) values ${P14.join(',\n  ')};
+insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_days, age_years, analyzer_code, rejection_code, obr_set_id) values ${R14.join(',\n  ')};
+insert into specimens (id, received_time) values ${S14.join(',\n  ')};
+insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, specimen_id, performer_display) values ${D14.join(',\n  ')};
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values ${L14.join(',\n  ')};
+insert into lab_request_attributes (id, lab_request_id, system, code, value_text) values ${A14.join(',\n  ')};`;
+
+const suites14 = [
+  clientSuite('clients-all-may', '', '2026-05-01', '2026-05-31', 'may', SETUP14),
+  clientSuite('clients-southern-may', 'Southern', '2026-05-01', '2026-05-31', 'may'),
+  clientSuite('clients-southern-fold', 'southern ', '2026-05-01', '2026-05-31', 'may'),
+  clientSuite('clients-lusaka-may', 'Lusaka', '2026-05-01', '2026-05-31', 'may'),
+  clientSuite('clients-all-june', '', '2026-06-01', '2026-06-30', 'jun'),
+  clientSuite('clients-southern-june', 'Southern', '2026-06-01', '2026-06-30', 'jun'),
+  clientSuite('clients-other-province', 'Western', '2026-05-01', '2026-05-31', 'may'),
+  clientSuite('clients-no-rows', '', '2026-07-01', '2026-07-31', 'jul'),
+  shape13(clientsQuery, 'clients', ['province', 'from', 'to'], ['select', 'text', 'text'], [false, true, true]),
+  resultSuite('results-fn', { ...AUG, list: '' }, fnRows),
+  resultSuite('results-fn-named', { ...AUG, list: ALL_FN }, fnRows),
+  resultSuite('results-vpcr', { ...AUG, list: V_LIST }, vRows),
+  resultSuite('results-fn-day', { from: '2026-08-20', to: '2026-08-20', list: '' }, dayRows('')),
+  resultSuite('results-vpcr-day', { from: '2026-08-20', to: '2026-08-20', list: V_LIST }, dayRows(V_LIST)),
+  resultSuite('results-empty', { from: '2026-10-01', to: '2026-10-31', list: '' }, []),
+  shape13(resultsQuery, 'results', ['from', 'to', 'list'], ['text', 'text', 'select'], [true, true, false]),
+  rows14('answers', answersQuery, {}, ICOLS, answers),
+  shape13(answersQuery, 'answers', [], [], []),
+  rows14('gx-sep', gxQuery, SEP, GCOLS, gxRows),
+  rows14('gx-empty', gxQuery, { from: '2026-11-01', to: '2026-11-30' }, GCOLS, []),
+  shape13(gxQuery, 'gx', ['from', 'to'], ['text', 'text'], [true, true]),
+  rowIdsSuite,
+];
+
 export const groups = [{ name: 't3', suites }, { name: 't10-eid', suites: suites10e },
-  { name: 't13', suites: [...suites13dash, ...suites13list, ...suites13trend] }];
+  { name: 't13', suites: [...suites13dash, ...suites13list, ...suites13trend] },
+  { name: 't14', suites: suites14 }];

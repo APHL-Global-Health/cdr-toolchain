@@ -914,6 +914,11 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //   eidCte('ed', { from, to, extraDays: 1 })  the same, with the end of the window moved later by that many
 //                                             days (sp_dash_getEID_V2 and sp_dash_getEID_v2_List read up to
 //                                             the day after their end date)
+//   eidCte('ed', { rowIds: true })            adds request_row_id and report_row_id as the last two columns: the
+//                                             lab_requests and diagnostic_reports rows of the row the dedupe kept
+//                                             (for a report that needs the kept row's patient, attributes or
+//                                             report, as "EID clients by province" does). The default columns are
+//                                             unchanged.
 // v1 fills the table with sp_update_EIDTable (a MERGE that also deletes rows missing from its source)
 // and then the eid half of sp_remove_dupsHIVVLEID. The CTE returns what the table holds after both.
 //
@@ -970,7 +975,7 @@ const EID_INDETERMINATE = ['Indeterminate', 'NORES'];
 //   - Disalink reads the request attributes prereg-registration-facility (LIMSPreReg_RegistrationFacilityCode)
 //     and referring-request-id (ReferringRequestID). cdr-toolchain does not fill them yet, so disalink is 0
 //     until it does. v1's facility list is the mapped facility_map codes.
-export function eidCte(name, { from, to, extraDays = 0 } = {}) {
+export function eidCte(name, { from, to, extraDays = 0, rowIds = false } = {}) {
   const { prefilter, finalRange } = copyWindow('eidCte', from, to, 'r.tested_date', extraDays);
   const flag = (words) => `case when ${inListSql('r.result_text', words)} then 1 else 0 end`;
   return `${name} as (
@@ -1011,7 +1016,7 @@ export function eidCte(name, { from, to, extraDays = 0 } = {}) {
     ${flag(EID_NEGATIVE)} as negative,
     ${flag(EID_INDETERMINATE)} as indeterminate,
     case when c.is_poc then 1 else 0 end as poc,
-    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h
+    case when c.is_poc and c.hours_taken <= 24 then 1 else 0 end as poc_w48h${rowIds ? ',\n    r.request_row_id, r.report_row_id' : ''}
   from ${name}_ranked r
   cross join lateral (select
     ${rowFactsSql('r', `${foldSql('r.obs_code')} = 'pghiv'`)}) c

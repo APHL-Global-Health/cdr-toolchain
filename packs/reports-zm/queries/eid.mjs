@@ -1,7 +1,10 @@
 // Custom queries for the eid reports. Each task adds { name, sql, params } entries to the list.
 
 import { inListSql, rpt, foldSql } from '../../vl-reports-mz/vl-queries.mjs';
-import { sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey } from '../zm-sql.mjs';
+import {
+  sqlLit, given, blank, same, count1, ratio, provinceParam, districtParam, facilityParam, dateParams, epiSummarySql, eidCte, localDate, localTs, ssTextKey,
+  inRange, requesterJoin, requestAttrSql, genderMissingSql, labNameSql,
+} from '../zm-sql.mjs';
 
 // ---- EID testing summary by province, by district, by facility --------------------------------------------------------
 //
@@ -382,6 +385,307 @@ export const eidTrendParams = () => [
   ...dateParams(true),
 ];
 
+// ---- EID clients by province -------------------------------------------------------------------------------------------
+//
+// Replaces sp_SPHO_eid_clients_month. It is the EID twin of "VL clients by province" and has the same two changes: the province
+// constant 'Southern' (lines 24 and 62) is the `province` parameter (blank = all provinces), and "last month" (lines 25-28 on TestedDate,
+// 58-61 on RegisteredDateTime) is `from` and `to`, whole local days, both ends in. For a window of one calendar month the rows are
+// v1's rows for that month.
+//
+// Two parts, joined with UNION as v1 joins them:
+//   valid     the eid copy table (rebuilt by eidCte) joined to the patient of the kept request, windowed on TestedDate (the authorised date).
+//   rejected  requests whose report is cancelled (HL7 status X), panel HIVPC or POCGH, registered in the window, whose lab number is not
+//             among the valid rows of the same window and province (line 63). POEID is in valid but not here (line 57).
+// Columns (v1 names and order, from the first select): Province, District, Facility, LabID, Name, AgeInYears, Gender, UNIQUEID,
+// HealthcareNo, HOSPID, REFNO, CollectedDate, RegisteredDate, TestedDate, Result. The dates are CE's ISO text (CollectedDate =
+// diagnostic_reports.effective, RegisteredDate = lab_requests.authored_at, TestedDate = diagnostic_reports.issued).
+// Province, district and facility are the requesting facility's mapped register row (a facility not in the register drops out, as v1's
+// inner joins on its dictionary drop it). Name is the first name, a space and the surname. UNIQUEID and REFNO are the request attributes
+// unique-id and reference-numbers. v1 shows both raw here (unlike the VL twin, there is no ART number rule in this procedure, so none
+// of the artNumber variants applies).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - AgeInYears of a valid row is datediff(YY, dob, registered date) (line 11): the calendar-year boundaries between the two LOCAL dates,
+//     not the exact age. A baby born in December is 1 in May. Rejected rows show the request's own AgeInYears (line 37).
+//   - Result of a valid row is the first of Positive, Negative, Indeterminate, Error (lines 13-18). A result that is Invalid, or on no
+//     list, leaves it NULL.
+//   - Gender of a valid row is the eid table's (F, M, I, U; anything else NULL); rejected rows say Missing instead (lines 38-39).
+//   - Rejected rows are dropped when the lab number is valid in the same window and province, but not when the valid row is in another
+//     month (the NOT IN reads the windowed valid part).
+//   - UNION removes repeated rows (line 66), comparing text ignoring case and trailing spaces: requests of one lab number with the same
+//     facts are one row, shown with the first spelling in byte order.
+//   - v1 has no ORDER BY, so the port orders by every column (CE pages the rows).
+//
+// CE gaps (spec ruling 7) and CE choices:
+//   - HealthcareNo and HOSPID are not carried: empty columns under their v1 names.
+//   - Status Y and Z (rejected in v1) cannot be told from other non-final statuses in CE (all 'unknown'), so only cancelled (X) is
+//     rejected here.
+//   - v1 inner-joins Patients for valid rows. CE can hold a request without a patient row; it stays, with an empty name (a space), NULL
+//     age and NULL gender (valid) or Missing (rejected), as slice 1's left join does.
+//   - The patient, the attributes and the dates of a valid row are those of the request the eid table keeps (the earliest tested one
+//     of the lab number).
+//   - A date of birth that is not a full date ('2026-01') gives a NULL age; the query does not fail.
+//   - A mapped register row with no province is kept when no province is asked for (v1's rejected part left-joins the area names).
+//
+// Windows: `from` and `to` are required (spec ruling 3).
+
+export function eidClientsSql() {
+  // The rejected part reads request rows; the key texts compare as SQL Server compares them.
+  const keys = ['province', 'district', 'facility', 'lab_id', 'client_name', 'gender', 'unique_id', 'ref_no'];
+  const fold = (c) => foldSql(c);
+  const columns = 'province, district, facility, lab_id, client_name, age_years, gender, unique_id, healthcare_no, hospid, ref_no, collected_date, registered_date, tested_date, result';
+  return `with ${eidCte('ed', { from: 'from', to: 'to', rowIds: true })},
+zc_valid as (
+  select ed.province, ed.district, ed.facility, ed.lab_id, concat(p.firstname, ' ', p.surname) as client_name,
+    (extract(year from ${localDate('ed.registered_date')}) - extract(year from ${localDate('p.date_of_birth')}))::int as age_years,
+    ed.gender, ${requestAttrSql('ed.request_row_id', 'unique-id')} as unique_id, null::text as healthcare_no, null::text as hospid,
+    ${requestAttrSql('ed.request_row_id', 'reference-numbers')} as ref_no, ed.collected_date, ed.registered_date, ed.tested_date,
+    case when ed.positive = 1 then 'Positive' when ed.negative = 1 then 'Negative' when ed.indeterminate = 1 then 'Indeterminate'
+      when ed.error = 1 then 'Error' end as result
+  from ed
+  join lab_requests lr on lr.id = ed.request_row_id
+  left join patients p on p.id = lr.patient_id
+  where ${same('ed.province', 'province')}
+),
+zc_rows as (
+  select fmr.region as province, fmr.district as district, fmr.name as facility, lr.request_id as lab_id,
+    concat(p.firstname, ' ', p.surname) as client_name, lr.age_years as age_years, ${genderMissingSql('p.sex')} as gender,
+    ${requestAttrSql('lr.id', 'unique-id')} as unique_id, null::text as healthcare_no, null::text as hospid,
+    ${requestAttrSql('lr.id', 'reference-numbers')} as ref_no, dr.effective as collected_date, lr.authored_at as registered_date,
+    dr.issued as tested_date, 'REJECTED'::text as result
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  where dr.status = 'cancelled'
+    and ${inListSql('lr.panel_code', ['HIVPC', 'POCGH'])}
+    and ${inRange('lr.authored_at')}
+    and ${same('fmr.region', 'province')}
+    and not exists (select 1 from zc_valid v where ${foldSql('v.lab_id')} = ${foldSql('lr.request_id')})
+),
+zc_rejected as (
+  select distinct on (${keys.map(fold).join(', ')}, age_years, collected_date, registered_date, tested_date) ${columns}
+  from zc_rows
+  order by ${keys.map(fold).join(', ')}, age_years, collected_date, registered_date, tested_date,
+    ${keys.map((c) => `${c} collate "C"`).join(', ')}
+)
+select u.province as "Province", u.district as "District", u.facility as "Facility", u.lab_id as "LabID", u.client_name as "Name",
+  u.age_years as "AgeInYears", u.gender as "Gender", u.unique_id as "UNIQUEID", u.healthcare_no as "HealthcareNo", u.hospid as "HOSPID",
+  u.ref_no as "REFNO", u.collected_date as "CollectedDate", u.registered_date as "RegisteredDate", u.tested_date as "TestedDate",
+  u.result as "Result"
+from (
+  select ${columns} from zc_valid
+  union all
+  select ${columns} from zc_rejected
+) u
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15`;
+}
+
+export const eidClientsParams = () => [
+  provinceParam('province', false),
+  ...dateParams(true),
+];
+
+// ---- EID results -------------------------------------------------------------------------------------------------------
+//
+// Replaces fn_getEIDs (the target) and folds in vPCR as the parameter `list`. The inventory also merged vPCRInfo here; it is a separate
+// query ("EID request answers") because its columns are different. The rule used: a merge becomes a parameter only when the output
+// shape stays the same (spec ruling 1 outranks ruling 10 when it does not, as for the testing summaries by area). vPCR has the same 12
+// columns as fn_getEIDs, the same result map and the same joins, and differs only in its age bands and two filters, so it is a choice
+// of list. vPCRInfo has nine other columns (a request id and eight answers) and no area, age or result.
+//   list blank or "All requests"                    fn_getEIDs
+//   list "Under 2 years, no rejected requests"      vPCR: other age bands (<3, 3-6, 6-12 and 12-24 months), no request with a
+//                                                   rejection code (V line 48), no age of 763 days or more or missing (line 49).
+//
+// Columns (v1 names and order): ProvinceID, ProvinceName, DistrictCode, DistrictName, RequestingFacilityCode, FacilityName, RequestID,
+// SpecimenDateTime, RegisteredDateTime, Gender, AgeGroup, Result. One row per distinct combination of the twelve (line 15).
+// ProvinceName, DistrictName and FacilityName come from v1's dbo.FacilityList (joined on the DISA facility code, line 49), a table the
+// v1 script reads but does not define (inventory). CE has no such table; the requesting facility's mapped register row stands in for it,
+// and a code with no mapped row keeps the request with empty names (a left join, as v1's). ProvinceID and DistrictCode have no CE
+// source (the register holds names only), so they are empty columns under their v1 names (ruling 7).
+// Gender is the raw sex code (HL7SexCode, not a word). SpecimenDateTime is diagnostic_reports.effective, RegisteredDateTime is
+// lab_requests.authored_at (CE's ISO text). Result maps LIMSRptResult: DTS, POS and Positive are Detected; NDT, NEG and Negative are Not
+// Detected; Indeterminate stays; anything else, a missing result too, is Unknown. There is no filter on the observation or the report
+// status, so any result row of an HIVPC request counts and a non-result observation shows as Unknown.
+//
+// Age bands (AgeInDays). fn_getEIDs (lines 26-33): under 42 '< 6 Weeks'; 42-90 '< 3 Months'; 91-182 '3 - 6 Months'; 183-272 '6 - 9
+// Months'; 273-365 '9 - 12 Months'; 367-762 '12 - 24 Months'; over 762 '> 2 Years'. vPCR (V lines 24-28): up to 90 '<3 Months'; 91-182
+// '3 - 6 Months'; 183-365 '6 - 12 Months'; 367-762 '12 - 24 Months'.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Day 366 is in no band, so its AgeGroup is NULL, in both lists. A missing age has no band (fn_getEIDs keeps the row; vPCR drops it).
+//   - A request with several results of one class gives one row; with results of two classes, one row each.
+//   - Only requests in panel HIVPC. Text compares ignore case and trailing spaces.
+//   - Window (fn_getEIDs lines 54-55): coalesce(SpecimenDateTime, RegisteredDateTime) from `from` 00:00:00 to `to` 00:00:00, local wall
+//     time of the stamp's own text. v1 compares a datetime with a date, so a request on the last day is out but for the first instant of
+//     it (a one-day window holds only requests stamped exactly at midnight). A partial specimen date ('2026-07') counts as no date, so the
+//     registered date decides; a request with neither is out.
+//   - No ORDER BY in v1: the port orders by every column.
+//
+// Deviations: vPCR has no window in v1 (all time). It takes the same `from` and `to` here (ruling 3: a port needs one), but with the
+// whole last day in (the datetime quirk above is not copied to a window v1 never had). `from` and `to` are required.
+//
+// CE gaps (ruling 7): ProvinceID, DistrictCode (above). Names come from the register mapping, not FacilityList, and can differ from v1's.
+
+const EID_RESULTS_V_LIST = 'Under 2 years, no rejected requests';
+
+export function eidResultsSql() {
+  const result = rpt('l');
+  // The local wall time the window tests: the specimen date, else the registered date (a partial stamp counts as missing).
+  const ts = `coalesce(${localTs('dr.effective')}, ${localTs('lr.authored_at')})`;
+  const vpcr = `${foldSql('{{param.list}}')} = ${foldSql(sqlLit(EID_RESULTS_V_LIST))}`;
+  const age = 'lr.age_days';
+  const fnBand = `case when ${age} < 42 then '< 6 Weeks' when ${age} >= 42 and ${age} < 91 then '< 3 Months'
+      when ${age} >= 91 and ${age} <= 182 then '3 - 6 Months' when ${age} >= 183 and ${age} <= 272 then '6 - 9 Months'
+      when ${age} >= 273 and ${age} <= 365 then '9 - 12 Months' when ${age} > 366 and ${age} <= 762 then '12 - 24 Months'
+      when ${age} > 762 then '> 2 Years' end`;
+  const vBand = `case when ${age} <= 90 then '<3 Months' when ${age} >= 91 and ${age} <= 182 then '3 - 6 Months'
+      when ${age} >= 183 and ${age} <= 365 then '6 - 12 Months' when ${age} > 366 and ${age} <= 762 then '12 - 24 Months' end`;
+  const keys = ['province', 'district', 'requester_code', 'facility', 'request_id', 'sex'].map((c) => foldSql(c)).join(', ');
+  const plain = ['province', 'district', 'requester_code', 'facility', 'request_id', 'sex'].map((c) => `${c} collate "C"`).join(', ');
+  return `with zr_rows as (
+  select fmr.region as province, fmr.district as district, lr.requester_code, fmr.name as facility, lr.request_id,
+    dr.effective as specimen_at, lr.authored_at as registered_at, p.sex,
+    case when ${vpcr} then ${vBand} else ${fnBand} end as age_group,
+    case when ${inListSql(result, ['DTS', 'POS', 'Positive'])} then 'Detected'
+      when ${inListSql(result, ['Indeterminate'])} then 'Indeterminate'
+      when ${inListSql(result, ['NDT', 'NEG', 'Negative'])} then 'Not Detected'
+      else 'Unknown' end as result
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  cross join lateral (select ${ts} as stamp) w
+  where ${foldSql('lr.panel_code')} = 'hivpc'
+    and w.stamp >= ({{param.from}})::date::timestamp
+    and case when ${vpcr} then w.stamp < (({{param.to}})::date + 1)::timestamp else w.stamp <= ({{param.to}})::date::timestamp end
+    and (not (${vpcr}) or (coalesce(rtrim(lr.rejection_code), '') = '' and lr.age_days < 763))
+),
+zr_one as (
+  select distinct on (${keys}, specimen_at, registered_at, age_group, result)
+    province, district, requester_code, facility, request_id, specimen_at, registered_at, sex, age_group, result
+  from zr_rows
+  order by ${keys}, specimen_at, registered_at, age_group, result, ${plain}
+)
+select null::text as "ProvinceID", province as "ProvinceName", null::text as "DistrictCode", district as "DistrictName",
+  requester_code as "RequestingFacilityCode", facility as "FacilityName", request_id as "RequestID", specimen_at as "SpecimenDateTime",
+  registered_at as "RegisteredDateTime", sex as "Gender", age_group as "AgeGroup", result as "Result"
+from zr_one
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12`;
+}
+
+export const eidResultsParams = () => [
+  ...dateParams(true),
+  {
+    id: 'list', label: 'List (blank for all requests)', type: 'select', required: false,
+    optionsSql: `select 'All requests' as list union all select ${sqlLit(EID_RESULTS_V_LIST)}`,
+  },
+];
+
+// ---- EID request answers -----------------------------------------------------------------------------------------------
+//
+// Replaces vPCRInfo. For each request of panel HIVST, the first result of eight observations laid out as columns: CDHIV, CPMTC, INFBR,
+// INFN, MOHIC, MPMTC, PCRT, PCRTT (lines 11-26). What the panel and the codes mean is not stated in the v1 script (QUESTIONS-FOR-ZM), so
+// the columns keep their codes as names. Columns (v1 names and order): RequestID, CDHIV, CPMTC, INFBR, INFN, MOHIC, MPMTC, PCRT, PCRTT.
+// vPCR and fn_getEIDs rows can be matched to it by RequestID. It is its own query, not a column group of "EID results": the shape is
+// different (see there).
+//
+// One row per distinct combination (line 10) of the request id and the eight answers. A request row needs at least one result row of any
+// observation (the inner join on lines 28-29), so a request with no results is out; one whose results are other observations shows with
+// empty answers. The answers are looked up by request and OBR set (lines 11-26), that is, per request row: two request rows of one lab
+// number can give two rows. Each answer is LIMSRptResult (rpt: the text, else the number, else the coded value).
+//
+// Kept v1 quirks (spec ruling 1): none that change the rows. Panel and observation codes compare ignoring case and trailing spaces;
+// repeated rows are one, ignoring case and trailing spaces, shown with the first spelling in byte order.
+//
+// Deviation (ruling 2): where a request has two results for one observation, v1 takes `top 1` with no ORDER BY (lines 11-26: the pick is
+// arbitrary and can change between runs). The port takes the lowest result row id, so the answer is stable.
+//
+// No parameters: v1 has none and no window, so the query returns every HIVST request, as v1 does (the other EID lists need a window
+// because v1's function takes dates; this view does not). CE pages the rows.
+// CE gaps: none.
+
+const ANSWER_CODES = ['CDHIV', 'CPMTC', 'INFBR', 'INFN', 'MOHIC', 'MPMTC', 'PCRT', 'PCRTT'];
+
+export function eidAnswersSql() {
+  const result = rpt('l');
+  const lower = (c) => c.toLowerCase();
+  const keys = ['request_id', ...ANSWER_CODES.map(lower)].map((c) => foldSql(c)).join(', ');
+  const plain = ['request_id', ...ANSWER_CODES.map(lower)].map((c) => `${c} collate "C"`).join(', ');
+  const list = ['request_id', ...ANSWER_CODES.map(lower)].join(', ');
+  return `with za_rows as (
+  select lr.request_id,
+    ${ANSWER_CODES.map((c) => `(array_agg(${result} order by l.id) filter (where ${foldSql('l.observation_code')} = ${sqlLit(lower(c))}))[1] as ${lower(c)}`).join(',\n    ')}
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  where ${foldSql('lr.panel_code')} = 'hivst'
+  group by lr.id, lr.request_id
+),
+za_one as (
+  select distinct on (${keys}) ${list}
+  from za_rows
+  order by ${keys}, ${plain}
+)
+select request_id as "RequestID", ${ANSWER_CODES.map((c) => `${lower(c)} as "${c}"`).join(', ')}
+from za_one
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9`;
+}
+
+export const eidAnswersParams = () => [];
+
+// ---- EID tests on GeneXpert --------------------------------------------------------------------------------------------
+//
+// Replaces v_GxEIDTests: the rows of the eid copy table (rebuilt by eidCte) whose lab number has a request in panel HIVPC, POCGH or POEID
+// with an analyser code like 'G____' (a G and four characters), tested in the window, with the testing laboratory's name.
+// Columns (v1 names and order, the eid table's with v1's spelling RecievedDate, then LabName): Province, District, Facility, LabID,
+// Gender, AgeGroup, TestedDate, Positive, TAT, TATWithin14, RunDate, RecievedDate, RegisteredDate, CollectedDate, TestedAt, Referral,
+// Disalink, Error, Invalid, Negative, Indeterminate, POC, POCW48H, LabName.
+//
+// The fixed window (TestedDate within the last 1,095 days, line 14; no upper bound) is `from` and `to` (spec ruling 3); both are required.
+// The window is on the LOCAL date of the authorised date, both ends in.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The join to Requests (lines 10-11) repeats a test once per request row of its lab number that is in one of the three panels and has
+//     a G analyser code; v1 has no DISTINCT. Two such rows give two identical rows. The analyser code is a fact of any such request row,
+//     not necessarily the row the eid table kept (the facts of the output are the kept row's).
+//   - 'G____' follows SQL Server's LIKE for varchar, ignoring case; a trailing space can be the fourth character after the G, and further
+//     trailing spaces do not count (measured: 'G123 ' and 'G1234  ' match, 'G1  ' and 'G12345' do not).
+//   - No ORDER BY in v1: the port orders by every column.
+//
+// CE gaps (ruling 7):
+//   - Referral stays NULL: CE holds no receiving facility (the eid builder's referral). Disalink reads the pre-registration attributes and
+//     is 0 until cdr-toolchain fills them.
+//   - v1 inner-joins its laboratory dictionary on TestedAt (lines 12-13): a test whose testing laboratory is not in it, or has no testing
+//     code, is out. CE has no Zambia laboratory dictionary (ruling 8), so a test with no testing code is out and every other one stays.
+//     LabName is the report's display, else the mapped register name, else the code (ruling 8). For a ZU code stored as ZUL (TestedAt),
+//     the name is that of the report's own code, where v1 names ZUL.
+//
+// Deviations: none.
+
+// SQL Server `x like 'G____'` on a varchar value: the first character is a G (any case), the text is at least five characters long,
+// and its text without trailing spaces is at most five characters long (the characters in between can be anything, spaces too).
+// Measured on SQL Server: 'G1234 ', 'G123 ', 'G123  ' and 'G    ' match; 'G123', 'G1  ' and 'G12345' do not.
+const likeG4 = (x) => `(${x} ilike 'g%' and length(rtrim(${x})) <= 5 and length(${x}) >= 5)`;
+
+export function eidGeneXpertSql() {
+  return `with ${eidCte('ed', { from: 'from', to: 'to', rowIds: true })}
+select ed.province as "Province", ed.district as "District", ed.facility as "Facility", ed.lab_id as "LabID", ed.gender as "Gender",
+  ed.age_group as "AgeGroup", ed.tested_date as "TestedDate", ed.positive as "Positive", ed.tat as "TAT", ed.tat_within14 as "TATWithin14",
+  ed.run_date as "RunDate", ed.recieved_date as "RecievedDate", ed.registered_date as "RegisteredDate", ed.collected_date as "CollectedDate",
+  ed.tested_at as "TestedAt", ed.referral as "Referral", ed.disalink as "Disalink", ed.error as "Error", ed.invalid as "Invalid",
+  ed.negative as "Negative", ed.indeterminate as "Indeterminate", ed.poc as "POC", ed.poc_w48h as "POCW48H", ${labNameSql('dr')} as "LabName"
+from ed
+join diagnostic_reports dr on dr.id = ed.report_row_id
+join lab_requests gr on ${foldSql('gr.request_id')} = ${foldSql('ed.lab_id')}
+  and ${inListSql('gr.panel_code', ['HIVPC', 'POCGH', 'POEID'])}
+  and ${likeG4('gr.analyzer_code')}
+where ed.tested_at is not null
+order by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24`;
+}
+
+export const eidGeneXpertParams = () => [...dateParams(true)];
+
 export function queries() {
   return [
     { name: 'EID testing summary by province', sql: eidTestingSummarySql('province'), params: eidTestingSummaryParams('province') },
@@ -390,5 +694,9 @@ export function queries() {
     { name: 'EID dashboard summary', sql: eidDashboardSql(), params: eidDashboardParams() },
     { name: 'EID dashboard by facility, sex and age', sql: eidSexAgeSql(), params: eidSexAgeParams() },
     { name: 'EID monthly trend', sql: eidTrendSql(), params: eidTrendParams() },
+    { name: 'EID clients by province', sql: eidClientsSql(), params: eidClientsParams() },
+    { name: 'EID results', sql: eidResultsSql(), params: eidResultsParams() },
+    { name: 'EID request answers', sql: eidAnswersSql(), params: eidAnswersParams() },
+    { name: 'EID tests on GeneXpert', sql: eidGeneXpertSql(), params: eidGeneXpertParams() },
   ];
 }
