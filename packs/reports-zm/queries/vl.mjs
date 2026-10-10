@@ -5,7 +5,7 @@ import {
   hivvlCte, tndCte, provinceParam, districtParam, facilityParam, dateParams, localDate, localTs, utcTs, sqlList, zmIdsCte, inRange,
   requesterJoin, given, blank, same, count1, ratio, artNumberShortSql, artNumberRawSql, numberOfTextSql, formAnswersCte, YES_WORDS, ssTextKey, epiSummarySql,
   labNameSql, likeVarcharSql,
-  dateParamSql, dateTextParamSql, optionsListSql,
+  dateParamSql, dateTextParamSql, optionsListSql, optionalWindowSql,
   oneRowSql,
 } from '../zm-sql.mjs';
 
@@ -1249,7 +1249,8 @@ export const uniqueClientsRatesParams = () => [
 // Window (spec ruling 3): v1 has no window. `from` and `to` are optional; blank means all history, which is v1. When given, they cut the
 // REQUESTS by the local date of their registration (the row's own year-month key), both days in. Tested is not cut: it keeps counting every
 // year, as above. A window that starts or ends inside a month therefore gives that month a partial Requests; a window from the first to the
-// last day of whole months gives v1's rows for those months exactly.
+// last day of whole months gives v1's rows for those months exactly. With a side given, a request whose registered stamp is missing or does
+// not start with a full date (a partial '2026-07') is out (optionalWindowSql); with both blank it is the NULL Year and Month row.
 //
 // CE gaps (spec ruling 7 and 8):
 //   - Laboratory is diagnostic_reports.performer (the testing lab code), shown as stored (the smallest spelling in byte order when
@@ -1261,8 +1262,7 @@ export const uniqueClientsRatesParams = () => [
 //
 // Deviations (spec ruling 2): none.
 export function labMonthSql() {
-  const rangeBlank = `({{param.from}} = '' or left(lr.authored_at, 10) >= ${dateTextParamSql('from', { optional: true })}) and ({{param.to}} = '' or left(lr.authored_at, 10) <= ${dateTextParamSql('to', { optional: true })})`;
-  return `${labMonthSource(rangeBlank, 'g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"')}
+  return `${labMonthSource(optionalWindowSql('lr.authored_at'), 'g."Year", g."Month", g."Laboratory", g."Requests", coalesce(t.n, 0) as "Tested"')}
 order by g."Year" nulls first, g."Month" nulls first, ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Requests", coalesce(t.n, 0)`;
 }
 

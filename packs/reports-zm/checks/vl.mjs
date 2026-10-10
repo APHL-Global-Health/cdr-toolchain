@@ -3118,6 +3118,26 @@ const suitesFx = [
     ['Province', 'District', 'Facility', 'Tests'], [{ Province: 'Southern', District: 'Choma', Facility: 'ALPHA CLINIC', Tests: 2 }], 'q."Facility"'),
 ];
 
+// ============================================================================================
+// Group fx4 (final review, minor 4): "VL requests and tests by lab and month" with a partial registered stamp. A side of the window that is
+// given keeps only a stamp that starts with a full date (optionalWindowSql); with both sides blank every request counts, as in v1.
+// FX4-P is registered '2026-07' (no day), FX4-F on 2026-07-05; both at lab L4X, final, authorised 2026-07-10, so Tested for July is 2.
+// The partial stamp has no year or month, so its row is (NULL, NULL) with Tested 0. Fixture ids start with "fx4-".
+// ============================================================================================
+
+const SETUP_FX4 = `insert into lab_requests (id, request_id, panel_code, authored_at) values
+  ('fx4-q1', 'FX4-P', 'HIVVL', '2026-07'), ('fx4-q2', 'FX4-F', 'HIVVL', '2026-07-05T08:00:00Z');
+insert into diagnostic_reports (id, based_on_id, status, issued, performer) values
+  ('fx4-d1', 'fx4-q1', 'final', '2026-07-10T10:00:00Z', 'L4X'), ('fx4-d2', 'fx4-q2', 'final', '2026-07-10T10:00:00Z', 'L4X');
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator) values
+  ('fx4-r1', 'fx4-q1', 'HIVVL', null, 100, null), ('fx4-r2', 'fx4-q2', 'HIVVL', null, 100, null);`;
+const suitesFx4 = [
+  lmSuite('fx4-to-only', { from: '', to: '2026-07-31' }, [lm(2026, 7, 'L4X', 1, 2)]),
+  lmSuite('fx4-from-only', { from: '2026-07-01', to: '' }, [lm(2026, 7, 'L4X', 1, 2)]),
+  lmSuite('fx4-no-window', NO_WINDOW, [lm(null, null, 'L4X', 1, 0), lm(2026, 7, 'L4X', 1, 2)]),
+];
+suitesFx4[0].setup = SETUP_FX4;
+
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },
   { name: 't12', suites: suites12all },
@@ -3125,4 +3145,5 @@ export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, 
   { name: 't30c', suites: suites30c },
   { name: 'c1', suites: suitesC1 },
   { name: 'fx', suites: suitesFx },
+  { name: 'fx4', suites: suitesFx4 },
 ];
