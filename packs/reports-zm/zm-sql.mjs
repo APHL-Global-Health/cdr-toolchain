@@ -84,6 +84,18 @@ export const dateParams = (required = true) => [
 export const requesterJoin = (lrAlias, fmAlias, kind = 'join') =>
   `${kind} facility_map ${fmAlias} on ${fmAlias}.source_system = coalesce(${lrAlias}.source_system, '') and ${fmAlias}.performer_system = coalesce(${lrAlias}.requester_system, '') and ${fmAlias}.source_code = ${lrAlias}.requester_code and ${fmAlias}.registry_id is not null`;
 
+// The register row (facility_registry) behind the mapped row `fmAlias`, as a left join. Its `extras` hold the MFL columns that facility_map
+// does not copy (build.mjs): the HIMS code under hims_code, the type under type.
+export const registryRowJoin = (fmAlias, freAlias = 'fre') => `left join facility_registry ${freAlias} on ${freAlias}.id = ${fmAlias}.registry_id`;
+
+// v1's dictionary column MOHFacilityCode (nvarchar(10)): the facility's HMIS code. The column's own alias says so (`f.MOHFacilityCode
+// HMISCode`, v_vrdss_Covid line 47). CE's register keeps it as the MFL's "Hims code", in facility_registry.extras under the key hims_code
+// (build.mjs), so the value is read from the register row `freAlias` (registryRowJoin). It is not the MFL code (the national_code column).
+// NULL when there is no register row, no extras or no hims_code key; a blank code stays blank. The extras are JSON text and the key is read
+// with a pattern, so odd JSON never fails the query (a code with an escaped quote is cut). Every port of a v1 MOHFacilityCode reads it here:
+// the VRDSS feeds (HMISCode) and the recency tests (MOHFacilityCode).
+export const hmisCodeSql = (freAlias = 'fre') => `substring(${freAlias}.extras from ${sqlLit(String.raw`"hims_code"\s*:\s*"([^"]*)"`)})`;
+
 // Conditions for the optional area parameters against the mapped row `fmAlias`. Each key of `ids`
 // is the id of a parameter to apply (leave a key out to skip that filter). Returns SQL joined with
 // "and", or `true` when no filter is asked for. Province and district compare as given; the
@@ -1466,7 +1478,8 @@ const reportingStatusSql = (recency, suppression) => `case
 //   - ip (IPatner, the implementing partner) has no CE source (ruling 7): the column is NULL.
 //   - tb_edits, v1's hand-kept patch table, is not available (ruling 7). get_Test_level_Recency lets a patch fill an
 //     empty baseline. Here the column stays as this table has it.
-//   - moh_facility_code is the national code of the mapped register row (the MFL code in ZMFAC).
+//   - moh_facility_code is v1's MOHFacilityCode, the facility's HMIS code (hmisCodeSql): the mapped register row's hims_code. It is not the
+//     MFL code (national_code). NULL when the register row has no hims_code.
 //   - recency_test_date: v1 reads LabResults.DateTimeValue, which CE does not carry. The text is in the result (v1
 //     LIMSRptResult holds the same text for 30,198 of 33,004 rows, as dd/mm/yyyy). The column is that text read as a
 //     date and shown as 'YYYY-MM-DD' (isoDateOfTextSql). yyyy-mm-dd is read as it is. Any other text, and a date that
@@ -1486,7 +1499,7 @@ export function recencyCte(name, { from, to } = {}) {
     ${recencyIdsSql(finalRange)}
   ),
   ${name}_a as (
-    select fmr.region as province, fmr.district as district, fmr.name as facility, fmr.national_code as moh_facility_code,
+    select fmr.region as province, fmr.district as district, fmr.name as facility, ${hmisCodeSql('fre')} as moh_facility_code,
       lr.request_id as lab_id, ${genderMissingSql('p.sex')} as gender, lr.age_years as age_in_years,
       case when ${inListSql('l.observation_code', ['RTRI'])} then ${result} end as recency_result,
       case ${RECENCY_LAB_PREFIXES.map(([prefix, lab]) => `when ${foldSql('left(lr.request_id, 3)')} = ${sqlLit(prefix.toLowerCase())} then ${sqlLit(lab)}`).join(' ')}
@@ -1496,6 +1509,7 @@ export function recencyCte(name, { from, to } = {}) {
     from lab_requests lr
     join lab_results l on l.request_id = lr.id
     ${requesterJoin('lr', 'fmr')}
+    ${registryRowJoin('fmr', 'fre')}
     left join diagnostic_reports dr on dr.based_on_id = lr.id
     left join patients p on p.id = lr.patient_id
     where ${inListSql('lr.panel_code', [RECENCY_PANEL])}

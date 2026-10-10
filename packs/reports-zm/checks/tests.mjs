@@ -32,13 +32,27 @@ const vlText = (t, obs = 'HIVVL') => vl([{ obs, text: t }]);
 
 // The register rows every case reads. ZSOUT and ZLUSA are mapped; ZUNMP is in the map but not in the register;
 // ZNORG is in the register with no province; ZPERF is a mapped lab (a performer, for the lab name).
+// Task 30c (item B): the recency tests show v1's MOHFacilityCode, which is the register row's HMIS code (extras.hims_code), not the MFL code
+// (national_code). The two differ on every row, so a query that reads the wrong one fails. ZNOHM has a register row without the key, ZBLHM a blank
+// code, ZGHRG a registry id with no register row, ZPERF a register row with no extras, and ZLUS2 a code with blanks round the colon.
 const facilityMapSql = (p) => `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district, national_code) values
-  ('${p}-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma', '1001'),
-  ('${p}-fm2', '', '', 'ZLUSA', 'reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka', '2002'),
+  ('${p}-fm1', '', '', 'ZSOUT', '${p}-reg-s', 'Choma General Hospital', 'Southern', 'Choma', '1001'),
+  ('${p}-fm2', '', '', 'ZLUSA', '${p}-reg-l', 'Chilenje Clinic', 'Lusaka', 'Lusaka', '2002'),
   ('${p}-fm3', '', '', 'ZUNMP', null, null, null, null, null),
-  ('${p}-fm4', '', '', 'ZNORG', 'reg-n', 'No Province Clinic', null, null, '3003'),
-  ('${p}-fm5', '', '', 'ZPERF', 'reg-p', 'Perf Lab Register', 'Southern', 'Choma', '4004'),
-  ('${p}-fm6', '', '', 'ZLUS2', 'reg-l2', 'CHILENJE CLINIC ', 'LUSAKA', 'lusaka ', '2003');`;
+  ('${p}-fm4', '', '', 'ZNORG', '${p}-reg-n', 'No Province Clinic', null, null, '3003'),
+  ('${p}-fm5', '', '', 'ZPERF', '${p}-reg-p', 'Perf Lab Register', 'Southern', 'Choma', '4004'),
+  ('${p}-fm6', '', '', 'ZLUS2', '${p}-reg-l2', 'CHILENJE CLINIC ', 'LUSAKA', 'lusaka ', '2003'),
+  ('${p}-fm7', '', '', 'ZNOHM', '${p}-reg-h', 'No Hims Clinic', 'Southern', 'Choma', '5005'),
+  ('${p}-fm8', '', '', 'ZBLHM', '${p}-reg-b', 'Blank Hims Clinic', 'Southern', 'Choma', '6006'),
+  ('${p}-fm9', '', '', 'ZGHRG', '${p}-reg-ghost', 'Ghost Register Clinic', 'Southern', 'Choma', '7007');
+insert into facility_registry (id, facility_system, facility_code, name, register_state, extras) values
+  ('${p}-reg-s', 'urn:openldr:zm:facilities', '1001', 'Choma General Hospital', 'in_register', '{"hims_code":"30010001","dhis2_uid":"x1","type":"Hospital"}'),
+  ('${p}-reg-l', 'urn:openldr:zm:facilities', '2002', 'Chilenje Clinic', 'in_register', '{"type":"Clinic","hims_code":"30020002"}'),
+  ('${p}-reg-n', 'urn:openldr:zm:facilities', '3003', 'No Province Clinic', 'in_register', '{"hims_code":"30030003"}'),
+  ('${p}-reg-p', 'urn:openldr:zm:facilities', '4004', 'Perf Lab Register', 'in_register', null),
+  ('${p}-reg-l2', 'urn:openldr:zm:facilities', '2003', 'CHILENJE CLINIC ', 'in_register', '{ "hims_code" : "30020003" , "type": "Clinic" }'),
+  ('${p}-reg-h', 'urn:openldr:zm:facilities', '5005', 'No Hims Clinic', 'in_register', '{"type":"Clinic","dhis2_uid":"x5"}'),
+  ('${p}-reg-b', 'urn:openldr:zm:facilities', '6006', 'Blank Hims Clinic', 'in_register', '{"hims_code":"","type":"Clinic"}');`;
 
 function makeFixture(p) {
   const patients = [];
@@ -144,7 +158,7 @@ const RECENCY_COLUMNS = ['province', 'district', 'facility', 'moh_facility_code'
 // What a default request produces. Written out by hand from the v1 text.
 const D = {
   province: 'Southern', district: 'Choma', facility: 'Choma General Hospital',
-  moh_facility_code: '1001',                    // the MFL code of the mapped register row
+  moh_facility_code: '30010001',                // v1 MOHFacilityCode: the HMIS code of the mapped register row (not its MFL code, 1001)
   ip: null,                                     // IPatner has no CE source (ruling 7)
   lab_id: null, gender: 'Female', age_in_years: 30,
   recency_result: 'Recent',                     // v1 line 30-32: the RTRI observation's result
@@ -243,7 +257,7 @@ lab('T5R-VL-UNMAPPED', [{}, vlNum(500, 'HIVVL')].map((r, i) => (i === 1 ? { ...r
 lab('T5R-VL-PANEL', [{}, vl([{ obs: 'HIVVL', num: 500 }], { panel: 'HIVPC' })], [{}]);
 
 // ---- Facility (line 112): the RTRI row's facility must have a province ----
-lab('T5R-LUSAKA', [{ req: 'ZLUSA' }], [{ province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '2002' }]);
+lab('T5R-LUSAKA', [{ req: 'ZLUSA' }], [{ province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '30020002' }]);
 lab('T5R-UNMAPPED', [{ req: 'ZUNMP' }], []);
 lab('T5R-NOPROVINCE', [{ req: 'ZNORG' }], []);
 lab('T5R-NOFAC', [{ req: 'ZNONE' }], []);
@@ -574,7 +588,7 @@ const SURV_FIELDS_17 = ['Province', 'District', 'Facility', 'Implementing Partne
 
 // What a default request gives, by hand from R (and the builder, group t5-recency).
 const D17 = {
-  province: 'Southern', district: 'Choma', facility: 'Choma General Hospital', moh_facility_code: '1001',
+  province: 'Southern', district: 'Choma', facility: 'Choma General Hospital', moh_facility_code: '30010001',
   ip: null,                                        // IPatner has no CE source (ruling 7)
   lab_id: null, gender: 'Female', age_in_years: 30,
   recency_result: 'Recent', baseline_vl_result: null, suppression_status: null,
@@ -616,7 +630,7 @@ lab17('T17-FULL', [
     results: [{ obs: 'RTRI', text: 'Recent' }, { obs: 'RTMOD', text: 'Index' }, { obs: 'VPREG', text: 'Yes' }, { obs: 'VBREA', text: 'No' }, { obs: 'RTRTD', text: '01/03/2026' }] },
   vlNum(1500),
 ], [{
-  province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '2002', gender: 'Male', age_in_years: 41,
+  province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '30020002', gender: 'Male', age_in_years: 41,
   ...uns('1500'), modality: 'Index', pregnant: 'Yes', breastfeeding: 'No', recency_test_date: '2026-03-01',
 }], { people: [{ name: 'Alice Zulu', refno: ',ELABS 12AT.3456' }] });
 
@@ -730,7 +744,7 @@ f17.add('T17-O-F', [{ authored: SEPT_17, years: 30 }, { authored: SEPT_17, years
 f17.add('T17-O-E', [{ authored: SEPT_17 }]);
 f17.add('T17-O-Z', [{ authored: SEPT_17, req: 'ZLUSA' }]);
 const sept = (labId, extra = {}) => ({ ...D17, date_registered: SEPT_17, lab_id: labId, ...extra });
-const LUSAKA_17 = { province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '2002' };
+const LUSAKA_17 = { province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '30020002' };
 const ordered1_17 = [
   sept('T17-O-Z', LUSAKA_17),
   sept('T17-O-A'), sept('T17-O-A', uns('1500')), sept('T17-O-A', sup('500')),
@@ -2939,6 +2953,26 @@ const suites21 = [
 // Item A: every query of this area that takes dates raises an error naming the parameter for a bad date (see dateErrorSuites).
 const suites30c = [];
 suites30c.push(...dateErrorSuites('t30c-tests', queries()));
+
+// Item B: v1 MOHFacilityCode is the register row's HMIS code (extras.hims_code), as the VRDSS feeds read it (Task 24). The register rows are
+// facilityMapSql's: every national_code differs from its hims_code, so a query that reads national_code fails these rows.
+const rc30 = makeFixture('t30c');
+const wanted30 = [];
+function lab30(labId, reqs, rows) {
+  rc30.add(labId, reqs);
+  for (const w of rows) wanted30.push({ ...D, ...w, lab_id: labId });
+}
+const NOHIMS = { province: 'Southern', district: 'Choma', facility: 'No Hims Clinic' };
+lab30('T30C-B-HMIS', [{}], [{}]);                                                         // ZSOUT: 30010001 (the MFL code is 1001)
+lab30('T30C-B-LUSAKA', [{ req: 'ZLUSA' }], [{ province: 'Lusaka', district: 'Lusaka', facility: 'Chilenje Clinic', moh_facility_code: '30020002' }]);
+lab30('T30C-B-SPACES', [{ req: 'ZLUS2' }], [{ province: 'LUSAKA', district: 'lusaka ', facility: 'CHILENJE CLINIC ', moh_facility_code: '30020003' }]); // blanks round the colon
+lab30('T30C-B-NOKEY', [{ req: 'ZNOHM' }], [{ ...NOHIMS, moh_facility_code: null }]);      // a register row with extras but no hims_code
+lab30('T30C-B-BLANK', [{ req: 'ZBLHM' }], [{ province: 'Southern', district: 'Choma', facility: 'Blank Hims Clinic', moh_facility_code: '' }]); // a blank code stays blank
+lab30('T30C-B-GHOST', [{ req: 'ZGHRG' }], [{ province: 'Southern', district: 'Choma', facility: 'Ghost Register Clinic', moh_facility_code: null }]); // registry id, no register row
+lab30('T30C-B-NOEXTRAS', [{ req: 'ZPERF' }], [{ province: 'Southern', district: 'Choma', facility: 'Perf Lab Register', moh_facility_code: null }]); // extras is NULL
+suites30c.push(
+  builderSuite({ name: 't30c-recency-hmis', setup: rc30.setup(), cteSql: bind(recencyCte('rc', { from: 'from', to: 'to' }), WINDOW), columns: RECENCY_COLUMNS, alias: 'rc', rows: wanted30 }),
+);
 
 export const groups = [
   { name: 't5-recency', suites: recencySuites },

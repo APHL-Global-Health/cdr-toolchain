@@ -3,7 +3,7 @@
 import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
   ageGroupSql, dateParams, genderFmiuSql, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, optionalWindowSql, priorityCodeSql, requestAttrSql,
-  requesterJoin, sqlLit, ssTextKey, testingCodeSql,
+  requesterJoin, sqlLit, ssTextKey, testingCodeSql, hmisCodeSql, registryRowJoin,
   dateParamSql,
 } from '../zm-sql.mjs';
 
@@ -765,12 +765,11 @@ export const extractParams = () => optionalDateParams();
 //   Collected, Received, Registered, Tested, Date Result Reported   the report's effective, the specimen's received_time, authored_at,
 //                           analysis_at and the report's issued (CE's text, with the offset DISA wrote).
 //   Province, District, Facility / Location   the mapped register row of the requesting facility; NULL when it is not in the register.
-//   HMISCode (VRDSS line 47)   v1 reads the dictionary column MOHFacilityCode and calls it HMISCode. CE's register keeps the MFL's "Hims code" in
-//                           facility_registry.extras under the key hims_code (build.mjs), so it is read from there: the mapped register row's
-//                           extras. NULL when the facility has no register row, no extras or no hims_code. The extras are JSON text and the key
-//                           is read with a pattern, so odd JSON never fails the query (a code with an escaped quote is cut). HONEST NON-PROOF:
-//                           the Task 17 queries read v1's MOHFacilityCode as the register's national_code (the MFL code). If Zambia's dictionary
-//                           holds that code here, the column should be the national_code and not the Hims code; the question is not settled.
+//   HMISCode (VRDSS line 47)   v1 reads the dictionary column MOHFacilityCode and calls it HMISCode. The alias and the column's type (nvarchar(10)) say it holds
+//                           the HMIS code. CE's register keeps the MFL's "Hims code" in facility_registry.extras under the key hims_code (build.mjs), so
+//                           it is read from the mapped register row (hmisCodeSql, shared with the recency tests, which read the same v1 column).
+//                           NULL when the facility has no register row, no extras or no hims_code. The extras are JSON text and the key is read with a
+//                           pattern, so odd JSON never fails the query (a code with an escaped quote is cut).
 //   Result (lines 51-67)    CASE on LIMSRptResult (rpt): the 13 texts of the line list's standard map, no ELSE, so an unlisted text gives NULL.
 //                           'Inconclusive' keeps the acute accent on the I (U+00CD) of v1's typo; the plain 'Inconclusive' is NULL. Same map as the line list.
 //   Instrument (lines 68-78) FRTP/FRTB -> AB7500, C6800 -> C6800, GENEX/GENEB -> GeneXpert, PNTHR/PNTHB -> Hologic Panther, QS3 -> QuantStudio, any
@@ -833,7 +832,7 @@ const VRDSS_EXPRESSIONS = {
   registered: 'lr.authored_at',
   province: 'fmr.region',
   district: 'fmr.district',
-  hmis: `substring(fre.extras from ${sqlLit(String.raw`"hims_code"\s*:\s*"([^"]*)"`)})`,
+  hmis: hmisCodeSql('fre'),
   facility: 'fmr.name',
   tested: 'lr.analysis_at',
   reported: 'dr.issued',
@@ -866,7 +865,7 @@ function vrdssSql(out, panels) {
   join lab_results l on l.request_id = lr.id
   left join specimens s on s.id = dr.specimen_id
   ${requesterJoin('lr', 'fmr', 'left join')}
-  left join facility_registry fre on fre.id = fmr.registry_id
+  ${registryRowJoin('fmr', 'fre')}
   where ${inListSql('lr.panel_code', panels)}
     and ${inListSql('l.observation_code', LINE_OBSERVATIONS)}
     and ${foldSql('dr.status')} = 'final'

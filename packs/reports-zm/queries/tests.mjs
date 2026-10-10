@@ -75,9 +75,9 @@ const windowParams = () => [...dateParams(true)];
 //   - Age, dates and answers come through as stored. The four dates are CE's ISO text with the offset DISA wrote.
 //
 // CE gaps (spec ruling 7): IP (the implementing partner) has no CE source and is NULL. tb_edits, v1's hand-kept table of corrected
-// baselines, has no source in CE: a lab number v1 patched shows the baseline the lab results hold. MOHFacilityCode is the register's
-// national code. Recency Test Date is read from the RTRTD result text (recencyCte). Testing Laboratory follows ruling 8 for any
-// lab number outside the 13 prefixes.
+// baselines, has no source in CE: a lab number v1 patched shows the baseline the lab results hold. MOHFacilityCode is the HMIS code
+// of the mapped register row (hmisCodeSql: hims_code in the register's extras; v1's own alias for the column is HMISCode). Recency Test Date
+// is read from the RTRTD result text (recencyCte). Testing Laboratory follows ruling 8 for any lab number outside the 13 prefixes.
 export function recencyTestsSql() {
   const columns = recencyColumns(false);
   return `with ${recencyCte('rc', { from: 'from', to: 'to' })}
