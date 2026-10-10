@@ -99,7 +99,10 @@ order by ${orderItems(columns)}`;
 //     are those of ALL its request rows, in either panel and outside the window. The lab numbers compare ignoring case and trailing
 //     spaces, as SQL Server's join does.
 //   - Several request rows of one lab number that name the same person (the same first name and surname) are one client, as v1's
-//     one Patients row per request number is. Two different people under one lab number give a row each, as a join does.
+//     one Patients row per request number is. Two different people under one lab number give a row each, as a join does. The names
+//     compare the way SQL Server compares text (case and trailing spaces ignored), and a NULL name part counts as empty, as concat does:
+//     'Mary Banda' and 'MARY BANDA ' are one client, and so are a NULL and an empty first name (both show ' Banda'). The client shows the
+//     first name and surname of ONE patients row, the smallest in byte order (first name, then surname), never a mix of two rows.
 //   - REFNO is the text of the reference-numbers request attribute (the raw text, not the ART number). When a client's rows hold
 //     several values, the greater text in byte order is shown (v1 holds one value).
 //   - The inner join drops a lab number with no patient row, or whose patient_id points at no patients row, as v1 does.
@@ -109,12 +112,14 @@ export function recencyTestsWithClientNamesSql() {
   const columns = recencyColumns(true);
   return `with ${recencyCte('rc', { from: 'from', to: 'to' })},
 pat as (
-  select ${foldSql('lr.request_id')} as lab_key, p.firstname, p.surname,
+  select ${foldSql('lr.request_id')} as lab_key,
+    (array_agg(p.firstname order by coalesce(p.firstname, '') collate "C", coalesce(p.surname, '') collate "C", p.id))[1] as firstname,
+    (array_agg(p.surname order by coalesce(p.firstname, '') collate "C", coalesce(p.surname, '') collate "C", p.id))[1] as surname,
     max(${requestAttrSql('lr.id', 'reference-numbers')} collate "C") as refno
   from lab_requests lr
   join patients p on p.id = lr.patient_id
   where ${foldSql('lr.request_id')} in (select ${foldSql('c.lab_id')} from rc c)
-  group by ${foldSql('lr.request_id')}, p.firstname, p.surname
+  group by ${foldSql('lr.request_id')}, ${foldSql("coalesce(p.firstname, '')")}, ${foldSql("coalesce(p.surname, '')")}
 )
 select ${selectItems(columns)}
 from rc

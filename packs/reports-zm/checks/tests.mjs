@@ -81,8 +81,9 @@ function makeFixture(p) {
         });
       });
     },
-    setup() {
-      return `${facilityMapSql(p)}
+    // `facilities: false` leaves out the facility_map and register rows (a group takes one set; a second fixture in the group reuses them).
+    setup({ facilities = true } = {}) {
+      return `${facilities ? facilityMapSql(p) : ''}
 insert into patients (id, surname, sex) values ${patients.join(',\n  ')};
 insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, obr_set_id) values ${requests.join(',\n  ')};
 insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display) values ${reports.join(',\n  ')};
@@ -558,8 +559,8 @@ function makeFixture17(p) {
         });
       });
     },
-    setup() {
-      return `${facilityMapSql(p)}
+    setup({ facilities = true } = {}) {
+      return `${facilities ? facilityMapSql(p) : ''}
 insert into patients (id, firstname, surname, sex) values ${[...patients.values()].join(',\n  ')};
 insert into lab_requests (id, request_id, panel_code, authored_at, analysis_at, requester_code, patient_id, age_years, obr_set_id) values ${requests.join(',\n  ')};
 insert into diagnostic_reports (id, based_on_id, status, effective, issued, performer, performer_display) values ${reports.join(',\n  ')};
@@ -2972,6 +2973,39 @@ lab30('T30C-B-GHOST', [{ req: 'ZGHRG' }], [{ province: 'Southern', district: 'Ch
 lab30('T30C-B-NOEXTRAS', [{ req: 'ZPERF' }], [{ province: 'Southern', district: 'Choma', facility: 'Perf Lab Register', moh_facility_code: null }]); // extras is NULL
 suites30c.push(
   builderSuite({ name: 't30c-recency-hmis', setup: rc30.setup(), cteSql: bind(recencyCte('rc', { from: 'from', to: 'to' }), WINDOW), columns: RECENCY_COLUMNS, alias: 'rc', rows: wanted30 }),
+);
+
+// Item D: "Recency tests with client names" groups a lab number's patients the way SQL Server compares text (case and trailing spaces
+// ignored), and ClientName treats a NULL name part as empty (concat), so a NULL and an empty first name are one client. The client shows the
+// first name and surname of ONE patients row: the smallest in byte order, first name then surname. The facility rows are rc30's (one set per
+// group), so this fixture leaves its own out.
+// The requests are registered in July and the suite runs on July, so rc30's May requests (the HMIS cases above) are outside its window.
+const f30n = makeFixture17('t30c-n');
+const wanted30n = [];
+const JULY_30 = '2026-07-02T08:00:00Z';
+function lab30n(labId, reqs, rows, people) {
+  f30n.add(labId, reqs.map((r) => ({ ...r, authored: JULY_30 })));
+  for (const w of rows) {
+    for (const pe of people) wanted30n.push({ ...D17, date_registered: JULY_30, ...w, lab_id: labId, client_name: pe.name, refno: pe.refno ?? null });
+  }
+}
+// The same person spelled two ways on two request rows ('Mary Banda' and 'MARY BANDA '): one client, shown as the smaller spelling.
+lab30n('T30C-D-CASE', [{ pk: 'a', first: 'Mary', last: 'Banda' }, { ...vlNum(500), pk: 'b', first: 'MARY', last: 'BANDA ' }], [sup('500')], [{ name: 'MARY BANDA ' }]);
+// A NULL and an empty first name are the same (concat makes both ''): one client, ' Banda'.
+lab30n('T30C-D-NULLEMPTY', [{ pk: 'a', first: null, last: 'Banda' }, { ...vlNum(500), pk: 'b', first: '', last: 'Banda' }], [sup('500')], [{ name: ' Banda' }]);
+// The name comes from ONE patients row. ('Mary', 'BANDA') and ('MARY', 'Banda') are one client; the smaller first name is 'MARY', so the row
+// is the second: 'MARY Banda'. A per-column min would show 'MARY BANDA', a pair no patients row holds.
+lab30n('T30C-D-ONEROW', [{ pk: 'a', first: 'Mary', last: 'BANDA' }, { ...vlNum(500), pk: 'b', first: 'MARY', last: 'Banda' }], [sup('500')], [{ name: 'MARY Banda' }]);
+// Two people stay two clients, also when one is spelled twice: ('Ann', 'Moyo') twice in two cases, and ('Bob', 'Daka') once.
+lab30n('T30C-D-TWO', [
+  { pk: 'a', first: 'Ann', last: 'Moyo', refs: [['reference-numbers', 'R-A1']] },
+  { ...vlNum(500), pk: 'b', first: 'ANN', last: 'moyo', refs: [['reference-numbers', 'R-A2']] },
+  { panel: 'HIVPC', report: false, results: [], pk: 'c', first: 'Bob', last: 'Daka', refs: [['reference-numbers', 'R-B']] },
+], [sup('500')], [{ name: 'ANN moyo', refno: 'R-A2' }, { name: 'Bob Daka', refno: 'R-B' }]);
+// A different person is not merged by the fold: 'Mary' and 'Maryk' are two clients.
+lab30n('T30C-D-DIFFERENT', [{ pk: 'a', first: 'Mary', last: 'Banda' }, { ...vlNum(500), pk: 'b', first: 'Maryk', last: 'Banda' }], [sup('500')], [{ name: 'Mary Banda' }, { name: 'Maryk Banda' }]);
+suites30c.push(
+  listSuite17('t30c-client-names-fold', CLIENT_NAMES_17, { from: '2026-07-01', to: '2026-07-31' }, NAME_FIELDS_17, wanted30n, f30n.setup({ facilities: false })),
 );
 
 export const groups = [
