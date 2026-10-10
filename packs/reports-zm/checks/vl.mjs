@@ -5,9 +5,9 @@
 // "123-", "1E5-" or "12A-".
 // "v1 line N" below means a line of StoredProcedure__dbo_sp_update_HIVVLTable.sql.
 
-import { lit, inOrder } from '../../shared/pg-check.mjs';
+import { lit, inOrder, caseSuite } from '../../shared/pg-check.mjs';
 import { ATTR_SYSTEM, hivvlCte, tndCte } from '../zm-sql.mjs';
-import { queries } from '../queries/vl.mjs';
+import { queries, rateCutSql } from '../queries/vl.mjs';
 import { epiFixture, facilityRows, orderedSuite as orderedSuite10, shapeSuite } from './epi-fixture.mjs';
 
 // ---- Fixture builder ----
@@ -2300,6 +2300,11 @@ cl12('T12-D03', '2026-05-16T08:00:00Z', { ...CD, first: 'Ida', last: 'Unknown', 
 cl12('T12-D04', '2026-05-17T08:00:00Z', { ...CD, first: 'Ian', last: 'Indet', sex: 'I', art: 'D400', num: 1000 });
 cl12('T12-D05', '2026-05-18T08:00:00Z', { ...CD, first: 'Zero', last: 'Art', num: 600 });
 cl12('T12-U01', '2026-05-10T08:00:00Z', { req: 'ZT12U', first: 'Una', last: 'Mapped', art: 'U100', num: 100 });
+// ---- R: TND's floor and ceiling (sp_GetPreviousVLResultforCohort2x line 105: AuthorisedDateTime between 2017-01-01 and getdate()) ----
+cl12('T12-F01', '2016-12-31T23:30:00+02:00', { first: 'Old', last: 'Timer', art: 'F100', num: 100 });    // local Dec 31 2016: before the floor
+cl12('T12-F02', '2099-01-01T08:00:00Z', { first: 'Future', last: 'Self', art: 'F200', num: 5000 });     // after the ceiling: never her newest result
+cl12('T12-F03', '2026-03-10T08:00:00Z', { first: 'Future', last: 'Self', art: 'F200', num: 100 });      // so this is her newest
+cl12('T12-F04', '2017-01-01T00:30:00+02:00', { first: 'New', last: 'Year', art: 'F300', num: 100 });    // local Jan 1 2017 (UTC Dec 31 2016): on the floor, in
 
 // ---- M: lab X (testing lab code 'T12X') and lab Y ('T12Y') ----
 // No requesting facility, rejected; so only the lab-by-month query sees them. Authored = registration; issued = authorised.
@@ -2429,6 +2434,13 @@ const suitesRates = [
   rSuite('rates-first-day', r12('', '', '', { from: '2026-05-01', to: '2026-05-01' }), rate(1, 1, 1, 100, 100)),
   // A date-only stamp is the day. The partial stamp '2026-05' (Partial Stamp) has no day: it is out and nothing raises.
   rSuite('rates-date-only', r12('', '', '', { from: '2026-05-20', to: '2026-05-20' }), rate(1, 1, 1, 100, 100)),
+  // The floor (line 105): a result before 2017-01-01 is not in TND (Old Timer, local Dec 31 2016), and one on the local day Jan 1 2017 is (New Year).
+  rSuite('rates-before-floor', r12('', '', '', { from: '2016-12-01', to: '2016-12-31' }), NULLS),
+  rSuite('rates-on-floor', r12('', '', '', { from: '2017-01-01', to: '2017-01-01' }), rate(1, 1, 1, 100, 100)),
+  // The ceiling (line 105): the future-dated 5000 is not in TND, so Future Self's newest result is the March one (100). Without the ceiling
+  // her newest would be 2099 and March would hold no client.
+  rSuite('rates-march-ceiling', r12('', '', '', { from: '2026-03-01', to: '2026-03-31' }), rate(1, 1, 1, 100, 100)),
+  rSuite('rates-future-window', r12('', '', '', { from: '2099-01-01', to: '2099-12-31' }), NULLS),
   {
     name: 'rates-shape',
     count: 8,
@@ -2515,7 +2527,7 @@ const bdSuite = (name, params, rows) => orderedSuite10(name, bandQ?.sql ?? 'sele
 // >= 1000: Bb05 (1000, the boundary), Bb06 (1000.5), Bb12 (HIVVC 5000: one request in two bands) = 3.
 // Unknown, counted in Total only: Bb09 (-1), Bb10 ('Pending'), Bb19 (no value). Out: Bb14 (rejected), Bb16 (panel HIVPC), Bb17 (observation XXXX).
 const BD_ALL = [
-  bd(null, null, 1, 0, 1, 0, 0),   // Bb24: no date at all, a < 20 result
+  bd(null, null, 1, 0, 0, 0, 0),   // Bb24: no date at all, a < 20 result. v1 shows the Total and 0 in every band: its band subqueries match the date, never true for NULL
   bd(2025, 2, 1, 1, 0, 0, 0),      // Bb23: coded LDL
   bd(2026, 1, 1, 0, 0, 1, 0),      // Bb20: collected 2026-01-01T00:30+02:00, local Jan 1 (UTC Dec 31): 50
   bd(2026, 3, 16, 2, 5, 4, 3),
@@ -2551,8 +2563,8 @@ const suitesBd = [
 // ---- The builder option: tndCte with rank: true (v1 TND.Rank, sp_GetPreviousVLResultforCohort2x lines 20-30) ----
 
 // Every result of the R clients, with no window, and its visit number: row_number() over province, district, facility, panel, sex code,
-// surname, first name and ART number (compared as SQL Server compares text), newest first. 42 results: A 28, B 7, C 2 (the partial stamp
-// has no date and is out), D 5; the unmapped facility is out. Visit is 1 unless listed; ties (Tom Zulu) go to the smaller lab number.
+// surname, first name and ART number (compared as SQL Server compares text), newest first. 44 results: A 28, B 7, C 2 (the partial stamp
+// has no date and is out), D 5, F 2 (F03 and F04; F01 is before the 2017 floor and F02 is after the ceiling); the unmapped facility is out. Visit is 1 unless listed; ties (Tom Zulu) go to the smaller lab number.
 const VISIT_NOT_1 = {
   'T12-A01a': 2, 'T12-A02a': 2, 'T12-A03a': 2, 'T12-A05a': 2, 'T12-A08b': 2, 'T12-A09a': 2, 'T12-A13a': 2, 'T12-B06a': 2,
 };
@@ -2562,13 +2574,14 @@ const RANK_LABS = [
   ...['01', '02', '03', '04', '05', '06a', '06b'].map((s) => `T12-B${s}`),
   ...['01', '03'].map((s) => `T12-C${s}`),
   ...['01', '02', '03', '04', '05'].map((s) => `T12-D${s}`),
+  'T12-F03', 'T12-F04',
 ];
 const rankSuite = {
   name: 'tnd-rank-builder',
   setup: '',
   sql: `select 'tnd-rank-builder' || chr(9) || row_to_json(q)::text from (with ${tndCte('tn', { rank: true })}
 select lab_id, panel_code, visit, result_date from tn order by lab_id) q;`,
-  count: RANK_LABS.length + 7,
+  count: RANK_LABS.length + 8,
   check(got) {
     const failures = [];
     if (got.length !== RANK_LABS.length) failures.push(`expected ${RANK_LABS.length} rows, got ${got.length}`);
@@ -2584,9 +2597,9 @@ select lab_id, panel_code, visit, result_date from tn order by lab_id) q;`,
     // The window is gone: April and June results are rows (the default builder, windowed to May, would drop them).
     for (const lab of ['T12-A01a', 'T12-A02b', 'T12-B04']) if (!got.some((g) => g.lab_id === lab)) failures.push(`${lab} (outside May) must be a row`);
     // No date, or a partial one, and an unmapped facility: no row.
-    for (const lab of ['T12-C02', 'T12-U01']) if (got.some((g) => g.lab_id === lab)) failures.push(`${lab} must not be a row`);
+    for (const lab of ['T12-C02', 'T12-U01', 'T12-F01', 'T12-F02']) if (got.some((g) => g.lab_id === lab)) failures.push(`${lab} must not be a row`);
     // The M and B requests have no requesting facility: none of them is a row.
-    if (got.some((g) => !g.lab_id.startsWith('T12-A') && !g.lab_id.startsWith('T12-B') && !g.lab_id.startsWith('T12-C') && !g.lab_id.startsWith('T12-D'))) failures.push('a row outside the R clients');
+    if (got.some((g) => !g.lab_id.startsWith('T12-A') && !g.lab_id.startsWith('T12-B') && !g.lab_id.startsWith('T12-C') && !g.lab_id.startsWith('T12-D') && !g.lab_id.startsWith('T12-F'))) failures.push('a row outside the R clients');
     if (got.some((g) => g.lab_id.startsWith('T12-Bb'))) failures.push('a B request must not be a row');
     return failures;
   },
@@ -2604,7 +2617,21 @@ const rankShape = {
   },
 };
 
-const suites12all = [...suitesRates, ...suitesLm, ...suitesBd, rankSuite, rankShape];
+// The rate cut is exact (SQL Server decimal(26,12): the quotient is cut, not rounded). Values measured on the local SQL Server with int variables:
+// 203361 of 250002 is 81.343749250005 (a plain Postgres division and trunc gives ...006).
+const rateCutSuite = caseSuite('rate-cut', ['top', 'n'], [
+  { top: '203361', n: '250002', expected: 81.343749250005 },
+  { top: '1', n: '3', expected: 33.333333333333 },
+  { top: '2', n: '3', expected: 66.666666666666 },
+  { top: '17', n: '24', expected: 70.833333333333 },
+  { top: '8', n: '17', expected: 47.058823529411 },
+  { top: '8', n: '13', expected: 61.538461538461 },
+  { top: '24', n: '24', expected: 100 },
+  { top: '0', n: '5', expected: 0 },
+  { top: '5', n: '0', expected: null },
+], rateCutSql('top::int', 'n::int'));
+
+const suites12all = [rateCutSuite, ...suitesRates, ...suitesLm, ...suitesBd, rankSuite, rankShape];
 
 export const groups = [{ name: 't2', suites }, { name: 't6', suites: suites6 }, { name: 't7', suites: [...suites7list, ...suites7trend] }, { name: 't8', suites: suites8 }, { name: 't9', suites: suites9 }, { name: 't10', suites: suites10 },
   { name: 't11', suites: [...suites11, ...suites12, ...suitesBuilders11] },

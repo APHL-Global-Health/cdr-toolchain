@@ -1131,7 +1131,7 @@ export const uniqueClientsFacilityParams = () => [
 //     fall back to an earlier result, where "Unique VL clients" does.
 //   - Area: HIVVL.Province / District / Facility equal the parameters (R lines 62, 79, 98, 116, 135, 152): the hivvl row's names, not TND's.
 //   - VLClients = count(ARTNumber), Suppressed = sum(TND.Suppressed), Undetectable = sum(TND.UU); the rates are the sum x 100.0 /
-//     count(ARTNumber) (R lines 14-16). SQL Server decimal arithmetic gives 12 decimals and CUTS them, it does not round (measured on the
+//     count(ARTNumber) (R lines 14-16). SQL Server decimal arithmetic gives 12 decimals and CUTS them, it does not round (rateCutSql; measured on the
 //     local SQL Server: 1 of 3 gives 33.333333333333, 2 of 3 gives 66.666666666666, 3 of 7 gives 42.857142857142).
 //   - Branch by which parameters are given (R lines 12, 45, 81, 118): none = all Zambia; province; province and district; all three.
 //     The `exists(select count(...) ...)` in each IF is an aggregate without GROUP BY, so it always returns a row and is always true
@@ -1155,7 +1155,8 @@ export const uniqueClientsFacilityParams = () => [
 //
 // CE gaps (spec ruling 7) and CE choices: as "Unique VL clients" (HOSPID is not sent, so the ART number is artNumberSql's with HOSPID
 // blank; a request without a patient row is kept with empty names; v1 varchar parameters (20, 40, 40) cut a longer name, the port
-// compares it whole; TND has no 2017 floor or ceiling; a result with no date, or a partial one, is out of the rank). CE art_number is
+// compares it whole; a result with no date, a partial one, before 2017-01-01 or in the future is out of the rank, as TND's floor and
+// ceiling put it out). CE art_number is
 // never NULL, so count(ARTNumber) counts every row (v1's NULL ART number, from a NULL REFNO, is not reproduced).
 //
 // Deviations (spec ruling 2): none. v1 runs and returns real data.
@@ -1163,11 +1164,17 @@ const RATE_TEXTS = ['<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20
   '<400 copies/mL', '<400', '<40 copies/mL'];
 const RATE_TEXTS_NO_ND = RATE_TEXTS.filter((t) => t !== 'ND');
 
+// SQL Server's sum(int) * 100.0 / count(int): decimal(26,12), the quotient CUT at 12 decimals. Computed exactly with integers: the whole
+// part of top x 100 x 10^12 / count, then moved back 12 places. (A plain numeric division in Postgres rounds at its own working scale, which
+// can move the 12th decimal for large counts: 203361 of 250002 is 81.343749250005 on SQL Server.) NULL when the count is 0 or NULL.
+export const rateCutSql = (top, count) =>
+  `(div((${top})::numeric * 100 * 1000000000000, nullif(${count}, 0)::numeric) / 1000000000000::numeric)`;
+
 export function uniqueClientsRatesSql() {
   const eq = (column, id) => `${foldSql(column)} = ${foldSql(`{{param.${id}}}`)}`;
   const textOk = `(${isNumericSql('t.result')} or (case when s.branch in (3, 4) then ${inListSql('t.result', RATE_TEXTS_NO_ND)} else ${inListSql('t.result', RATE_TEXTS)} end))`;
   const key = (x) => `lower(rtrim(${x}))`;
-  const rate = (top) => `trunc(${top} * 100.0 / nullif(a.clients, 0), 12)`;
+  const rate = (top) => rateCutSql(top, 'a.clients');
   return `with ${tndCte('tnd', { rank: true })},
 ${hivvlCte('hv', { from: 'from', to: 'to', labsInWindow: true })},
 scope as (
@@ -1307,6 +1314,10 @@ export const labMonthParams = () => dateParams(false);
 //   - The band of a result (D lines 33-39): coded value 'LDL' is 'Target Not Detected'; SIValue 0 up to 20 is '< 20 copies/ml'; 20 to 1000
 //     is '<= 1000 copies/ml'; over 1000 is '> 1000 copies/ml'; anything else is 'Unknown' (counted in Total only).
 //
+// Kept quirk (spec ruling 1): the row with no date (NULL Year and Month) shows its Total and 0 in every band column. Each v1 band column is a
+// correlated subquery that matches datepart(yyyy, a.[Year]) = datepart(yyyy, rpd.[Year]), which is never true for NULL (measured on the
+// local SQL Server: a NULL group with one request gives Total 1 and < 20 copies/ml 0). The port counts a band only for a request with a date.
+//
 // Deviation (spec ruling 2): v1 runs but its last two columns are constant 0. B tests the labels '< 1000 copies/ml' and '>= 1000 copies/ml'
 // (B lines 38, 45), and D never produces them: it produces '<= 1000 copies/ml' and '> 1000 copies/ml' (D lines 36-37). The two other views
 // that read D (vSuppressionByFacility line 11, vVLQuarterlyFacilitySuppressionRate line 22) test the same labels as B, and suppression is a
@@ -1328,7 +1339,7 @@ export function resultBandsSql() {
         when l.numeric_value >= 1000 then 'ge1000'
         else 'unknown' end`;
   const day = `coalesce(${localDate('dr.effective')}, ${localDate('s.received_time')}, ${localDate('lr.authored_at')})`;
-  const count = (name) => `count(distinct ${foldSql('b.request_id')}) filter (where b.band = '${name}')`;
+  const count = (name) => `count(distinct ${foldSql('b.request_id')}) filter (where b.day is not null and b.band = '${name}')`;
   return `with b as (
   select lr.request_id, ${day} as day, ${band} as band
   from lab_requests lr

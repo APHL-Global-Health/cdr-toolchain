@@ -816,8 +816,8 @@ export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not de
 //     The comparison is of the number alone: a comparator ('<') is not read.
 //   - A result of NULL is out (NOT IN drops NULL, line 77).
 //
-// Not taken: the Rank column (TND.Rank, the visit number: no caller reads it), BaselineVL (callers use the hivvl copy's), and the floor
-// and ceiling of line 105 (AuthorisedDateTime from 2017-01-01 to now): the window is the caller's.
+// Not taken by default: the Rank column (TND.Rank, the visit number; `rank: true` below adds it), BaselineVL (callers use the hivvl copy's),
+// and the floor and ceiling of line 105 (AuthorisedDateTime from 2017-01-01 to now): the window is the caller's. `rank: true` applies them.
 // The window of this builder is a LOCAL-DATE window, from the first to the last day inclusive (inRange). A report that compares the
 // datetime of ResultDate with dates (a window that ends at 00:00:00 of the last day) filters again on the result's own time.
 // Options: `where` is a condition on the mapped row `fmr` and the request `lr`, applied while reading requests (slice 1's province
@@ -829,13 +829,15 @@ export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not de
 // number (compared as SQL Server compares text), newest ResultDate first (lines 20-30), so visit 1 is the client's latest result EVER,
 // whatever window a report asks. The partition has the panel and the sex code, so a client with a result in each of two panels (or
 // with two sex codes) has a visit 1 in each. Ties on the stamp are broken on the lab number, then the result row (v1 picks any). A
-// row without a date (no report stamp, or a partial one such as '2026-07') is out, as v1's BETWEEN drops a NULL date. The default
+// row without a date (no report stamp, or a partial one such as '2026-07') is out, as v1's BETWEEN drops a NULL date. v1's own floor and
+// ceiling apply (line 105: AuthorisedDateTime between 2017-01-01 00:00:00 and getdate()): a report on a local date before 2017-01-01, or
+// stamped after the database's current local time (localtimestamp), is out, so a future-dated result never becomes a client's newest. The default
 // (`rank` false) is unchanged, so slice 1 and every other caller read the same rows as before. `rank` cannot be used with `orRegistered`.
 export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`, where = 'true', extraPanels = [], orRegistered = false, rank = false } = {}) {
   if (rank && orRegistered) throw new Error('tndCte: rank cannot be used with orRegistered');
   const idsName = `${name}_ids`;
   const result = rpt('r');
-  const requestWindow = rank ? `${localDate('dr.issued')} is not null` : `${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''}`;
+  const requestWindow = rank ? `${localDate('dr.issued')} >= date '2017-01-01' and ${localTs('dr.issued')} <= localtimestamp` : `${inRange('dr.issued', from, to)}${orRegistered ? ` or ${inRange('lr.authored_at', from, to)}` : ''}`;
   const resultWindow = rank ? '' : `
     and ${inRange('q.result_date', from, to)}`;
   const columns = `q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.firstname, q.surname, q.age_years, q.sex, q.gender,
