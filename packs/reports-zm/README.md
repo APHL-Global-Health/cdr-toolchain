@@ -277,9 +277,16 @@ each, if wrong, is in the spec.
 - **Locale.** The COVID-19 result CASE keeps v1's misspelled `Ínconclusive`. The pack lower-cases the
   accented I when it writes the SQL, so the database must lower-case it too. That needs a UTF-8
   `LC_CTYPE` (`SHOW lc_ctype;`). In a C-locale database even the exact text fails to match.
-- **Row limit.** Report designs and exports cap a stored query at 1000 rows (`ROW_CAP` in
-  `openldr_ce` `custom-query-run.ts`, reached through `report-designs-routes.ts:171`). The paginated
-  `/reports` run has no such cap. Line lists can reach 1000 rows in a busy month.
+- **Row limit.** The pack's queries are meant to run on the Query page (`/query`). It calls
+  `/api/query/run`, which returns at most 1000 rows a call, and the page asks for one page at a time
+  with `limit` and `offset` (`openldr_ce` `apps/server/src/query-routes.ts:137-168`,
+  `apps/studio/src/query/workspace/QueryTab.tsx:43`). So it has no overall limit. A report
+  definition on `/reports` runs its query through `runStoredQuery`
+  (`packages/bootstrap/src/index.ts:295`), and a report design's PDF does too
+  (`report-designs-routes.ts:171`). That stops at 1000 rows (`ROW_CAP` in `custom-query-run.ts`):
+  past it, the run fails with an error, not a cut list. The designer's Excel export pages through
+  `/api/query/run` and gets every row (`exportExcel.ts:45-58`). Line lists can pass 1000 rows in a
+  busy month.
 - **Size.** "Unique VL clients" is about 39 KB of SQL and "COVID-19 daily line list" about 11 KB,
   because the builders are inlined. CE has no size limit that we found.
 

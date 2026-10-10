@@ -64,10 +64,13 @@ result at `2026-05-31T23:30:00+02:00` is on 31 May. Several v1 reports compare a
 a date. The last day then counts only its first instant (00:00:00). The port keeps this where v1
 does it. The README lists those reports.
 
-**Row limit.** Report designs and exports cap a stored query at 1000 rows. The paginated `/reports`
-run has no such cap. Line lists such as "VL clients by province" and "Culture and susceptibility
-results" can pass 1000 rows in a busy month. Run them from `/reports`, or narrow the dates or pick a
-province.
+**Row limit.** The pack's reports are custom queries. Run them on the Query page (`/query`). It shows
+1000 rows a page and pages through the rest, so it has no row limit. A report definition on the
+Reports page (`/reports`) built on one of these queries stops at 1000 rows: past that, the run fails
+with an error and gives no rows. A report design's PDF does the same: the table shows an error in
+place of the rows. Line lists such as "VL clients by province" and "Culture and
+susceptibility results" can pass 1000 rows in a busy month. Run them on the Query page, or narrow the
+dates or pick a province.
 
 **Row order.** Most v1 reports had no ORDER BY. These reports sort by every column, so paging is
 stable.
@@ -99,6 +102,35 @@ still appears here.
   as rejected.
 - The DISA Link pre-registration facts. Disalink columns show 0, and the DISA Link reports are
   empty, until cdr-toolchain sends them.
+
+## Reports that show personal data
+
+These reports show client names, dates of birth, phone numbers, ART numbers or other client
+reference numbers:
+
+| Report | Personal columns |
+|---|---|
+| VL clients by province | Name, ARTNumber |
+| Client by ART number | FIRSTNAME, SURNAME (looked up by ART number) |
+| VL results for a facility's clients | ARTNo |
+| Earlier VL results of high-VL clients | ARTNumber |
+| VL results history by client | ARTNumber |
+| EID clients by province | Name |
+| Recency tests with client names | ClientName, REFNO |
+| Culture and susceptibility results | FIRSTNAME, LastName, DOB, IdentificationNumber |
+| COVID-19 positive patients | FIRSTNAME, SURNAME |
+| COVID-19 daily line list | Patient Name, Contact Number |
+| COVID-19 results (VRDSS) | DOB |
+| COVID-19 results (VRDSS V2) | dob, ct_case_id, Other Ref Number |
+
+Anyone with the `query.run` capability ("Use query workbench") can run every custom query, these
+included. In CE's preset roles that is Administrator, Lab Manager and Data Analyst. A report
+definition built on one of these queries also shows the rows to anyone who can run that report.
+Give `query.run`, and run access to such reports, only to staff who may see client data. Give staff
+who may not see it a role without `query.run`.
+
+Most other reports show lab numbers, ages, sex and dates. Those are not names, but anyone who can
+look a lab number up in DISA*Lab can find the client.
 
 ## The reports
 
