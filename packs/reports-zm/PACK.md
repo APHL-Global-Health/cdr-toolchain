@@ -18,6 +18,20 @@ report and adds 73. Two things changed in the old report. A date outside `YYYY-M
 A result stamp that does not start with a full date (for example `2026-07`) is now outside every date
 range.
 
+## What it needs from CE
+
+- **CE 0.1.9 or later.** The reports read the warehouse table `facility_registry`, CE's copy of the
+  facility registers. It arrived after CE 0.1.8 (warehouse migration `021_facility_registry`), so
+  0.1.9 is the first release that has it. On an older CE, 25 of the 74 reports fail with "relation
+  facility_registry does not exist": every province and district pick list reads it, and so do the
+  reports that show an HMIS code or a facility type.
+- **The connector `Target Warehouse (Postgres)`.** CE's own setup creates it. The install binds each
+  new query to the connector with that exact name, and fails if there is none. A query that already
+  exists under the same name keeps its connector.
+- The manifest says it works with any CE version (`ceVersion` `*`). It cannot say 0.1.9 or later yet:
+  CE checks the range against a version number fixed at 0.1.0 in its code, so any minimum would
+  block the install everywhere. Check your CE version yourself before you install.
+
 ## Set up before you use it
 
 **1. Map your lab's facility codes.** DISA*Lab names facilities with its own codes, not MFL codes, so
