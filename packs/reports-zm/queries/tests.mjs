@@ -645,10 +645,11 @@ order by ${orderItems(columns)}`;
 // Location, AST_TestCode, AST_Test, ORGANISM, then Gram Results and the 53 antibiotics in the order of the final select (lines 104-109).
 //
 // Parameters (spec rulings 3 and 4):
-//   laboratory   a select with four labs. CE's option list is one column, so the option text is the plain name with the test code in
-//                brackets: 'Levy Mwanawasa UTH Lab (ZFP)', 'Livingstone Teaching Hospital Lab (ZLP)', 'Ndola Lab (ZNP)', 'University
-//                Teaching Hospital labs (ZU_)'. The query reads the code between the last pair of brackets, or the whole text when there
-//                are no brackets (so a bare 'ZFP' works from the API). Required: v1 has no all-labs mode. A code other than ZU_ is a
+//   laboratory   a select with four labs, named after the four procedures: 'Levy Mwanawasa (ZFP)', 'Livingstone (ZLP)', 'Ndola (ZNP)',
+//                'UTH (ZU_)'. DEVIATION from ruling 4 (laboratory is a text box matched on the testing code): four fixed procedures read
+//                better as a pick list. CE's option list is one column, so the option text carries the test code in brackets. The query
+//                reads the code between the last pair of brackets, or the whole text when there are no brackets (so a bare 'ZFP' works
+//                from the API). Required: v1 has no all-labs mode. A code other than ZU_ is a
 //                plain equality test (any lab code can be asked for). 'ZU_' is the varchar LIKE of the UTH procedure (likeVarcharSql: 'ZUE',
 //                'ZUA', 'ZUL', 'ZUF', 'ZUB' and also 'ZU ' with one trailing blank).
 //   from, to     replace "the month before getdate()" (lines 15-18, 30-33): the local date of the registered stamp, both ends in. For a
@@ -698,12 +699,18 @@ order by ${orderItems(columns)}`;
 //   - THE ORGANISM OF AN AST. v1's ASTResults.Organism says which organism a sensitivity result belongs to. CE keeps no such link: cdr
 //     computes it (nearestGrowthPositiveIsolate, v2-transform.ts:449-466: the isolate whose panel is nearest to the AST's panel, the lower
 //     panel on a tie) and writes it as hasMember on the isolate, which the warehouse drops. The port repeats cdr's rule with what CE has: the
-//     organism is the ORGS result, among all the ORGS results of the lab number, on the request row whose OBR set number (obr_set_id) is nearest
-//     to the sensitivity request row's, the lower one on a tie. Two ORGS results on one request row cannot be told apart by this rule: the
-//     one with the smaller text (SQL Server order, then byte order) gets the sensitivity results. cdr also skips no-growth isolates; the
-//     warehouse has no organism class, so a 'no growth' result counts as an organism here. The pool is every ORGS result of the lab number,
-//     whatever its lab, window and report (the link is part of v1's ASTResults). HONEST NON-PROOF: nothing here checks this link against
-//     Zambia data; with one organism per lab number it is exact.
+//     organism is the isolate, among the lab number's isolates, on the request row whose OBR set number (obr_set_id) is nearest to the
+//     sensitivity request row's, the lower one on a tie. The pool is cdr's: results of the observation ORGS exactly (v2-transform.ts:597, case
+//     as stored), with a non-empty text, that are not no-growth findings (noGrowthFlagsSql: cdr's organism_type 'none', v2-transform.ts:450).
+//     So a "No growth" culture panel never takes the antibiotics of the culture before it. The pool is every such result of the lab number,
+//     whatever its lab, window and report (the link is part of v1's ASTResults). The a side keeps v1's like 'ORGS%'.
+//     Two differences from cdr remain. (1) Two isolates on one request row: cdr breaks the tie by order index (orderIndex); CE keeps no order,
+//     so the one with the smaller text (SQL Server order, then byte order) gets the sensitivity results. (2) The distance is measured on
+//     obr_set_id (the panel's position in the order), cdr's on panelIndex (TESTINDEX); the two rise together (obr-sets.ts). The description
+//     that cdr looks up in its dictionary by code is the result's text here. HONEST NON-PROOF: nothing checks this link against Zambia data;
+//     with one organism per lab number it is exact.
+//   - Gram Results (a pivot column, line 40) never carries an S, I or R flag on real CE data (cdr keeps only S/I/R results as AST, and a gram
+//     stain is not one), so its column is NULL for every row.
 //   - HOSPID is not sent: read as blank, so IdentificationNumber is REFNO, the text of the reference-numbers request attribute (NULL when
 //     the lab number has none).
 //   - LocationCode (v1 Patients.WARD, the ward code) has no CE source: the warehouse keeps only the resolved ward name (lab_requests.
@@ -716,7 +723,7 @@ order by ${orderItems(columns)}`;
 //     request number (Task 17 note).
 //   - Row order: v1 orders by RequestID. The port orders by RequestID in SQL Server's word order, then by every other column in byte order
 //     (the order is total, because CE pages with LIMIT and OFFSET).
-const AST_LABS = ['Levy Mwanawasa UTH Lab (ZFP)', 'Livingstone Teaching Hospital Lab (ZLP)', 'Ndola Lab (ZNP)', 'University Teaching Hospital labs (ZU_)'];
+const AST_LABS = ['Levy Mwanawasa (ZFP)', 'Livingstone (ZLP)', 'Ndola (ZNP)', 'UTH (ZU_)'];
 
 // AST lines 40-52 (the PIVOT list) in the order of the final select, lines 104-109.
 const AST_ANTIBIOTICS = ['Gram Results', 'Amikacin', 'Amoxycillin', 'Amoxycillin/Clavulanic acid', 'Ampicillin', 'Ampicillin/Sulbactum', 'Azithromycin',
@@ -759,6 +766,25 @@ const astSpecimenNameSql = (code, text) => `case
       end
     end`;
 
+// Is an organism a no-growth finding? cdr gives each isolate an organism_type (bacteria, fungus, parasite, none) and leaves 'none' out of the
+// AST link (v2-transform.ts:450). The type is codebook.organismCategory (codebook.ts:290-300): classify(description) (codebook.ts:82-91),
+// and, when that says bacteria, the code shape (codebook.ts:299). The patterns are copied from codebook.ts, `\b` written `\y` (Postgres):
+//   NO_FINDING_RE /^no\b/i (46)   NOGROWTH_RE /^nogrowth\b/i (50)   NO_GROWTH_RE /\b(normal\s*flora|sterile)\b/i (53)
+//   GRAM_STAIN_RE /\bgram\s*(positive|negative)\b/i (58)   NEGATIVE_RE /\bnegative\b/i (62)   FUNGUS_RE (67)   PARASITE_RE (69)
+//   code /^(NBG|NF|NG|NFLO|NORGS|NOR)$/i (299)
+// classify: a leading "No", "Nogrowth", "normal flora" or "sterile" is none; else gram stain wording is bacteria; else "negative" is none; else a
+// fungus or a parasite; else bacteria. organismCategory: only a bacteria answer is then tested on the code shape. `d` is the description (the
+// ORGS result's text), `c` the code (the coded value, else the text, as cdr's `nz(rawValue) ?? valueStr`, v2-transform.ts:606).
+// Written as flags, so the one test reads: none = A or (not G and N) or (C and (G or not (N or F))).
+const NO_GROWTH_FUNGUS = String.raw`\y(candida|cryptoc|aspergillus|fusarium|trichoph|microsporum|histoplasm|mucor|yeast|fungi|mould|mold|absidia|acremonium|alternaria|bipolaris|curvularia|exophiala|geotrichum|hansenula|madurella|malassezia|phialophora|pichia|rhizopus|rhodotorula|sporothrix|torulopsis)\y`;
+const NO_GROWTH_PARASITE = String.raw`\y(plasmodi|trypanos|leishman|schistos|filari|giardia|entamoeba|cryptosporid|toxoplasm|trichomon|ascaris|strongyl|hookworm|hymenolep|taenia|necator|enterobi)\y`;
+const noGrowthFlagsSql = (d, c) => `${d} ~* ${sqlLit(String.raw`^\s*no\y`)} or ${d} ~* ${sqlLit(String.raw`^\s*nogrowth\y`)} or ${d} ~* ${sqlLit(String.raw`\y(normal\s*flora|sterile)\y`)} as ng_a,
+    ${d} ~* ${sqlLit(String.raw`\ygram\s*(positive|negative)\y`)} as ng_g,
+    ${d} ~* ${sqlLit(String.raw`\ynegative\y`)} as ng_n,
+    (${d} ~* ${sqlLit(NO_GROWTH_FUNGUS)} or ${d} ~* ${sqlLit(NO_GROWTH_PARASITE)}) as ng_f,
+    ${c} ~* ${sqlLit('^(NBG|NF|NG|NFLO|NORGS|NOR)$')} as ng_c`;
+const noGrowthTestSql = (o) => `(${o}.ng_a or (not ${o}.ng_g and ${o}.ng_n) or (${o}.ng_c and (${o}.ng_g or not (${o}.ng_n or ${o}.ng_f))))`;
+
 export function astSql() {
   const outputNames = [...AST_IDENTITY.map((_, i) => `c${num2(i)}`), ...AST_ANTIBIOTICS.map((_, i) => `b${num2(i)}`)];
   const outputLabels = [...AST_IDENTITY, ...AST_ANTIBIOTICS];
@@ -767,7 +793,7 @@ export function astSql() {
   const distinctKeys = outputNames.map((n) => (isNumber(n) ? `c.${n}` : foldSql(`c.${n}`))).join(',\n    ');
   const plain = outputNames.map((n) => (isNumber(n) ? `c.${n} nulls first` : `c.${n} collate "C" nulls first`)).join(', ');
   // PIVOT MAX(ASTValue) for one antibiotic: the largest flag in SQL Server's text order (vkey), then byte order.
-  const pivot = AST_ANTIBIOTICS.map((name, i) => `(array_agg(x.val order by x.vkey desc, x.val collate "C" desc) filter (where x.skey = ${sqlLit(name.toLowerCase())} and x.val is not null))[1] as b${num2(i)}`).join(',\n    ');
+  const pivot = AST_ANTIBIOTICS.map((name, i) => (name === 'Gram Results' ? `null::text as b${num2(i)}` : `(array_agg(x.val order by x.vkey desc, x.val collate "C" desc) filter (where x.skey = ${sqlLit(name.toLowerCase())} and x.val is not null))[1] as b${num2(i)}`)).join(',\n    ');
   const bColumns = [...[16, 17, 18].map((i) => `b.c${num2(i)}`), ...AST_ANTIBIOTICS.map((_, i) => `b.b${num2(i)}`)].join(', ');
   const finalSelect = outputNames.map((n, i) => `res.${n} as "${outputLabels[i]}"`).join(',\n  ');
   // ORDER BY: v1 orders by RequestID (c04, SQL Server's word order); every other column follows so the order is total.
@@ -796,7 +822,7 @@ a as (
   left join specimens s on s.id = q.specimen_id
   where (q.panel_desc ilike '%Cult%' or q.panel_desc ilike '%Microbiology%' or q.panel_desc ilike '%FLUID%')
 ),
-ast as (
+ast as materialized (
   select l.id as rid, ${foldSql('q.request_id')} as lab_key, q.obr_set_id, q.panel_code, q.panel_desc, s.type_code, s.type_text,
     ${foldSql('l.observation_desc')} as skey, l.abnormal_flag as val, ${ssTextKey('l.abnormal_flag')} collate "C" as vkey
   from req q
@@ -804,13 +830,19 @@ ast as (
   left join specimens s on s.id = q.specimen_id
   where q.panel_desc ilike '%SENS%'
 ),
-orgs as (
-  select ${foldSql('lr2.request_id')} as lab_key, lr2.obr_set_id, ${rpt('l2')} as organism, ${ssTextKey(rpt('l2'))} collate "C" as okey
+orgs_all as materialized (
+  select ${foldSql('lr2.request_id')} as lab_key, lr2.obr_set_id, ${rpt('l2')} as organism, ${ssTextKey(rpt('l2'))} collate "C" as okey,
+    ${noGrowthFlagsSql("btrim(coalesce(l2.text_value, ''))", "btrim(coalesce(nullif(btrim(l2.coded_value), ''), l2.text_value, ''))")}
   from lab_requests lr2
   join lab_results l2 on l2.request_id = lr2.id
-  where l2.observation_code ilike 'ORGS%'
+  where l2.observation_code = 'ORGS'
     and rtrim(${rpt('l2')}) <> ''
     and ${foldSql('lr2.request_id')} in (select y.lab_key from ast y)
+),
+orgs as (
+  select g.lab_key, g.obr_set_id, g.organism, g.okey
+  from orgs_all g
+  where not ${noGrowthTestSql('g')}
 ),
 ast_org as (
   select distinct on (x.rid) x.*, o.organism
@@ -861,10 +893,10 @@ export const astParams = () => [
 // diagnostic_reports.effective, ReceivedDate = specimens.received_time, AnalysisDateTime = lab_requests.analysis_at, AuthorisedDate =
 // diagnostic_reports.issued).
 //
-// Parameters: `from` and `to`, required. v1 has no window (View header: "None, no date window"); the brief for this task gives the query a
-// window. It is on the local date of the registered stamp (lab_requests.authored_at), the same date the other reports window on. Both ends are
-// in. This is a deviation from v1 (spec ruling 3 extended to a view with no window): over all dates v1's view is every request; a window
-// wide enough gives the same rows.
+// Parameters: `from` and `to`, both optional (the pattern of vl.mjs labMonthSql). v1 has no window (View header: "None, no date window"),
+// so both blank gives v1's view: every request, whatever its registered date, also none. When one or both are given, the window is on the
+// local date of the registered stamp (lab_requests.authored_at), the same date the other reports use; a blank side is open; a request whose
+// registered stamp is missing or has no date is out. Deviation from v1 only when a date is given (spec ruling 3 extended to a view).
 //
 // What v1 does:
 //   a (lines 8-24)  every Requests row of the panel DRUGR, left-joined to its results (the where on the result's code makes it an inner
@@ -922,7 +954,10 @@ export function hivdrSql() {
   ${requesterJoin('lr', 'fmr', 'left join')}
   where ${inListSql('lr.panel_code', ['DRUGR'])}
     and not (rtrim(l.observation_code) ilike '%TXT')
-    and ${inRange('lr.authored_at')}
+    and (({{param.from}} = '' and {{param.to}} = '')
+      or (lr.authored_at ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
+        and ({{param.from}} = '' or left(lr.authored_at, 10) >= {{param.from}})
+        and ({{param.to}} = '' or left(lr.authored_at, 10) <= {{param.to}})))
 ),
 names as (
   select ${foldSql('p.code')} as code_key,
@@ -946,7 +981,7 @@ from res
 order by ${orderBy}`;
 }
 
-export const hivdrParams = () => [...dateParams(true)];
+export const hivdrParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
 
 export function queries() {
   return [

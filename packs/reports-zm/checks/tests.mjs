@@ -1848,10 +1848,10 @@ const AST_20 = 'Culture and susceptibility results';
 const DR_20 = 'HIV drug resistance';
 
 // The four laboratories of the parameter, as the option list shows them (one column, so the text carries the code in brackets).
-const LAB_LEVY = 'Levy Mwanawasa UTH Lab (ZFP)';
-const LAB_LSTONE = 'Livingstone Teaching Hospital Lab (ZLP)';
-const LAB_NDOLA = 'Ndola Lab (ZNP)';
-const LAB_UTH = 'University Teaching Hospital labs (ZU_)';
+const LAB_LEVY = 'Levy Mwanawasa (ZFP)';
+const LAB_LSTONE = 'Livingstone (ZLP)';
+const LAB_NDOLA = 'Ndola (ZNP)';
+const LAB_UTH = 'UTH (ZU_)';
 
 // AST lines 40-52 (the pivot list, 54 names) in the order of the final select, lines 104-109. Copied by hand, not from the query.
 const AB_20 = ['Gram Results', 'Amikacin', 'Amoxycillin', 'Amoxycillin/Clavulanic acid', 'Ampicillin', 'Ampicillin/Sulbactum', 'Azithromycin',
@@ -1975,7 +1975,8 @@ const case20 = (labs) => { wantAst20.push(...labs); };
 // ---- Cell A: the pivot. Each of the 54 names has its own column (AST lines 40-52). ----
 cult20('A-all', ['Klebsiella pneumoniae']);
 sens20('A-all', AB_20.map((n, i) => [n, 'SIR'[i % 3]]));
-case20([withAst(aRow('A-all', 'Klebsiella pneumoniae'), Object.fromEntries(AB_20.map((n, i) => [n, 'SIR'[i % 3]])))]);
+// 'Gram Results' is sent with a flag here, but it never carries one on real CE data (a gram stain is not an AST): its column is always NULL.
+case20([withAst(aRow('A-all', 'Klebsiella pneumoniae'), { ...Object.fromEntries(AB_20.map((n, i) => [n, 'SIR'[i % 3]])), 'Gram Results': null })]);
 
 // Names compare as SQL Server compares them (case and trailing spaces ignored; a leading space counts). A drug off the list has no column,
 // but its row still makes the pivot row: the AST_ columns show, every antibiotic is empty.
@@ -2176,6 +2177,68 @@ cult20('G-pool', ['Org A']);
 cult20('G-pool', ['Org B'], { obr: 3, issued: null });
 sens20('G-pool', [['Amikacin', 'S']], { obr: 4 });
 case20([aRow('G-pool', 'Org A')]);
+// ---- The organism pool leaves out no-growth findings and takes only the observation ORGS, as cdr does (v2-transform.ts:450, 597). ----
+// Culture panel 1 has a real organism, culture panel 2 (CULBC, 'Blood Culture') has the finding under test, sensitivity panel 3 is nearest to
+// panel 2. If the finding is no growth, the antibiotics go to the real organism; if it is an organism, they go to it.
+const NG_REAL = 'Real org';
+function ng20(tag, desc, coded, isNone) {
+  const lab = `N-${tag}`;
+  cult20(lab, [NG_REAL]);
+  cult20(lab, [{ obs: 'ORGS', text: desc, coded }], { obr: 2, panel: 'CULBC', desc: 'Blood Culture' });
+  sens20(lab, [['Amikacin', 'S']], { obr: 3 });
+  const real = aRow(lab, NG_REAL);
+  const cand = aRow(lab, desc, { cultureTestCode: 'CULBC', CultureTestDescription: 'Blood Culture', LIMSSpecimenSourceDesc: 'Blood' });
+  case20(isNone ? [withAst(real, { Amikacin: 'S' }), cand] : [real, withAst(cand, { Amikacin: 'S' })]);
+}
+// Description patterns (codebook.ts:46-69, classify). 'none' kinds:
+ng20('d01', 'No growth', undefined, true);                                  // ^no
+ng20('d02', 'No pathogens isolated', undefined, true);
+ng20('d03', '  no MRSA Isolated', undefined, true);                         // leading blanks, any case
+ng20('d04', 'Nogrowth after 7days Icubation', undefined, true);             // ^nogrowth
+ng20('d05', 'Normal flora', undefined, true);                               // normal flora
+ng20('d06', 'normalflora present', undefined, true);                        // \s* allows no blank
+ng20('d07', 'Sterile culture', undefined, true);                            // sterile
+ng20('d08', 'Aerobic culture - Negative', undefined, true);                 // negative
+ng20('d09', 'No growth of gram negative organisms', undefined, true);       // a leading No wins over the gram stain
+ng20('d10', 'Culture NEGATIVE', undefined, true);
+// Descriptions that are organisms.
+ng20('o01', 'Nocardia species', undefined, false);                          // the word boundary after No
+ng20('o02', 'Gram negative bacilli', undefined, false);                     // gram stain wording is bacteria, not a negative culture
+ng20('o03', 'Gram positive cocci', undefined, false);
+ng20('o04', 'Candida albicans', undefined, false);                          // fungus
+ng20('o05', 'Giardia lamblia', undefined, false);                              // parasite
+ng20('o06', 'Normality seen', undefined, false);                            // not 'normal flora'
+ng20('o07', 'Nogrowthx', undefined, false);                                 // ^nogrowth needs a word boundary
+ng20('o08', 'Unsterilised swab', undefined, false);                         // \ysterile\y
+// Code shape (codebook.ts:299): only when the description says bacteria (or gram stain). The code is the coded value.
+['NBG', 'NF', 'NG', 'NFLO', 'NORGS', 'NOR', 'nbg', 'nor'].forEach((code, i) => ng20(`c${i}-${code}`, 'Vibrio cholera', code, true));
+['NGX', 'NBGX', 'XNG', 'NO', 'NORS', 'N G'].forEach((code, i) => ng20(`k${i}-${code}`, 'Vibrio cholera', code, false));
+ng20('c-gram', 'Gram negative bacilli', 'NG', true);                        // gram stain is bacteria, then the code applies
+ng20('c-fungus', 'Candida albicans', 'NG', false);                          // a fungus answer is not tested on the code
+ng20('c-parasite', 'Giardia lamblia', 'NOR', false);
+// cdr's PARASITE_RE has a word boundary after the stem 'plasmodi' (codebook.ts:69), so 'Plasmodium' is not a parasite there: copied as it is, the code applies.
+ng20('c-plasmodium', 'Plasmodium falciparum', 'NOR', true);
+ng20('c-neg', 'Culture negative', 'ECOLI', true);
+// With no coded value the code is the text: a text that is a no-growth code is no growth.
+ng20('t-code', 'NBG', undefined, true);
+// All the lab's organisms are no growth: the sensitivity result has no organism, so no AST shows (the row stays).
+cult20('N-only', [{ obs: 'ORGS', text: 'No growth' }], { obr: 1 });
+sens20('N-only', [['Amikacin', 'S']], { obr: 2 });
+case20([aRow('N-only', 'No growth')]);
+// Only the observation ORGS (exactly, as stored) is an isolate: ORGSX and orgs are rows of the a side but not in the pool.
+cult20('N-exact', [NG_REAL]);
+cult20('N-exact', [{ obs: 'ORGSX', text: 'Other bug' }, { obs: 'orgs', text: 'Lower bug' }], { obr: 2, panel: 'CULBC', desc: 'Blood Culture' });
+sens20('N-exact', [['Amikacin', 'S']], { obr: 3 });
+{
+  const cand = { cultureTestCode: 'CULBC', CultureTestDescription: 'Blood Culture', LIMSSpecimenSourceDesc: 'Blood' };
+  case20([withAst(aRow('N-exact', NG_REAL), { Amikacin: 'S' }), aRow('N-exact', 'Other bug', cand), aRow('N-exact', 'Lower bug', cand)]);
+}
+// A blank organism text is not an isolate either (cdr: valueStr.length > 0).
+cult20('N-blank', [NG_REAL]);
+cult20('N-blank', [{ obs: 'ORGS', text: '   ' }], { obr: 2, panel: 'CULBC', desc: 'Blood Culture' });
+sens20('N-blank', [['Amikacin', 'S']], { obr: 3 });
+case20([withAst(aRow('N-blank', NG_REAL), { Amikacin: 'S' }), aRow('N-blank', '   ', { cultureTestCode: 'CULBC', CultureTestDescription: 'Blood Culture', LIMSSpecimenSourceDesc: 'Blood' })]);
+
 // An organism whose culture panel is not authorised makes no row, even though its sensitivity panel is.
 cult20('G-unauth', ['Org U'], { issued: null });
 sens20('G-unauth', [['Amikacin', 'S']]);
@@ -2329,10 +2392,16 @@ wantDr20.push(
 // Cell HG: the window on the registered date (the local date of the stamp).
 [['HG-1', '2026-05-01T00:30:00+02:00', true], ['HG-2', '2026-04-30T23:30:00-02:00', false], ['HG-3', '2026-05-31T23:30:00+02:00', true],
   ['HG-4', '2026-06-01T00:30:00+02:00', false], ['HG-5', null, false], ['HG-6', '2026-05', false], ['HG-7', '2026-05-31', true],
-  ['HG-8', '2026-06-01', false], ['HG-9', '2026-05-31T23:59:59.999Z', true]].forEach(([lab, authored, inside]) => {
+  ['HG-8', '2026-06-01', false], ['HG-9', '2026-05-31T23:59:59.999Z', true], ['HG-10', 'garbage', false]].forEach(([lab, authored, inside]) => {
   dr20(lab, [['Efavirenz (EFV)', 'Resistant']], { authored });
   if (inside) wantDr20.push(drRow(lab, { 'Efavirenz (EFV)': 'Resistant' }));
 });
+
+// With a blank side the window is open. Both blank: every request, also one with no registered date or a partial one (HG-5, HG-6).
+const efv20 = { 'Efavirenz (EFV)': 'Resistant' };
+const wantDrApril20 = [drRow('HG-2', efv20)];
+const wantDrJune20 = [drRow('HG-4', efv20), drRow('HG-8', efv20)];   // HG-4 is 1 June by its local date
+const wantDrOutsideMay20 = [drRow('HG-2', efv20), drRow('HG-4', efv20), drRow('HG-5', efv20), drRow('HG-6', efv20), drRow('HG-8', efv20), drRow('HG-10', efv20)];
 
 // Cell HH: the rows are grouped on the lab number and the five dates (and the area and lab); other fields do not split them.
 dr20('HH-1', [['Efavirenz (EFV)', 'Resistant']]);
@@ -2391,7 +2460,7 @@ const wantDrOrder20 = [
 // ---- Suites ----
 
 // The ORDER BY must list every output column, in order. The needles are column names of the final select.
-function shapeSuite20(name, queryName, wantIds, needles) {
+function shapeSuite20(name, queryName, wantIds, needles, requiredParams = true) {
   return {
     name,
     count: 8,
@@ -2402,7 +2471,7 @@ function shapeSuite20(name, queryName, wantIds, needles) {
       const ids = query.params.map((p) => p.id);
       if (JSON.stringify(ids) !== JSON.stringify(wantIds)) bad.push(`params: expected ${wantIds}; got ${ids}`);
       for (const p of query.params) {
-        if (p.required !== true) bad.push(`${p.id}: must be required`);
+        if (p.required !== requiredParams) bad.push(`${p.id}: must ${requiredParams ? '' : 'not '}be required`);
         const want = p.id === 'laboratory' ? 'select' : 'text';
         if (p.type !== want) bad.push(`${p.id}: expected type ${want}, got ${p.type}`);
       }
@@ -2462,7 +2531,10 @@ const suites20 = [
   setSuite17('dr-main', DR_20, W20, DR_COLUMNS_20, wantDr20),
   setSuite17('dr-empty', DR_20, { from: '2030-01-01', to: '2030-12-31' }, DR_COLUMNS_20, []),
   orderedSuite17('dr-order', DR_20, { from: '2029-01-01', to: '2029-01-31' }, DR_COLUMNS_20, wantDrOrder20),
-  shapeSuite20('dr-shape', DR_20, ['from', 'to'], needlesDr20),
+  shapeSuite20('dr-shape', DR_20, ['from', 'to'], needlesDr20, false),
+  setSuite17('dr-all', DR_20, { from: '', to: '' }, DR_COLUMNS_20, [...wantDr20, ...wantDrOutsideMay20, ...wantDrOrder20]),
+  setSuite17('dr-from-only', DR_20, { from: '2026-06-01', to: '' }, DR_COLUMNS_20, [...wantDrJune20, ...wantDrOrder20]),
+  setSuite17('dr-to-only', DR_20, { from: '', to: '2026-04-30' }, DR_COLUMNS_20, wantDrApril20),
 ];
 
 export const groups = [
