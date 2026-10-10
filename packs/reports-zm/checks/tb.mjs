@@ -627,6 +627,34 @@ tb15('T15-Z1', { req: 'ZSOUT', sex: 'F', age: 30, mtb: ['Detected'], rif: 'Detec
 tb15('T15-Z2', { req: 'ZSOU2', sex: 'F', age: 30, mtb: ['Negative'], rif: 'Negative', eff: '2026-08-11T10:00:00Z', iss: '2026-08-12T10:00:00Z' },
   [fact15('MRG', 'Female', '30-34', 'MTB Not Detected', 'Not Detected', 24, 0, [0, 1, 1], '2026-08-12')]);
 
+// September: one-sided measure rules (fix round 1). Every row is Choma General Hospital, Female, 30-34, 24 hours (flags 0, 1, 1),
+// not POC. Each row has ONE bad side and a clean other side, so that `or` (TBGNX lines 28-30) and not `and` is what counts.
+// Cleaned texts are written out from sp_getTBsLastHour lines 51-70: 'Error', 'Invalid' and '' on the MTB side are on no list and stay;
+// 'ERR' gives 'Error', 'INV' gives 'Invalid', 'NORES' gives 'No Results' on the RIF side (and 'NORES' on the MTB side too);
+// 'DET' is on no RIF list, so it stays 'DET' and is on v1's RIF_Positive list (line 26); 'detected_low ' (lower case, a trailing
+// space) is on no clean-up list and equals 'Detected_Low' under the collation; '' stays ''.
+const SEPT15 = [
+  // [lab id, GXMTB text, GXRIF text, cleaned mtb, cleaned rif]
+  ['S1', 'Error', 'Not Detected', 'Error', 'Not Detected'],                   // Errors by the MTB side alone
+  ['S2', 'Negative', 'ERR', 'MTB Not Detected', 'Error'],                     // Errors by the RIF side alone
+  ['S3', 'Invalid', 'Not Detected', 'Invalid', 'Not Detected'],               // Invalids by the MTB side alone
+  ['S4', 'Negative', 'INV', 'MTB Not Detected', 'Invalid'],                   // Invalids by the RIF side alone
+  ['S5', 'NORES', 'Not Detected', 'No Results', 'Not Detected'],              // NoResults by the MTB side alone
+  ['S6', 'Negative', 'NORES', 'MTB Not Detected', 'No Results'],              // NoResults by the RIF side alone
+  ['S7', 'Negative', 'DET', 'MTB Not Detected', 'DET'],                       // RIF positive by 'DET'; not MTB positive, so not in RIF_RES_Rate
+  ['S8', 'Detected', 'DET', 'MTB Detected', 'DET'],                           // MTB positive and RIF 'DET': counts in RIF_RES_Rate
+  ['S9', 'Negative', 'detected_low ', 'MTB Not Detected', 'detected_low '],   // RIF positive by case and trailing space
+  ['S10', 'Negative', '', 'MTB Not Detected', ''],                            // NoResults by a blank RIF
+  ['S11', '', 'Not Detected', '', 'Not Detected'],                            // NoResults by a blank MTB
+  ['S12', 'Negative', 'Not Detected', 'MTB Not Detected', 'Not Detected'],    // clean: counts in Tests only
+];
+SEPT15.forEach(([id, mtbText, rifText, mtb, rif], i) => {
+  const day = String(i + 2).padStart(2, '0');
+  const before = String(i + 1).padStart(2, '0');
+  tb15(`T15-${id}`, { req: 'ZSOUT', sex: 'F', age: 30, mtb: [mtbText], rif: rifText, eff: `2026-09-${before}T00:00:00Z`, iss: `2026-09-${day}T00:00:00Z` },
+    [fact15('CGH', 'Female', '30-34', mtb, rif, 24, 0, [0, 1, 1], `2026-09-${day}`)]);
+});
+
 const SETUP15 = `insert into facility_map (id, source_system, performer_system, source_code, registry_id, name, region, district) values
   ('t15-fm1', '', '', 'ZSOUT', 'reg-s', 'Choma General Hospital', 'Southern', 'Choma'),
   ('t15-fm2', '', '', 'ZCHO2', 'reg-c', 'Choma Clinic', 'Southern', 'Choma'),
@@ -817,6 +845,9 @@ const suites15dash = [
   // The window starts 06-15 and ends 07-31 so that '2026-07' sits inside it as text.
   dashSuite15('dash-partial-stamps', { ...none15, ...win15('2026-06-15', '2026-07-31') }, [dashRow15(['All', 'All', 'All'], dayAll15('', '', '', '2026-06-15', '2026-07-31'))]),
   // Two register rows for one facility (case and a trailing space): one group, one row, whichever spelling it shows.
+  // September: the one-sided rows (see SEPT15). The expected row is also pinned by hand in hand-totals.
+  dashSuite15('dash-measure-rules', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-09-01', '2026-09-30') },
+    [dashRow15(['Southern', 'Choma', 'Choma General Hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', '2026-09-01', '2026-09-30'))]),
   loose15(dashSuite15('dash-fold-facility', { ...area15('Southern', 'Choma', 'Choma General Hospital'), ...win15('2026-08-01', '2026-08-31') },
     [dashRow15(['southern', 'choma', 'choma general hospital'], dayAll15('Southern', 'Choma', 'Choma General Hospital', '2026-08-01', '2026-08-31'))])),
   loose15(dashSuite15('dash-fold-province', { ...area15('southern', '', ''), ...win15('2026-08-01', '2026-08-31') },
@@ -872,12 +903,23 @@ const HAND15 = [
     Male: 2, Female: 2, IndeterminateGender: 0, UnknownGender: 0, MissingGender: 0,
   }],
 ];
+// September (fix round 1): the 12 one-sided rows S1-S12, all Choma General Hospital, Female, 30-34, 24 hours (flags 0, 1, 1), no POC.
+// Tests 12. MTB positive: S8 = 1. RIF positive ('DET' S7 S8, 'detected_low ' S9) = 3. Errors: S1 (MTB) and S2 (RIF) = 2. Invalids: S3
+// (MTB) and S4 (RIF) = 2. NoResults: S5 (MTB 'No Results'), S6 (RIF 'No Results'), S10 (blank RIF), S11 (blank MTB) = 4.
+// Rates: 1/12, RIF_RES 1/1 (only S8 is MTB positive and RIF positive), RIF_IND 0/1, 2/12, 2/12, 4/12. Hours 24 each: AverageTAT 24.
+HAND15.push(['September', ['Southern', 'Choma', 'Choma General Hospital'], {
+  Tests: 12, MTB_Positive: 1, RIF_Positive: 3, RIF_Indeterminate: 0, Errors: 2, Invalids: 2, NoResults: 4,
+  MTB_Positivity: 1 / 12, RIF_RES_Rate: 1 / 1, RIF_IND_Rate: 0 / 1, Error_Rate: 2 / 12, Invalid_Rate: 2 / 12, No_Result_Rate: 4 / 12,
+  AverageTAT: 24, AverageTAT_POC: null, TATW24H: 0, TATW48H: 1, TATW72H: 1, TATW24H_POC: null, TATW48H_POC: null, TATW72H_POC: null,
+  Male: 0, Female: 12, IndeterminateGender: 0, UnknownGender: 0, MissingGender: 0, '30to34': 12, '30to34f': 12, AgeMissing: 0,
+}, win15('2026-09-01', '2026-09-30')]);
 const handTotals15 = {
   name: 'hand-totals',
   count: HAND15.length,
   check() {
-    return HAND15.flatMap(([label, [province, district, facility], want]) => {
-      const got = { ...metrics15(dayAll15(province, district, facility, MAY15.from, MAY15.to)), ...counts15(dayAll15(province, district, facility, MAY15.from, MAY15.to)) };
+    return HAND15.flatMap(([label, [province, district, facility], want, window = MAY15]) => {
+      const rows = dayAll15(province, district, facility, window.from, window.to);
+      const got = { ...metrics15(rows), ...counts15(rows) };
       const bad = Object.entries(want).filter(([k, v]) => got[k] !== v).map(([k, v]) => `${k}: expected ${v}, got ${got[k]}`);
       return bad.length ? [`${label}: ${bad.join('; ')}`] : [];
     });
@@ -1000,6 +1042,7 @@ const suites15list = [
   // Two register rows for one facility: one group per gender and age group, whichever spelling it shows.
   loose15(listSuite15('list-fold-facility', { ...list2x15('', ''), ...win15('2026-08-01', '2026-08-31') },
     listDay15('', '', '2026-08-01', '2026-08-31').map((r) => ({ ...r, Province: r.Province.toLowerCase(), District: r.District.toLowerCase(), Facility: r.Facility.trim().toLowerCase() })))),
+  listSuite15('list-measure-rules', { ...list2x15('Southern', 'Choma'), ...win15('2026-09-01', '2026-09-30') }, listDay15('Southern', 'Choma', '2026-09-01', '2026-09-30')),
   handGroups15,
 ];
 
@@ -1054,6 +1097,8 @@ const suites15trend = [
   // Partial stamps: P2 and P3 are July; P1's authorised date is not a date, so it is in no month (Tests is 2, not 3).
   trendSuite15('trend-partial-stamps', { ...area3x15('', '', ''), ...win15('2026-07-01', '2026-07-31') }, [JUL15]),
   // No test in the window: no row (a group by over no rows).
+  // September (fix round 1): 12 requests; MTB positive S8 = 1, RIF positive S7 S8 S9 = 3, 24 hours each: W24H 0, TATW48 12, W72H 12.
+  trendSuite15('trend-measure-rules', { ...area3x15('', '', ''), ...win15('2026-09-01', '2026-09-30') }, [tr15('2026 - 09', 12, 1, 3, 0, 12, 12)]),
   trendSuite15('trend-empty', { ...area3x15('', '', ''), ...win15('2026-10-01', '2026-10-31') }, []),
   trendSuite15('trend-empty-province', { ...area3x15('Western', '', ''), ...ALL15 }, []),
 ];

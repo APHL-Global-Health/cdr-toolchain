@@ -1140,10 +1140,11 @@ function geneXpertRows(who, name, from, to, on = 'issued', extraDays = 0) {
 // report's display, else the mapped register name, else the performer's code). It is off by default, so the
 // view's columns stay exact.
 // The view has no window in v1; the window only limits the rows read. Each consumer applies its own v1
-// edges on top: sp_dash_getTBGNX and sp_dash_getTBGNX_List filter the authorised date, with the end date
-// moved one day later (@EDate + 1); sp_dash_getTBLabStats has no authorised-date filter on most of its
-// aggregates (a registered-date filter on one of them); fn_GeneXpertReport filters the analysis date
-// (line 67). The window here is only a way to read fewer rows.
+// edges on top. sp_dash_getTBGNX and sp_dash_getTBGNX_List filter the authorised date with the end date
+// moved one day later (@EDate + 1): they read tbgnxCte, which takes `extraDays: 1` for this (geneXpertCte
+// has no such option). sp_dash_getTBLabStats has no authorised-date filter on most of its aggregates (a
+// registered-date filter on one of them); fn_GeneXpertReport filters the analysis date (line 67). The
+// window here is only a way to read fewer rows.
 //
 // Columns, in the order of the view (View__dbo_v_GeneXpert.sql: line 106 and x.* from lines 20-39), in
 // snake_case. requestid keeps v1's one-word spelling, and v1's "AgeinDays" is agein_days.
