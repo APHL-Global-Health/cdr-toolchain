@@ -2,9 +2,9 @@
 // (corlix/fixtures/Zambia_views/script.sql, UTF-16). build.mjs puts them in the custom-queries step
 // of dist/pack.json. The SQL may differ from v1's; the output must match.
 
-import { rpt, inListSql, isNumericSql } from '../vl-reports-mz/vl-queries.mjs';
+import { rpt, inListSql, isNumericSql, foldSql } from '../vl-reports-mz/vl-queries.mjs';
 import {
-  sqlLit, sqlList, inRange, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
+  inRange, ZM_REGISTER_URL, provinceOptionsSql, provinceParam, dateParams, artNumberSql,
   areaFilter, tndCte, TND_PANELS, TND_OBSERVATIONS, TND_INVALID_RESULTS, TND_SUPPRESSED_RESULTS,
 } from './zm-sql.mjs';
 
@@ -43,6 +43,11 @@ export const BELOW_LIMIT_RESULTS = [
 // Part 1 builds the ART number with artNumberSql; parts 2 and 3 show the unique id raw, as v1 does.
 // zm_req and zm_valid are built by tndCte (zm-sql.mjs), which Task 11's "Unique VL clients" also reads. The panels and observations of
 // part 1 are the TND ones (codes.validPanels and validObservations hold the same lists).
+// v1's UNION compares text as SQL Server does, so rows that differ only in case or trailing spaces are one row. The port keeps one row
+// per folded row, the smaller in byte order. The panel, observation and lab-number compares ignore case and trailing spaces too.
+const UNION_TEXT = ['province', 'district', 'facility', 'lab_id', 'client_name', 'gender', 'art_number', 'collected_date', 'registered_date',
+  'result_date', 'result', 'suppressed'];
+const UNION_KEY = [...UNION_TEXT.map((c) => foldSql(`u.${c}`)), 'u.age_years'].join(', ');
 export function provinceClientsSql(codes) {
   const result = rpt('r');
   return `with ${tndCte('zm_valid', { reqName: 'zm_req', where: areaFilter({ province: 'province' }, 'fmr'), extraPanels: [codes.vlPanel], orRegistered: true })},
@@ -51,10 +56,10 @@ zm_rejected as (
     q.unique_id as art_number, q.collected_date, q.authored_at as registered_date, q.result_date,
     'REJECTED' as result, null::text as suppressed
   from zm_req q
-  where q.panel_code = ${sqlLit(codes.vlPanel)}
+  where ${inListSql('q.panel_code', [codes.vlPanel])}
     and q.report_status = 'cancelled'
     and ${inRange('q.authored_at')}
-    and not exists (select 1 from zm_valid v where v.lab_id = q.request_id)
+    and not exists (select 1 from zm_valid v where ${foldSql('v.lab_id')} = ${foldSql('q.request_id')})
 ),
 zm_unclear as (
   select q.province, q.district, q.facility, q.request_id as lab_id, q.client_name, q.age_years, q.gender,
@@ -62,27 +67,31 @@ zm_unclear as (
     ${result} as result, null::text as suppressed
   from zm_req q
   join lab_results r on r.request_id = q.id
-  where q.panel_code = ${sqlLit(codes.vlPanel)}
-    and r.observation_code in (${sqlList(codes.unclearObservations)})
+  where ${inListSql('q.panel_code', [codes.vlPanel])}
+    and ${inListSql('r.observation_code', codes.unclearObservations)}
     and q.report_status = 'final'
     and ${inRange('q.result_date')}
     and ${result} is not null
     and not ${isNumericSql(result)}
     and not ${inListSql(result, BELOW_LIMIT_RESULTS)}
-    and not exists (select 1 from zm_valid v where v.lab_id = q.request_id)
+    and not exists (select 1 from zm_valid v where ${foldSql('v.lab_id')} = ${foldSql('q.request_id')})
 )
 select province as "Province", district as "District", facility as "Facility", lab_id as "LabID",
   client_name as "Name", age_years as "AgeInYears", gender as "Gender", art_number as "ARTNumber",
   collected_date as "CollectedDate", registered_date as "RegisteredDate", result_date as "ResultDate",
   result as "Result", suppressed as "Suppressed"
 from (
-  select province, district, facility, lab_id, client_name, age_years, gender, art_number, collected_date, registered_date, result_date,
-    result, case when suppressed_flag = 1 then 'Yes' else 'No' end as suppressed
-  from zm_valid
-  union
-  select * from zm_rejected
-  union
-  select * from zm_unclear
+  select distinct on (${UNION_KEY}) u.*
+  from (
+    select province, district, facility, lab_id, client_name, age_years, gender, art_number, collected_date, registered_date, result_date,
+      result, case when suppressed_flag = 1 then 'Yes' else 'No' end as suppressed
+    from zm_valid
+    union all
+    select * from zm_rejected
+    union all
+    select * from zm_unclear
+  ) u
+  order by ${UNION_KEY}, ${UNION_TEXT.map((c) => `u.${c} collate "C"`).join(', ')}
 ) zm
 order by 1, 2, 3, 4, 11, 12, 5, 6, 7, 8, 9, 10, 13`;
 }

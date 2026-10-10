@@ -940,8 +940,9 @@ export const TND_UU_RESULTS = ['TAR', 'Target Not Detected', 'TARG', 'RNA not de
 // `<reqName>` (default `<name>_req`) is the request rows: one row per request that has a panel in the TND panels (or in `extraPanels`)
 // and a report, with the mapped requesting facility. Slice 1's parts 2 and 3 read it for the cancelled and unclear requests, which TND
 // does not hold. Columns: id, request_id, panel_code, age_years, authored_at, province, district, facility, client_name (first name, a
-// space, surname), firstname, surname, sex, gender (slice 1's word: F, M, U, I, else Missing), reference_numbers, unique_id,
-// report_status, collected_date, result_date.
+// space, surname), firstname, surname, sex, gender (slice 1's word: F, M, U, I, else Missing; the sex code compared ignoring case and
+// trailing spaces), reference_numbers, unique_id, report_status, collected_date, result_date. Panel and observation codes are compared
+// ignoring case and trailing spaces, as v1's IN does.
 // `<name>` is the TND rows, one row per result row (v1 TND has one row per LabResults row). Columns: province, district, facility,
 // lab_id, client_name, firstname, surname, age_years, sex, gender, art_number, collected_date, registered_date, result_date, result,
 // suppressed_flag, uu_flag. The two flags are v1's TND.Suppressed and TND.UU (1 or 0).
@@ -990,8 +991,8 @@ export function tndCte(name, { from = 'from', to = 'to', reqName = `${name}_req`
     case when ${inListSql(result, TND_UU_RESULTS)} or r.numeric_value < 200 then 1 else 0 end as uu_flag`;
   const rows = `from ${reqName} q
   join lab_results r on r.request_id = q.id
-  where q.panel_code in (${sqlList(TND_PANELS)})
-    and r.observation_code in (${sqlList(TND_OBSERVATIONS)})
+  where ${inListSql('q.panel_code', TND_PANELS)}
+    and ${inListSql('r.observation_code', TND_OBSERVATIONS)}
     and q.report_status = 'final'${resultWindow}
     and ${result} is not null
     and not ${inListSql(result, TND_INVALID_RESULTS)}`;
@@ -1007,7 +1008,7 @@ ${reqName} as (
   select lr.id, lr.request_id, lr.panel_code, lr.age_years, lr.authored_at,
     fmr.region as province, fmr.district, fmr.name as facility,
     concat(p.firstname, ' ', p.surname) as client_name, p.firstname, p.surname, p.sex,
-    case p.sex when 'F' then 'Female' when 'M' then 'Male' when 'U' then 'Unknown' when 'I' then 'Indeterminate' else 'Missing' end as gender,
+    case upper(rtrim(p.sex)) when 'F' then 'Female' when 'M' then 'Male' when 'U' then 'Unknown' when 'I' then 'Indeterminate' else 'Missing' end as gender,
     zi.reference_numbers, zi.unique_id,
     dr.status as report_status, dr.effective as collected_date, dr.issued as result_date
   from lab_requests lr
@@ -1016,7 +1017,7 @@ ${reqName} as (
   left join patients p on p.id = lr.patient_id
   left join ${idsName} zi on zi.lab_request_id = lr.id
   where ${where}
-    and lr.panel_code in (${sqlList([...new Set([...TND_PANELS, ...extraPanels])])})
+    and ${inListSql('lr.panel_code', [...new Set([...TND_PANELS, ...extraPanels])])}
     and (${requestWindow})
 ),
 ${name} as (
