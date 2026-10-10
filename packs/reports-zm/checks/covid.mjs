@@ -857,6 +857,26 @@ away('T23-Z0321-X0', { iss: '2026-03-21T00:30:00+02:00' }); // after it (in UTC 
 const LINE_PARAMS = (day, extra = {}) => ({ ...dayWindow(day), version: 'standard', facility: '', ...extra });
 const lineSuite = (name, params, wanted, setup = '') => setSuite(name, LINE_LIST, params, LINE_COLUMNS, wanted, setup);
 const lineOrdered = (name, params, wanted) => ordered(name, LINE_LIST, params, LINE_COLUMNS, wanted);
+// A suite that expects the query to FAIL (or, with wanted null, to run). The harness runs one psql script with ON_ERROR_STOP, so an error would
+// stop every suite. This one wraps the query in a temporary function that runs it in a plpgsql block and returns the error text, and the
+// suite compares that text. wanted is a fragment the message must contain, or null for "no error".
+function errorSuite(name, queryName, params, wanted) {
+  const q = query(queryName);
+  const body = q ? bind(q.sql, params) : 'select 1';
+  return {
+    name,
+    sql: `create or replace function pg_temp.t23_err(q text) returns text language plpgsql as $f$ begin execute q; return 'no error'; exception when others then return sqlerrm; end $f$;
+select ${lit(name)} || chr(9) || json_build_object('msg', pg_temp.t23_err($q$${body}$q$))::text;`,
+    count: 1,
+    check(rows) {
+      if (!q) return [`query "${queryName}" is missing`];
+      const msg = rows[0]?.msg;
+      if (wanted === null) return msg === 'no error' ? [] : [`expected no error, got ${msg}`];
+      return typeof msg === 'string' && msg.includes(wanted) ? [] : [`expected an error containing "${wanted}", got ${msg}`];
+    },
+  };
+}
+const badTime = (id, value) => `${id} must be YYYY-MM-DDTHH:MM, got ${value}`;
 const NONE_FOUND = { from: '2030-01-01T04:00', to: '2030-01-02T04:00', version: 'standard', facility: '' };
 
 const suites23 = [
@@ -891,6 +911,24 @@ const suites23 = [
   // The patient join: inner in the target, left in Levy.
   lineSuite('line-patients-standard', LINE_PARAMS(PAT_DAY), [line('T23-P01', PAT_DAY, { fac: 'LVCVD' })]),
   lineSuite('line-patients-levy', LINE_PARAMS(PAT_DAY, { version: 'Levy' }), [line('T23-P01', PAT_DAY, { fac: 'LVCVD' }), noPatient('T23-P02'), noPatient('T23-P03', { age: 31 })]),
+  // A facility of only blanks is blank (rtrim): every facility for standard, the two constants for Levy.
+  lineSuite('line-version-standard-blank-facility', LINE_PARAMS(VER_DAY, { facility: '   ' }), V('V01', 'V02', 'V03', 'V04', 'V05', 'V06')),
+  lineSuite('line-version-levy-blank-facility', LINE_PARAMS(VER_DAY, { version: 'Levy', facility: '   ' }), V('V01', 'V02', 'V06')),
+  // The date-time forms that are accepted: a space for the T, seconds, a date alone (midnight: 06-01 00:00 to 06-02 00:00, so E02 is in and E03 is out).
+  lineSuite('line-time-space-and-seconds', { ...LINE_PARAMS(EDGE_DAY), from: '2026-06-01 04:00', to: '2026-06-02 04:00:00' }, edgeStd),
+  lineSuite('line-time-date-only', { ...LINE_PARAMS(EDGE_DAY), from: '2026-06-01', to: '2026-06-02' }, [...edgeStd.filter((r) => ['T23-E01', 'T23-E06', 'T23-E08', 'T23-E13'].includes(r['Disalab Number'])),
+    line('T23-E02', EDGE_DAY, { fac: 'LVCVD', reported: '2026-06-01T03:59:59+02:00', tested: '2026-06-01T04:00:00+02:00' })]),
+  // Bad values raise an error that names the parameter and shows the value. Postgres alone would read 09/10/2026 as 10 September (MDY), accept
+  // 'yesterday' and drop the offset of '+05'.
+  errorSuite('line-time-ok', LINE_LIST, LINE_PARAMS(EDGE_DAY), null),
+  errorSuite('line-time-from-slashes', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), from: '09/10/2026 04:00' }, badTime('from', '09/10/2026 04:00')),
+  errorSuite('line-time-to-slashes', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), to: '01/06/2026 04:00' }, badTime('to', '01/06/2026 04:00')),
+  errorSuite('line-time-from-yesterday', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), from: 'yesterday' }, badTime('from', 'yesterday')),
+  errorSuite('line-time-to-now', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), to: 'now' }, badTime('to', 'now')),
+  errorSuite('line-time-offset', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), from: '2026-06-01T04:00+05' }, badTime('from', '2026-06-01T04:00+05')),
+  errorSuite('line-time-blank', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), to: '' }, badTime('to', '')),
+  errorSuite('line-time-hour-only', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), from: '2026-06-01T04' }, badTime('from', '2026-06-01T04')),
+  errorSuite('line-time-trailing-blank', LINE_LIST, { ...LINE_PARAMS(EDGE_DAY), from: '2026-06-01T04:00 ' }, badTime('from', '2026-06-01T04:00 ')),
   lineSuite('line-empty', NONE_FOUND, []),
   lineSuite('line-empty-levy', { ...NONE_FOUND, version: 'Levy' }, []),
   shapeSuite('line-shape', LINE_LIST, [['from', 'text', true], ['to', 'text', true], ['version', 'select', false], ['facility', 'text', false]],

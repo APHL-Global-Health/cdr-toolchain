@@ -291,7 +291,8 @@ export const positiveListParams = () => [
 // is the Levy copy. The `facility` parameter is a requesting facility CODE (lr.requester_code, v1 RequestingFacilityCode). Blank, standard
 // lists every facility (the target has no facility filter) and Levy lists v1's two constants LVCVD and LPMGH. A code given replaces both: it
 // narrows standard to that facility, and Levy lists that facility instead of its two (spec ruling 1: output parity first; a given value
-// replaces the v1 constant, as in the province parameter of DBS monitoring). Codes compare ignoring case and trailing blanks.
+// replaces the v1 constant, as in the province parameter of DBS monitoring). Codes compare ignoring case and trailing blanks. A facility of
+// only blanks counts as blank (rtrim); the shared areaFilter compares the raw text to '', so this departs from it.
 //
 // Params: from, to (required), version (select), facility (text). One row per distinct combination of the 26 columns below, newest
 // first: Epid, Lab Number, Disalab Number, Patient Name, Contact Number, Gender, AgeinYears, Collected Date, Registered Date, Province,
@@ -301,8 +302,11 @@ export const positiveListParams = () => [
 // The window (spec ruling 3). v1 ran yesterday 04:00 to today 04:00 (`dateadd(hour, 4, datediff(d, 0, getdate() - 1))` to the same for
 // today, target line 221). `from` and `to` take that 04:00 as text, YYYY-MM-DDTHH:MM (a space for the T, and seconds, also work; a date alone is
 // midnight). CE custom queries have three parameter types: text, select and daterange, and daterange only carries a date (custom-query-run.ts
-// assertDate rejects a time), so a date and time is a text parameter. The text goes through ::timestamp, so a bad value raises Postgres'
-// own error, and a blank one is refused by CE (required). The stamp's own local wall time is compared (localTs: offset and fraction dropped,
+// assertDate rejects a time), so a date and time is a text parameter. The text is checked against YYYY-MM-DD, then an optional T or space and
+// HH:MM, then optional :SS; anything else raises an error that names the parameter and shows the value (the message is cast to a
+// timestamp, so Postgres reports "invalid input syntax" with the message in it). Without the check, ::timestamp reads '01/06/2026 04:00' as
+// 6 January, accepts 'yesterday', and drops the offset of '2026-06-01T04:00+05' silently. A blank value is refused by CE (required). A
+// well-formed but impossible date such as 2026-02-30 is refused by Postgres' own range error. The stamp's own local wall time is compared (localTs: offset and fraction dropped,
 // a date-only stamp is midnight, a partial stamp such as '2026-07' is outside). v1 `between` is inclusive at both ends and so is this. A
 // DISA stamp has no fraction, so dropping it changes nothing.
 //
@@ -328,7 +332,9 @@ export const positiveListParams = () => [
 //   Tested Date           AnalysisDateTime -> lab_requests.analysis_at. Date Result Reported -> diagnostic_reports.issued. All CE text.
 //   Province, District, Location    the mapped register row (region, district, name); empty when the facility is not in the register.
 //   Result                the CASE of lines 110-126 on LIMSRptResult (rpt()). No ELSE, so a text that is not listed gives NULL. The accent
-//                         of 'Inconclusive' with an acute accent on the I (line 120, U+00CD) is v1's text and stays: the plain 'Inconclusive' gives NULL, as in v1.
+//                         on the I of 'Inconclusive' (line 120, U+00CD) is v1's text and stays: the plain 'Inconclusive' gives NULL, as in v1.
+//                         DATABASE NOTE (for the README): the fold lower() must lower-case the accented I, which needs a database whose
+//                         LC_CTYPE is UTF-8 (for example en_US.utf8). In a C-locale database 'Ínconclusive' typed in capitals would not match.
 //   Instrument            the CASE of lines 127-135 on LIMSAnalyzerCode (lr.analyzer_code); others NULL.
 //   Testing Laboratory    the CASE of lines 136-189 on `case TestingFacilityCode when '' then ReceivingFacilityCode else TestingFacilityCode`.
 //                         CE's testing code is the report's performer (see Task 22's cross-cutting note on OPENLDR_LAB_CODE). It has no
@@ -420,6 +426,15 @@ const longLabSql = (c) => `case
       when ${inListSql(c, ['ZTT'])} then 'TDRC'
     end`;
 
+// A date-time parameter as a timestamp, or an error that names the parameter. The pattern is YYYY-MM-DD with an optional T or space and
+// HH:MM, and optional :SS. The cast sits outside the CASE: a bad value turns into the message text, and casting the message fails with the
+// message inside Postgres' error text. (A cast of the value inside the THEN branch would be folded at plan time and raise Postgres' own error first.)
+const dateTimeParamSql = (id) => {
+  const v = `{{param.${id}}}`;
+  return `(case when ${v} ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}([T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?)?$' then ${v}
+      else '${id} must be YYYY-MM-DDTHH:MM, got ' || ${v} end)::timestamp`;
+};
+
 export function lineListSql() {
   const symptomJoins = SYMPTOMS.map(([name, , key]) => `left join ${name} ${key} on ${key}.req_key = ${foldSql('lr.request_id')}`).join('\n  ');
   const symptomColumns = SYMPTOMS.map(([, , key]) => `${key}.answer as ${key}`).join(',\n    ');
@@ -427,7 +442,7 @@ export function lineListSql() {
   const picks = LINE_OUT.map(([, key, kind]) => (kind === 'text' ? `min(s.${key} collate "C") as ${key}` : `min(s.${key}) as ${key}`)).join(',\n    ');
   const orders = LINE_OUT.map(([, key]) => (key === 'age' ? 'r.age nulls first' : `r.${key} collate "C" nulls first`));
   return `with win as (
-  select ({{param.from}})::timestamp as w_from, ({{param.to}})::timestamp as w_to, ${foldSql('{{param.version}}')} = 'levy' as is_levy
+  select ${dateTimeParamSql('from')} as w_from, ${dateTimeParamSql('to')} as w_to, ${foldSql('{{param.version}}')} = 'levy' as is_levy
 ),
 ${SYMPTOMS.map(([name, code]) => symptomCte(name, code)).join(',\n')},
 src as (
@@ -461,7 +476,7 @@ src as (
     and ${inListSql('l.observation_code', LINE_OBSERVATIONS)}
     and (p.id is not null or w.is_levy)
     and ${localTs('case when w.is_levy then lr.analysis_at else dr.issued end')} between w.w_from and w.w_to
-    and case when {{param.facility}} = '' then (not w.is_levy or ${inListSql('lr.requester_code', LEVY_FACILITIES)})
+    and case when rtrim({{param.facility}}) = '' then (not w.is_levy or ${inListSql('lr.requester_code', LEVY_FACILITIES)})
       else ${foldSql('lr.requester_code')} = ${foldSql('{{param.facility}}')} end
 ),
 res as (
@@ -516,6 +531,11 @@ export const lineListParams = () => [
 //             OPENLDR_LAB_CODE (see Task 22), so each lab's push must set it to its v1 code for the exclusion to work.
 //   No status filter: a preliminary report with an issued stamp counts. A report with no issued stamp, or a partial one, is outside.
 //   The commented-out Platform columns (lines 11-19, 36, 40-48) are not output and not ported.
+export const positivityParams = () => [
+  { id: 'from', label: 'Date from (YYYY-MM-DD). To match the v1 series set it to 2021-01-01; the first 6 averages cover fewer days than 7', type: 'text', required: true },
+  { id: 'to', label: 'Date to (YYYY-MM-DD), the whole day included', type: 'text', required: true },
+];
+
 export function positivitySql() {
   return `with src as (
   select ${localDate('dr.issued')} as test_date, case when ${inListSql('l.coded_value', ['DET', 'POS'])} then 1 else 0 end as is_positive
@@ -549,6 +569,6 @@ export function queries() {
     { name: 'COVID-19 positive patients', sql: positiveListSql(), params: positiveListParams() },
     { name: 'COVID-19 by source facility', sql: sourceStatsSql(), params: sourceStatsParams() },
     { name: 'COVID-19 daily line list', sql: lineListSql(), params: lineListParams() },
-    { name: 'COVID-19 daily positivity', sql: positivitySql(), params: dateParams(true) },
+    { name: 'COVID-19 daily positivity', sql: positivitySql(), params: positivityParams() },
   ];
 }
