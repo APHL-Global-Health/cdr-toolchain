@@ -1286,15 +1286,17 @@ order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls 
 //     same rule the other Task 25 to 28 reports use for a collection date.
 //   - count(RequestID) is a ROW count: a RequestID on two OBR rows counts twice, a spelling in another case counts again, and a NULL RequestID
 //     is not counted (its dates still count, so a rate can pass 100). The port counts the request_id column the same way.
-//   - Division by zero: a group whose RequestIDs are all NULL has count(RequestId) = 0, and v1 raises "Divide by zero error encountered"
-//     for the whole view. Postgres raises "division by zero" on numeric / 0 as well, so the port raises too, for the whole query. Nothing
-//     hides it. CE's request_id column allows NULL, but cdr always sends one, so this does not happen on real data.
+//   - Division by zero (ruling 2): a group whose RequestIDs are all NULL has count(RequestId) = 0, and v1 raises "Divide by zero error
+//     encountered" for the whole view. An error is not real output, and CE can reach this case: lab_requests.request_id is nullable
+//     (openldr_ce 003_v2_core.ts:39) and a form requisition builds a ServiceRequest with no identifier (packages/forms/src/extract/extract.ts:175-180).
+//     The port divides by nullif(count(RequestID), 0): such a group is a row with Requests 0 and five NULL rates.
 //
 // Rows. A facility level counts one row per lab_requests row (a request with two reports is still one request row, as in v1, which holds
 // one set of dates per row): its dates are the earliest valid date among the reports, so a request has a date when any report has it. A lab
-// level counts one row per (request, report), because the lab is the report's performer: v1 holds one testing code per request row, so a
-// request with reports from two labs counts for each lab. A report with no performer (blank or NULL) or a request with no report has no lab and is
-// in no row: LabList cannot match a blank code (inner join).
+// level counts one row per (request row, lab code), because the lab is the report's performer: v1 holds one testing code per request row,
+// so a request with reports from two labs counts for each lab, and a request with several reports from one lab (codes equal ignoring case
+// and trailing spaces) counts once, with the earliest valid date of each column among those reports, as the facility levels do. A report with
+// no performer (blank or NULL) or a request with no report has no lab and is in no row: LabList cannot match a blank code (inner join).
 //
 // Joins and names (CE gaps, ruling 7):
 //   - FacilityList is the ZMFAC register mapping. A request whose requester code is not mapped to a register row is out (v1's inner join),
@@ -1315,7 +1317,7 @@ order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls 
 // Window (ruling 3: a fixed window becomes parameters; the views scan all history). `from` and `to` are optional (blank is all history),
 // YYYY-MM-DD, on the local date (the stamp's own first ten characters, so a +02:00 stamp stays on its day). The date is v1's own window date, from
 // L line 23: the first of the collection date, the received date and the registered date. Why that date and not the registered date alone:
-// it is the date v1's one window used, so the window v1 computed (2017-11-01 to 2018-03-31 for L) gives the same requests; and a window on the
+// it is the date v1's one window used, so the window v1 computed (from = 2017-10-31, to = 2018-03-31 for L) gives the same requests; and a window on the
 // registered date alone would force RegisteredDate to 100% in every windowed row. A request with none of the three dates is out as soon as one
 // side is given. L's v1 window was exclusive at both ends of a datetime (after 2017-10-31 00:00:00, before 2018-04-01 00:00:00), so
 // from = 2017-10-31 and to = 2018-03-31 gives the same rows except a stamp at exactly 2017-10-31 00:00:00.
@@ -1357,15 +1359,25 @@ function completenessSql({ level, panels, labels }) {
     (select min(${dateOfStamp('x.received_time')}) from diagnostic_reports d join specimens x on x.id = d.specimen_id where d.based_on_id = lr.id) as recv_d,
     (select min(${dateOfStamp('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth_d`;
   const keyColumns = { province: 'fmr.region as k', district: 'fmr.district as k', facility: 'fmr.name as k' };
-  // The request rows of the view (before its window). A facility level is one row per request; a lab level one row per (request, report).
+  // The request rows of the view (before its window). A facility level is one row per request; a lab level one row per (request row, lab
+  // code): rr has one row per report, rq folds the reports of one lab into one row (earliest valid date per column; the report name that
+  // labNamesCte would choose among them).
   const rows = isLab
-    ? `rq as (
-  select lr.request_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, ${dates},
+    ? `rr as (
+  select lr.id as row_id, lr.request_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, ${dates},
     ${dateOfStamp('lr.authored_at')} as reg_d, ${dateOfStamp('lr.analysis_at')} as ana_d
   from lab_requests lr
   join diagnostic_reports dr on dr.based_on_id = lr.id
   left join specimens s on s.id = dr.specimen_id
   where ${panelCondition(panels)}
+),
+rq as (
+  select r.row_id, min(r.request_id) as request_id, min(r.code collate "C") as code,
+    (array_agg(r.report_name order by ${foldSql('r.report_name')} = ${foldSql('r.code')}, r.report_name collate "C"))[1] as report_name,
+    min(r.spec_d) as spec_d, min(r.recv_d) as recv_d, min(r.auth_d) as auth_d, min(r.reg_d) as reg_d, min(r.ana_d) as ana_d
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
 )`
     : `rq as (
   select lr.request_id, ${keyColumns[level]}, ${dates},
@@ -1379,7 +1391,7 @@ function completenessSql({ level, panels, labels }) {
   from rq q
   where ${isLab ? 'q.code is not null and ' : ''}${optionalWindowSql('coalesce(q.spec_d, q.recv_d, q.reg_d)')}
 )`;
-  const rates = RATE_COLUMNS.map(([, c], i) => `(round(count(q.${c})::numeric / count(q.request_id) * 100, 1))::float8 as r${i + 1}`).join(',\n    ');
+  const rates = RATE_COLUMNS.map(([, c], i) => `(round(count(q.${c})::numeric / nullif(count(q.request_id), 0) * 100, 1))::float8 as r${i + 1}`).join(',\n    ');
   const nameCtes = isLab ? `,
 src as (
   select s.code, s.report_name

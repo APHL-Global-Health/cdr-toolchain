@@ -2727,9 +2727,9 @@ const t29day = (x) => (t29valid(x) ? x.slice(0, 10) : null);
 const t29min = (list) => list.map(t29day).filter((x) => x !== null).sort()[0] ?? null;
 const t29fold = (x) => (x === null || x === undefined ? null : x.replace(/ +$/, '').toLowerCase());
 // round((count(col) as decimal) / (count(id) as decimal) * 100, 1): half away from zero, in whole tenths (integer maths, no float).
-// A count of 0 requests raises in v1 (Divide by zero error encountered); the model throws too.
+// A count of 0 requests raises in v1 (Divide by zero error encountered); the port gives NULL (ruling 2), so does the model.
 function t29rate(c, n) {
-  if (n === 0) throw new Error('division by zero');
+  if (n === 0) return null;
   return Math.floor((2000 * c + n) / (2 * n)) / 10;
 }
 const t29byteCmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -2924,6 +2924,9 @@ function group29a() {
   lp('HIVVL', 'S'); lp('VIRAL', 'V'); lp('HIVPC', 'R'); lp('hivpc ', 'A'); lp('hivvl', 'U'); lp('HIVST', 'SVRAU'); lp('TBGNX', 'S'); lp(null, 'V'); lp('viral ', 'R');
   // -- Window Lab --
   windowRows('l', { ...who('ZWL', 'Window Lab') });
+  // -- Several reports from one lab (the code in two spellings) are one request row for that lab, with the earliest date of each column --
+  l({ reports: [{ perf: 'ZSM', display: 'Same Lab', spec: STAMPS.S }, { perf: 'zsm ', display: 'Same Lab', recv: STAMPS.V, auth: STAMPS.U }] });                          // s1
+  l({ reports: [{ perf: 'ZSM', display: 'Same Lab', spec: '2026-06-20T09:00:00+02:00' }, { perf: 'ZSM', display: 'Same Lab', spec: '2026-06-10T09:00:00+02:00' }] });   // s2
   // -- One request, two reports from two labs: v1 has one testing code per request row; CE counts the request for each lab --
   l({ reports: [{ perf: 'ZTW1', display: 'Two One', spec: STAMPS.S }, { perf: 'ZTW2', display: 'Two Two', recv: STAMPS.V }] });
 
@@ -2979,13 +2982,23 @@ insert into diagnostic_reports (id, based_on_id, effective, issued, performer, p
   function labRowsOf(w) {
     const out = [];
     for (const r of recs[w]) {
+      // One row per request row and lab code (equal ignoring case and trailing spaces): the earliest valid date of each column among its reports.
+      const byLab = new Map();
       for (const x of r.reps) {
         if (x.perf === null || x.perf === undefined || x.perf.replace(/ +$/, '') === '') continue; // no testing code: LabList cannot match
-        const mapped = regs[w].find((m) => m.code === x.perf);
-        const display = x.display !== null && x.display !== undefined && x.display.trim() !== '' ? x.display : null;
+        const k = t29fold(x.perf);
+        if (!byLab.has(k)) byLab.set(k, []);
+        byLab.get(k).push(x);
+      }
+      for (const [k, list] of byLab) {
+        const names = list.map((x) => {
+          const mapped = regs[w].find((m) => m.code === x.perf);
+          const display = x.display !== null && x.display !== undefined && x.display.trim() !== '' ? x.display : null;
+          return display ?? mapped?.name ?? x.perf;
+        }).sort((a, b) => ((t29fold(a) === k) - (t29fold(b) === k)) || t29byteCmp(a, b));
         out.push({
-          rid: r.rid, panel: r.panel, code: x.perf, name: display ?? mapped?.name ?? x.perf,
-          spec: t29day(x.spec), recv: t29day(x.recv), reg: t29day(r.reg), ana: t29day(r.ana), auth: t29day(x.auth),
+          rid: r.rid, panel: r.panel, code: list.map((x) => x.perf).sort(t29byteCmp)[0], name: names[0],
+          spec: t29min(list.map((x) => x.spec)), recv: t29min(list.map((x) => x.recv)), reg: t29day(r.reg), ana: t29day(r.ana), auth: t29min(list.map((x) => x.auth)),
         });
       }
     }
@@ -3098,28 +3111,10 @@ insert into diagnostic_reports (id, based_on_id, effective, issued, performer, p
   }
   const typesOf = (columns, params) => (sqlText) => `select json_build_object(${columns.map((c) => `${lit(c)}, pg_typeof(q."${c}")::text`).join(', ')}) from (${bind(sqlText, { ...NONE, ...params })}) q limit 1`;
   const rateTypes = (level) => Object.fromEntries(T29_COLUMNS[level].slice(-5).map((c) => [c, 'double precision']));
-  // v1 raises on a group with no RequestID: so does the port. The suite catches the error and reports its name.
-  function raisesSuite(name, level) {
-    const q = t29query(Q29[level]);
-    sp += 1;
-    if (!q) return { name, count: 1, check: () => [`query "${Q29[level]}" is missing`] };
-    const text = bind(q.sql, { ...NONE, test_type: level === 'labfac' ? 'VL' : '' });
-    return {
-      name,
-      count: 1,
-      sql: `savepoint t29sp${sp};\n${isolate('z')}\ncreate temp table t29_err (msg text);
-do $do$ begin
-  begin
-    perform 1 from (${text}) q;
-    insert into t29_err values ('no error');
-  exception when division_by_zero then
-    insert into t29_err values ('division by zero');
-  end;
-end $do$;
-select ${lit(name)} || chr(9) || to_json((select msg from t29_err))::text;\nrollback to savepoint t29sp${sp};`,
-      check: (got) => (JSON.stringify(got) === JSON.stringify(['division by zero']) ? [] : [`expected ["division by zero"], got ${JSON.stringify(got)}`]),
-    };
-  }
+  // A group with no RequestID: v1 raises "Divide by zero error encountered"; the port gives a row with Requests 0 and five NULL rates (ruling 2).
+  // The zero world holds two requests with a NULL RequestID, one facility (Zero Clinic, Zero province and district) and one lab (ZZL, Zero Lab).
+  const zeroRow = (first) => ({ ...first, Requests: 0, SampleCollectionDate: null, SampleReceivedDate: null, RegisteredDate: null, AnalyzedDate: null, AuthorisedDate: null });
+  const nullSuite = (name, level, params, first) => listSuite(name, level, params, [zeroRow(first)], { w: 'z' });
 
   const BANNED29 = /--|\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|merge|call|copy|into)\b/i;
   // The declared parameters: ids in order, types, which are required; the SQL a plain read-only SELECT.
@@ -3326,6 +3321,11 @@ select ${lit(name)} || chr(9) || to_json((select msg from t29_err))::text;\nroll
       row({ LabPrefix: 'ZTW1', LabFacility: 'Two One' }, [1, 100.0, 0.0, 0.0, 0.0, 0.0]),
       row({ LabPrefix: 'ZTW2', LabFacility: 'Two Two' }, [1, 0.0, 100.0, 0.0, 0.0, 0.0]),
     ], { where: `z."LabPrefix" in ('ZTW1', 'ZTW2')` }),
+    // One request with two reports from one lab counts once (s1: S, V, U from two reports; s2: two collection dates, the earlier is the window date).
+    listSuite('t29a-hand-same-lab', 'lab', {}, [row({ LabPrefix: 'ZSM', LabFacility: 'Same Lab' }, [2, 100.0, 50.0, 0.0, 0.0, 50.0])], { where: `z."LabPrefix" = 'ZSM'` }),
+    listSuite('t29a-hand-same-lab-win10', 'lab', W10, [row({ LabPrefix: 'ZSM', LabFacility: 'Same Lab' }, [1, 100.0, 0.0, 0.0, 0.0, 0.0])], { where: `z."LabPrefix" = 'ZSM'` }),
+    listSuite('t29a-hand-same-lab-win11', 'lab', W11, [], { where: `z."LabPrefix" = 'ZSM'` }),
+    listSuite('t29a-hand-same-lab-area', 'area', {}, [row({ LabName: 'Same Lab' }, [2, 100.0, 50.0, 0.0, 0.0, 50.0])], { where: onlyName('area', 'Same Lab') }),
     // The window lab, the same ten rows as the Window Clinic.
     listSuite('t29a-hand-lab-win10', 'lab', W10, [row({ LabPrefix: 'ZWL', LabFacility: 'Window Lab' }, [4, 50.0, 25.0, 25.0, 25.0, 0.0])], { where: `z."LabPrefix" = 'ZWL'` }),
     listSuite('t29a-hand-area-win-none', 'area', {}, [row({ LabName: 'Window Lab' }, [10, 50.0, 20.0, 30.0, 20.0, 10.0])], { where: onlyName('area', 'Window Lab') }),
@@ -3344,9 +3344,13 @@ select ${lit(name)} || chr(9) || to_json((select msg from t29_err))::text;\nroll
     valueSuite('t29a-types-labfac', 'labfac', 'l', typesOf(T29_COLUMNS.labfac, { test_type: 'VL' }), { LabFacility: 'text', Requests: 'bigint', ...rateTypes('labfac') }),
     valueSuite('t29a-types-area', 'area', 'l', typesOf(T29_COLUMNS.area, {}), { LabName: 'text', Requests: 'bigint', ...rateTypes('area') }),
 
-    // ---- A group with no RequestID: v1 raises (Divide by zero error encountered); so does the port ----
-    raisesSuite('t29a-zero-fac', 'fac'),
-    raisesSuite('t29a-zero-lab', 'lab'),
+    // ---- A group with no RequestID: v1 raises (Divide by zero error encountered); the port gives Requests 0 and NULL rates ----
+    nullSuite('t29a-zero-prov', 'prov', {}, { ProvinceName: 'Zero' }),
+    nullSuite('t29a-zero-dist', 'dist', {}, { DistrictName: 'Zero' }),
+    nullSuite('t29a-zero-fac', 'fac', {}, { FacilityName: 'Zero Clinic' }),
+    nullSuite('t29a-zero-lab', 'lab', {}, { LabPrefix: 'ZZL', LabFacility: 'Zero Lab' }),
+    nullSuite('t29a-zero-labfac', 'labfac', { test_type: 'VL' }, { LabFacility: 'Zero Lab' }),
+    nullSuite('t29a-zero-area', 'area', {}, { LabName: 'Zero Lab' }),
   ];
   return { name: 't29a', suites: suites29 };
 }
