@@ -589,7 +589,7 @@ export const eidResultsParams = () => [
 // ---- EID request answers -----------------------------------------------------------------------------------------------
 //
 // Replaces vPCRInfo. For each request of panel HIVST, the first result of eight observations laid out as columns: CDHIV, CPMTC, INFBR,
-// INFN, MOHIC, MPMTC, PCRT, PCRTT (lines 11-26). What the panel and the codes mean is not stated in the v1 script (QUESTIONS-FOR-ZM), so
+// INFN, MOHIC, MPMTC, PCRT, PCRTT (lines 11-26). What the panel and the codes mean is not stated in the v1 script (QUESTIONS-FOR-ZM question 23), so
 // the columns keep their codes as names. Columns (v1 names and order): RequestID, CDHIV, CPMTC, INFBR, INFN, MOHIC, MPMTC, PCRT, PCRTT.
 // vPCR and fn_getEIDs rows can be matched to it by RequestID. It is its own query, not a column group of "EID results": the shape is
 // different (see there).

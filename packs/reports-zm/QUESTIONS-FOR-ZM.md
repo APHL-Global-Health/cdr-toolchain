@@ -1,7 +1,7 @@
 # Questions for the Zambia team
 
 Open questions about the v1 reporting database and the DISA*Lab data. Opened 2026-10-09. None is
-answered yet. Questions 1 to 5 came with the first version. Questions 6 to 22 came with the rest of
+answered yet. Questions 1 to 5 came with the first version. Questions 6 to 23 came with the rest of
 the reports (version 0.1.1).
 
 ## 1. A backup of OpenLDRDict
@@ -141,13 +141,14 @@ groups by lab needs that code to be the lab's v1 code (`ZUA`, `ZTT` and so on).
 Please give us the list of labs, the code each one uses, and whether one DISA*Lab instance serves
 several codes. UTH, for example, uses `ZUA`, `ZUE` and `ZUL`. A push carries one code, so those labs
 become one lab in CE. Please also tell us how often `TestingFacilityCode` is blank in your DISA*Lab
-data. CE credits such a request to the pushing lab. v1 credits the receiving lab.
+data. CE credits such a request to the pushing lab. v1 handled a blank code in different ways: some
+reports use the receiving lab, others leave the request out or leave it without a lab name.
 
 ## 15. Do you use ReceivingFacilityCode, and for what?
 
 CE has no receiving facility code. So the `Referral` and `Referrals` columns are empty, and v1's
-fallback from a blank testing code to the receiving code does not exist. The wastewater report loses
-samples received at one lab and tested at another.
+fallback from a blank testing code to the receiving code, in the reports that have it, does not exist.
+The wastewater report loses samples received at one lab and tested at another.
 
 Please tell us whether the receiving code carries real referrals in Zambia, and whether you need
 the referral columns.
@@ -211,3 +212,12 @@ does not define. We show the lab name, the same as `LabFacility`. v1's `LabName`
 area name.
 
 Please tell us what it holds, or send `LabList`.
+
+## 23. What do the HIVST panel and its eight answer codes mean?
+
+"EID request answers" (v1 `vPCRInfo`) reads the panel `HIVST` and eight observations: `CDHIV`,
+`CPMTC`, `INFBR`, `INFN`, `MOHIC`, `MPMTC`, `PCRT` and `PCRTT`. The v1 script does not say what the
+panel or the codes mean, so the columns keep the codes as their names.
+
+Please tell us what each code asks, and which answers it takes, so we can name the columns and decide
+whether the report belongs with the EID results.

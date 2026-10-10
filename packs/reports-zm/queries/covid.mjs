@@ -51,6 +51,7 @@ import {
 // ZSP, ZAP, ZL_ (Livingstone TH), ZBP, ZMP, ZML, ZKS, ZCH to a name, any other code as it is. `like 'ZU_'` is SQL Server's varchar LIKE
 // (likeVarcharSql: 'ZUA' and 'ZU ' match, 'ZU' does not). A blank code gives a blank description and v1 drops it (`len(...) > 0`, line
 // 273); CE's testing code is the report's performer, so a request with no report, or a report with no performer, is dropped the same way.
+// A blank DISA testing code is not blank in CE: cdr credits it to the pushing lab (below), so v1 drops it where CE counts it.
 // Lab Description is v1's column and v1's parameter, so it stays this CASE and is not replaced by labNameSql (spec ruling 8): ZUA and ZUB
 // are one row, UTH. Lab codes that pass through show the smallest spelling of the group (the group ignores case and trailing spaces).
 //
@@ -58,7 +59,8 @@ import {
 //
 // CE facts and gaps (spec ruling 7):
 //   - Laboratory is `case TestingFacilityCode when '' then ReceivingFacilityCode ...`. A row with a blank testing code is dropped whatever
-//     the receiving code, so CE not carrying ReceivingFacilityCode changes no row.
+//     the receiving code (len > 0, line 273). CE does not carry ReceivingFacilityCode, but it credits a blank DISA testing code to the pushing
+//     lab (below), so for those requests this report can show more than v1 does.
 //   - The testing lab is on the report (diagnostic_reports.performer). cdr pushes a DiagnosticReport for every OBR, resulted or not
 //     (fhir-transform.ts:306-339, obr-sets.ts:52-54, v2-transform.ts:768-770), and writes performer whenever testing_facility_code is set
 //     (fhir-transform.ts:326-337). That value is buildLabConcept(site) ?? facilityConcept (v2-transform.ts:401), which is the configured
@@ -338,7 +340,8 @@ export const positiveListParams = () => [
 //   Result                the CASE of lines 110-126 on LIMSRptResult (rpt()). No ELSE, so a text that is not listed gives NULL. The accent
 //                         on the I of 'Inconclusive' (line 120, U+00CD) is v1's text and stays: the plain 'Inconclusive' gives NULL, as in v1.
 //                         DATABASE NOTE (for the README): the fold lower() must lower-case the accented I, which needs a database whose
-//                         LC_CTYPE is UTF-8 (for example en_US.utf8). In a C-locale database 'Ínconclusive' typed in capitals would not match.
+//                         LC_CTYPE is UTF-8 (for example en_US.utf8). In a C-locale database even the exact text 'Ínconclusive' does not match,
+//                         because the pack lower-cases the accented I when it writes the SQL and the database cannot.
 //   Instrument            the CASE of lines 127-135 on LIMSAnalyzerCode (lr.analyzer_code); others NULL.
 //   Testing Laboratory    the CASE of lines 136-189 on `case TestingFacilityCode when '' then ReceivingFacilityCode else TestingFacilityCode`.
 //                         CE's testing code is the report's performer (see Task 22's cross-cutting note on OPENLDR_LAB_CODE). It has no

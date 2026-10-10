@@ -152,23 +152,29 @@ each, if wrong, is in the spec.
    months, the last 7 days) or a hard floor (2018-05-31, 2019, 2020, 2021) becomes `from` and `to`.
    For the window v1 computed, the rows match.
 4. **Pickers.** Province and district are pick lists filled from the register. Facility is a text
-   box matched on the register name. Laboratory is matched on the testing lab code, except where v1's
-   own parameter is a lab description (the two COVID-19 lab queries) or a procedure name (Culture and
-   susceptibility results).
+   box matched on the register name (the COVID-19 daily line list takes a requesting facility code).
+   A blank province is "all", except in DBS monitoring (Lusaka, Southern, Eastern, Western and
+   North-Western) and Unique VL clients by facility (Southern and Western). Laboratory is matched on
+   the testing lab code, except where v1's own parameter is a lab description (the two COVID-19 lab
+   queries), a procedure name (Culture and susceptibility results) or one of two fixed names (the
+   pick list of Wastewater results).
 5. **Copy tables are rebuilt as SQL.** CE keeps no copy of v1's `hivvl`, `tnd`, `eid`, `tbgnx`,
    recency or `VLEIDRequests` tables. One builder per table rebuilds it from the warehouse inside
    each query. See "Shared builders".
 6. **The VIRAL questionnaire comes from forms.** cdr-toolchain sends Zambia's VIRAL panel as a form.
    CE keeps the answers as text, not as coded values. The port maps the text with the same rules
    (`Yes`, `Y`, `Yest`, `Pregnant Mother`; case and trailing spaces ignored). Pregnant, breastfeeding,
-   baseline and 3-month flags are 0 or blank until cdr-toolchain sends that form.
+   baseline and 3-month flags are 0 (blank in the trends) when no form arrived for the request, or
+   when its text is not on the yes list (`QUESTIONS-FOR-ZM.md` question 20).
 7. **Data CE lacks stays as an empty column** under v1's name. See "Data CE lacks, by query".
-8. **Lab names come from CE.** A lab name is the report's display name, else the mapped register
+8. **Lab names come from CE.** A lab name is the name written on the report, else the mapped register
    name, else the code. A lab code has one name, the same on every row. A name that is not just the
    code beats the bare code, then the smallest in byte order wins. The name is chosen among the
    rows the query lists, so one lab can show another name under another window, when its reports
    carry different names. The two weekly-request queries choose among all reports of the lab, so their
-   names do not move with the window.
+   names do not move with the window. One exception: Wastewater results keeps v1's two-constant
+   CASE for its Laboratory (ZCX is CHAZ Laboratory, ZLX is ZNPHRL), because the CHAZ filter needs
+   v1's literal.
 9. **One query per column set.** A query cannot change its columns by parameter. Where merged v1
    copies had different columns, the port has separate queries.
 
@@ -230,9 +236,12 @@ each, if wrong, is in the spec.
 - **Facility mapping.** `requesterJoin` matches the requesting facility code exactly against
   `facility_map.source_code`. That table keeps one row for each spelling of a code that CE has seen,
   and cdr-toolchain trims codes (`facility-reconcile.ts:168-178, 906-914` in `openldr_ce`). So each
-  spelling needs its own mapping. A join that folded case would count a request twice. A request from an unmapped facility is left
-  out of the area reports. A few queries keep it with blank names: EID results, Rejections by
-  facility and reason, VL rejections by facility (total), NMPDP and PHSIMS.
+  spelling needs its own mapping. A join that folded case would count a request twice. A request
+  from an unmapped facility is left out of the area reports. Other queries keep it with blank names:
+  COVID-19 by testing lab and by source facility (it counts as Registered only), COVID-19 positive
+  patients, the COVID-19 daily line list, the two COVID-19 results extracts and the two VRDSS feeds,
+  EID results, HIV drug resistance, NMPDP, PHSIMS, Rejections by facility and reason and VL
+  rejections by facility (total).
 - **Area names** come from the mapped register row. Some queries keep a mapped row with no province,
   where v1's inner join to its dictionary would drop it. The comments say which. Spellings can differ
   from v1's `Facilities.Description` and `HealthcareAreas.HealthcareAreaDesc`.
@@ -242,10 +251,14 @@ each, if wrong, is in the spec.
   each lab's push to set `OPENLDR_LAB_CODE` to that lab's v1 code (`ZUA`, `ZTT` and so on). If it is
   unset, the "lab" is the requesting clinic. One DISA*Lab instance that serves several sub-lab codes
   (UTH: `ZUA`, `ZUE`, `ZUL`) collapses to one code. cdr pushes a report for every OBR, resulted or
-  not, and credits a blank DISA testing code to the pushing lab. So the difference from v1 is which lab
-  gets the credit, not a lower count. v1 falls back to the receiving facility code, which CE does not
-  carry. Only a report with a blank performer (data cdr did not push) or a request with no report has
-  no lab. Such a request is left out of the per-lab reports.
+  not, and credits a blank DISA testing code to the pushing lab. v1 handled a blank code in different
+  ways. Some reports fall back to the receiving facility code, which CE does not carry, so there only
+  the lab that gets the credit differs. Others leave the request out (COVID-19 by testing lab
+  filters `len([Lab Description]) > 0`, and the all-requests and EID turnaround views inner-join
+  `LabList` on the testing code). PHSIMS keeps a blank code with no lab name. CE always names the
+  pushing lab, so some counts can be higher than v1's. Only a report with a blank performer (data cdr
+  did not push) or a request with no report has no lab. Such a request is left out of the per-lab
+  reports.
 - **MOHFacilityCode** is the register's HMIS code, `extras.hims_code`. v1's own alias is
   `f.MOHFacilityCode HMISCode` (VRDSS line 47) and the column is `nvarchar(10)`, which fits the
   8-digit HMIS code. Recency tests, Recency tests with client names and both VRDSS feeds read it. A
@@ -260,7 +273,10 @@ each, if wrong, is in the spec.
   `extract.ts:175-180`). `count(request_id)` skips it, as v1's count skips a NULL.
 - **Gender.** CE stores the FHIR gender `other` as `O`. The hivvl and eid builders know only F, M, I
   and U, so a v1 client with sex `I` falls under Missing. Reports that print the raw letter show a
-  blank. `Ínconclusive` needs a UTF-8 `LC_CTYPE` on the CE database (PACK.md says why).
+  blank.
+- **Locale.** The COVID-19 result CASE keeps v1's misspelled `Ínconclusive`. The pack lower-cases the
+  accented I when it writes the SQL, so the database must lower-case it too. That needs a UTF-8
+  `LC_CTYPE` (`SHOW lc_ctype;`). In a C-locale database even the exact text fails to match.
 - **Row limit.** Report designs and exports cap a stored query at 1000 rows (`ROW_CAP` in
   `openldr_ce` `custom-query-run.ts`, reached through `report-designs-routes.ts:171`). The paginated
   `/reports` run has no such cap. Line lists can reach 1000 rows in a busy month.
@@ -490,7 +506,8 @@ No Zambian name is that long.
     province, with District and Facility `All`. A district without a province returns nothing. The
     window runs from `from` 00:00:00 to `to` plus one day at 00:00:00, so a test at exactly midnight
     shows in two touching windows. Gender and AgeGroup are Missing when unknown.
-  - Differs: it stands in for the two broken views (`vSuppressionByFacility` selects columns its
+  - Differs: rows sort by the lower-cased name in byte order, not by SQL Server's word sort (row order
+    only). It stands in for the two broken views (`vSuppressionByFacility` selects columns its
     source does not have, and `vVLQuarterlyFacilitySuppressionRate` tests a label its source never
     produces, so its rate is always 100). It has their suppressed and unsuppressed counts by sex and
     age. It has no time split, so run it once per quarter or month. The rate is Suppressed / Tests.
@@ -510,7 +527,8 @@ No Zambian name is that long.
     beside a number of 1000 or more. The suppressed list is shorter than the `hivvl` one. The facility
     matches on name. TAT3 is hours cut to 7 decimals, not rounded.
   - Differs: a decimal result text (`999.5`) is read as a number, where v1 stops. The facility is a
-    required text box with no "all" mode.
+    required text box with no "all" mode. v1 overflows (Msg 8115) when analysis to authorised is
+    100,000,000 seconds or more. The port returns a value.
 - **Earlier VL results of high-VL clients.**
   - Kept: the cohort rule has no panel or observation filter, so a numeric result of four or more
     characters from any test puts a client in. Visits are numbered per sex but the pivot merges the
@@ -706,7 +724,8 @@ No Zambian name is that long.
     the result CASE. DISTINCT merges rows. Requests with no patient are dropped.
   - Differs: the window is optional and uses the authorised date.
   - CE lacks: about 15 request columns (NULL). FacilityLocation is a guess, `facility, district,
-    province`. HMISCode is the HMIS code.
+    province`. HMISCode is the HMIS code. Request attributes that v1 holds as dates or numbers print
+    as text. A v1 client with sex `I` shows a blank Gender.
 - **Wastewater results.**
   - Kept: the five CTEs join on request id without the OBR set, so repeated values multiply rows. The
     site text is cut at `~` as v1 cuts it.
@@ -749,7 +768,9 @@ No Zambian name is that long.
 - **Turnaround times (three queries).** Kept: each step is an average of integer day counts, cut toward
   zero. An unfinished step runs to today. Dates running backwards give negative steps. The province
   view for all requests keeps rejected requests. Week is the US week.
-  - CE lacks: a blank DISA testing code is credited to the pushing lab. The receiving-lab fallback is gone.
+  - CE lacks: the receiving lab. A blank DISA testing code is credited to the pushing lab. v1's VL views
+    use the receiving lab, while its all-requests and EID lab views inner-join `LabList` on the testing
+    code and leave such a request out. So those CE counts can be higher.
 - **Requests received by week, and its VLEID copy.** Kept: Total is not PCR plus VL plus Other. The part
   counts ignore the floor and the window. They match year, month and week. `from` of the first query
   is v1's 2018-05-31 floor and is strict. Counts are distinct request numbers.
@@ -759,7 +780,7 @@ No Zambian name is that long.
 
 | Query | Empty or NULL column, or reduced meaning |
 |---|---|
-| VL dashboards, trend, VL tests on GeneXpert, Unique VL clients | Pregnant, BreastFeeding, BaselineVL, ThreeMPostUnSuppressed read the VIRAL form text. They are 0 or NULL until the form arrives. Referral is NULL. Disalink is 0. |
+| VL dashboards, trend, VL tests on GeneXpert, Unique VL clients | Pregnant, BreastFeeding, BaselineVL, ThreeMPostUnSuppressed read the VIRAL form text. They are 0 or NULL when no form arrived or its text is not on the yes list. Referral is NULL. Disalink is 0. |
 | Client by ART number, VL results for a facility's clients, Earlier VL results of high-VL clients, VL results history by client, Unique VL clients | HOSPID is not sent. |
 | EID clients by province | HealthcareNo, HOSPID. |
 | EID results | ProvinceID, DistrictCode. |

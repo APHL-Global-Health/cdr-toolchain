@@ -32,17 +32,20 @@ not a value DISA*Lab writes per request. Every report that reads the testing lab
 lab's push to use that lab's v1 code (`ZUA`, `ZTT` and so on). If it is unset, CE names the
 requesting clinic as the lab. One DISA*Lab instance can serve several lab codes. UTH, for example,
 uses `ZUA`, `ZUE` and `ZUL`. A push carries one lab code, so those labs collapse into one code in CE.
-A request whose DISA*Lab testing code is blank is not lost. CE credits it to the pushing lab. v1 would
-credit the receiving lab, so the difference is which lab gets the request, not a lower count.
+A request whose DISA*Lab testing code is blank is not lost in CE. CE credits it to the pushing lab.
+v1 handled a blank code in different ways. Some reports used the receiving lab. Others left the
+request out or left it without a lab name. So some CE counts can be higher than v1's.
 
 **3. Measure Zambia's DISA*Lab.** Zambia's DISA*Lab data export has not been measured yet. Until
-`cdr probe-review` runs on it, results carry no status and no result date. Every report that needs a
+the OpenLDR team runs `cdr probe-review` on a sample export from Zambia, results carry no status and no
+result date. Every report that needs a
 final result or a result date is empty on real Zambia data. The reports are tested on made-up
 cases only. Compare them with v1 on a real export before you trust a number.
 
 **4. Check the database locale.** COVID-19 results keep v1's misspelled result text `Ínconclusive`,
 with an accent on the first letter. CE matches it case-insensitively, which needs a UTF-8 `LC_CTYPE`
-on the CE database. In the C locale the accented letter does not fold, and that result text shows no
+on the CE database. Check it with `SHOW lc_ctype;` in psql. It should name a UTF-8 locale, such as
+`en_US.utf8`. In the C locale the accented letter does not fold, and that result text shows no
 value. This touches the COVID-19 daily line list, both COVID-19 results extracts and both VRDSS
 feeds.
 
@@ -76,8 +79,13 @@ shows Requests 0 and blank rates.
 **Gender.** CE stores the FHIR gender `other` as `O`. A v1 client with sex `I` shows as Missing, or
 with a blank Gender, depending on the report.
 
+**Pregnancy and baseline flags.** The pregnant, breastfeeding, baseline and 3-month flags read the text
+answers of the VIRAL form (`hiv_vl_documentation`). A flag is 0 (blank in the monthly trends) when no
+form arrived for the request, or when its text is not on the yes list. QUESTIONS-FOR-ZM question 20
+asks for the texts.
+
 **Names.** Province, district and facility names come from the register, not from v1's dictionary.
-Some spellings can differ. A lab name is the report's display name, else the register name of the
+Some spellings can differ. A lab name is the name written on the report, else the register name of the
 mapped code, else the code, and a lab code has one name. A lab that v1's dictionary did not list
 still appears here.
 
@@ -91,14 +99,22 @@ still appears here.
   as rejected.
 - The DISA Link pre-registration facts. Disalink columns show 0, and the DISA Link reports are
   empty, until cdr-toolchain sends them.
-- The VIRAL questionnaire answers. Pregnant, breastfeeding and baseline flags read the form text
-  and are 0 (or blank) until cdr-toolchain sends that form.
 
 ## The reports
 
-Parameters in square brackets are optional. Where province, district or facility is optional, blank
-means all. A blank optional date means no limit. Province and district are pick lists from the
-register. A facility is typed as its register name.
+Parameters in square brackets are optional. A blank optional date means no limit. Province and
+district are pick lists from the register. A facility is typed as its register name. Where province,
+district or facility is optional, blank means all, with three exceptions:
+
+- DBS monitoring (VL and EID): a blank province means Lusaka, Southern, Eastern, Western and
+  North-Western.
+- Unique VL clients by facility (12 months): a blank province means Southern and Western.
+- COVID-19 daily line list: `facility` is a requesting facility code, not a register name. Blank shows
+  every facility in the standard version, and only LVCVD and LPMGH in the Levy version.
+
+A blank pick list that is not a place (`show`, `version`, `rows`, `list`, `test_type`, `laboratory` of
+the wastewater report) takes its first value. In the TB reports, MTB is the TB bacteria result and
+RIF is the rifampicin resistance result of a GeneXpert test.
 
 | Report | What it gives | Parameters |
 |---|---|---|
@@ -133,10 +149,10 @@ register. A facility is typed as its register name.
 | TB GeneXpert by facility, sex and age | TB GeneXpert measures per facility, sex and age group. | [`province`], [`district`], `from`, `to` |
 | TB GeneXpert monthly trend | TB tests, MTB and RIF positives, and tests within 24, 48 and 72 hours for each month. | [`province`], [`district`], [`facility`], `from`, `to` |
 | TB GeneXpert report | GeneXpert results per testing lab, age group and TB/HIV status. | `from`, `to` |
-| Recency tests | Recency (RTRI) tests with the client baseline viral load, suppression status and reporting status. | `from`, `to` |
+| Recency tests | Recent infection (recency) tests with the client baseline viral load, suppression status and reporting status. | `from`, `to` |
 | Recency surveillance counts | Counts of recency tests by facility, age group, sex, result, modality and registration week. | `from`, `to` |
 | Recency tests with client names | The recency test list with the client name and reference number added. | `from`, `to` |
-| DBS monitoring (VL and EID) | Dried blood spot viral load and EID samples: valid results, rejections and unclear results, with specimen type and reason. | `from`, `to`, [`province`] |
+| DBS monitoring (VL and EID) | Dried blood spot viral load and EID samples: valid results, rejections and unclear results, with specimen type and reason. A blank province means Lusaka, Southern, Eastern, Western and North-Western. | `from`, `to`, [`province`] |
 | CD4 by area, age and sex | CD4 tests per facility, age group and sex, split by absolute count range and percentage range. | `from`, `to` |
 | HPV results by month | HPV tests and positives per facility, testing lab and month, with HPV16, HPV18, other and high-risk counts. | `from`, `to` |
 | Culture and susceptibility results | Culture results of one lab with organism and antibiotic susceptibility, one row per organism. | `laboratory`, `from`, `to` |
@@ -146,13 +162,13 @@ register. A facility is typed as its register name.
 | COVID-19 by testing lab | COVID-19 requests registered, tested, authorised and positive per testing lab. | `from`, `to` |
 | COVID-19 positive patients | Patients with an authorised positive COVID-19 result for one lab and one facility. | `from`, `to`, `laboratory`, `facility` |
 | COVID-19 by source facility | The same four counts per source facility for one lab. Can show only facilities with positives or with tests. | `from`, `to`, `laboratory`, [`show`] |
-| COVID-19 daily line list | COVID-19 patients with a result authorised in a date-time window, with contact, test and symptom answers. | `from`, `to`, [`version`], [`facility`] |
+| COVID-19 daily line list | COVID-19 patients with a result authorised in a date-time window, with contact, test and symptom answers. The facility is a requesting facility code. Version Levy with a blank facility shows only LVCVD and LPMGH. | `from`, `to`, [`version`], [`facility`] |
 | COVID-19 daily positivity | Daily COVID-19 tests, positives, positivity rate and 7-day moving average. | `from`, `to` |
 | COVID-19 results with location | Final COVID-19 requests with their results and province, district and facility. | [`from`], [`to`] |
 | COVID-19 results with facility location | The same rows with one facility location text in place of province, district and facility. | [`from`], [`to`] |
 | COVID-19 results (VRDSS) | One row per final COVID-19 result, shaped as a feed for the surveillance system. | [`from`], [`to`] |
 | COVID-19 results (VRDSS V2) | The same feed in the second column layout. | [`from`], [`to`] |
-| Wastewater results | SARS-CoV-2 CT values and result for six Lusaka wastewater sites, or the CHAZ lab. | [`from`], [`to`], [`laboratory`] |
+| Wastewater results | SARS-CoV-2 CT values and result for six Lusaka wastewater sites, or the CHAZ lab. Blank means the six sites. | [`from`], [`to`], [`laboratory`] |
 | VL lab performance | Viral load lab summary: completeness, throughput, referrals, DISA Link share, suppression and timeliness per lab. | `from`, `to` |
 | EID lab performance | EID lab summary: completeness, throughput, rejections, result classes and timeliness per lab. | `from`, `to` |
 | TB lab performance | TB GeneXpert lab summary: completeness, throughput, MTB and RIF results, errors and 24, 48 and 72 hour turnaround. | `from`, `to` |

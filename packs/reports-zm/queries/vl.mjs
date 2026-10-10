@@ -68,7 +68,7 @@ import {
 //
 // CE gaps (spec ruling 7): none of its own. Everything comes from hivvlCte, so its gaps carry over: Referral and Disalink
 // are not used by this report. Pregnant, BreastFeeding, BaselineVL and ThreeMPostUnSuppressed read the VIRAL form's text
-// answers (spec ruling 6), so they are 0 until cdr-toolchain sends that form.
+// answers (spec ruling 6), so they are 0 when no form arrived for the request or when its text is not on the yes list.
 //
 // Windows: `from` and `to` are required (spec ruling 3). v1 defaulted a missing start and end to last month.
 
@@ -228,7 +228,7 @@ export const vlDashboardParams = () => [
 //     which is the same unit.
 //
 // CE gaps (spec ruling 7): none of its own. Pregnant, BreastFeeding, BaselineVL and ThreeMPostUnSuppressed read
-// the VIRAL form (spec ruling 6), so they are 0 until cdr-toolchain sends that form.
+// the VIRAL form (spec ruling 6), so they are 0 when no form arrived for the request or when its text is not on the yes list.
 //
 // Windows: `from` and `to` are required (spec ruling 3). v1 defaulted a missing start and end to last month.
 
@@ -317,7 +317,7 @@ export const vlSexAgeParams = () => [
 // partial when the window does not start and end on month edges. A 12-month trend is a window of 12 months.
 //
 // CE gaps (spec ruling 7): none of its own. Pregnant, BreastFeeding and Baseline read the VIRAL form (spec ruling 6),
-// so they are NULL until cdr-toolchain sends that form.
+// so they are NULL when no form arrived for the request or when its text is not on the yes list.
 
 export function vlTrendSql() {
   // The three shapes v1 filters on (lines 13, 28, 43). Everything else is the unfiltered last branch.
