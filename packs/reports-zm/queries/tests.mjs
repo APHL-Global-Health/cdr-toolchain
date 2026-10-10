@@ -186,11 +186,14 @@ order by ${orderItems(columns)}`;
 //
 // The specimen type (lines 13-19, repeated in every part): LIMSSpecimenSourceCode DBS is 'Dry Blood Spot'; B and BLD are 'Blood'; WB is
 // 'Whole Blood'; P is 'Plasma'; an empty code (spaces too) is 'Unrecorded'; any other code, and a missing one, is 'Other'.
+// CE: a specimen that joined but has a NULL or blank type_code is 'Unrecorded' (v1 holds a blank DISA code as '', see the CE gaps).
+// 'Other' is kept for a code on no list and for a join that misses (no specimen row).
 //   - VL valid takes it from the Requests rows of the hivvl lab number in the three VL panels (line 25), so a lab number with several
 //     request rows gives a row per type, and a row with no hivvl row gets 'Other'. EID valid joins the EID-panel requests (inner join).
 //   - The other parts take it from the request row itself.
 //   - CE has no source code on the request. The port reads specimens.type_code of the specimen of the request's report
-//     (diagnostic_reports.specimen_id). A request with no report, or a report with no specimen, has no code: 'Other'.
+//     (diagnostic_reports.specimen_id). A request with no report, or a report with no specimen, has no specimen row: 'Other'. That
+//     happens only with data that did not come through cdr, which always writes a Specimen and links it from each report.
 //
 // The rejection reason (lines 208-216). The last select joins Requests again on the lab number, the Result being 'REJECTED' (compared as
 // SQL Server does: any case), a reason with a length (len() ignores trailing spaces, so spaces only is none) and a panel of the test (the
@@ -213,11 +216,17 @@ order by ${orderItems(columns)}`;
 //   - EID valid: Result has no Invalid class; the repeated 'Positive' branch (line 143) is dead.
 //
 // CE gaps (spec ruling 7) and CE choices:
-//   - The mapping from v1's LIMSSpecimenSourceCode to specimens.type_code is NOT verified. The port assumes the CE code is v1's code
-//     (DBS, B, BLD, WB, P). If CE stores another code, every row shows 'Other'. Check it against real data before relying on SpecimenType.
+//   - The code mapping is settled: cdr writes v1's LIMSSpecimenSourceCode unchanged into the specimen type (cdr apps/cli/src/export/
+//     v1-transform.ts:251,298, v2-transform.ts:298-308, fhir-transform.ts:195) and CE projects it into specimens.type_code
+//     (openldr_ce packages/db/src/relational/specimen.ts:8,17). DBS, B, BLD, WB and P arrive unchanged.
+//   - A blank code. Measured on the local v1 OpenLDRData.Requests (Tanzania, 3,602,986 rows): a blank code is '' in 45,889 rows and
+//     NULL in only 16. So v1 shows 'Unrecorded' for a blank code. cdr drops a blank code on the CE path (v2-transform.ts:34-41,
+//     fhir-primitives.ts:99-103), so type_code is NULL. The port shows 'Unrecorded' for a specimen row with a NULL or blank type_code.
+//     The 16 rows that v1 holds as NULL would show 'Other' in v1; CE cannot tell them from blanks, so they show 'Unrecorded'.
 //   - v1 rejects statuses X, Y and Z. CE holds cancelled (X) only; Y and Z cannot be told from the other statuses (unknown), so they
 //     are not rejected here.
-//   - A request with no report cannot reach a specimen (CE links the specimen to the report), so its specimen type is 'Other'.
+//   - A request with no report cannot reach a specimen (CE links the specimen to the report), so its specimen type is 'Other'. This
+//     happens only with data that did not come through cdr.
 //   - TND in v1 starts at 2017-01-01 and ends now (the builder's floor and ceiling); the window is the caller's.
 //   - Province, district and facility are the requesting facility's mapped register row. A facility not in the register drops out, as
 //     v1's inner join on its dictionary drops it. A register row with no province is never in a province list.
@@ -231,13 +240,15 @@ const DBS_VL_OBSERVATIONS = ['HIVVL', 'HIVVC', 'HIVVD', 'HIVTM', 'POCVR', 'POCVC
 const DBS_CLEAR_TEXTS = ['< 20', '<30 copies/mL', '<40 copies/mL', '> 10000000', 'DET', '>9999999', '> 9999999', '>9999999 copies/mL',
   '> 9999999 copies/mL', 'NDET', 'PLTV', 'Target Not Detected', 'RNA Not Detected', '<883 copies/mL'];
 
-// v1 lines 13-19: the CASE on LIMSSpecimenSourceCode. A NULL code falls to 'Other', as in SQL Server.
-const dbsSpecimenTypeSql = (code) => `case when ${inListSql(code, ['DBS'])} then 'Dry Blood Spot'
+// v1 lines 13-19: the CASE on LIMSSpecimenSourceCode. `rowId` is the id of the joined specimen: no row (the join missed) is 'Other';
+// a row whose code is NULL or blank is 'Unrecorded' (v1 stores a blank code as '', see the CE gaps).
+const dbsSpecimenTypeSql = (code, rowId) => `case when ${rowId} is null then 'Other'
+      when ${inListSql(code, ['DBS'])} then 'Dry Blood Spot'
       when ${inListSql(code, ['B'])} then 'Blood'
       when ${inListSql(code, ['BLD'])} then 'Blood'
       when ${inListSql(code, ['WB'])} then 'Whole Blood'
       when ${inListSql(code, ['P'])} then 'Plasma'
-      when rtrim(${code}) = '' then 'Unrecorded'
+      when coalesce(rtrim(${code}), '') = '' then 'Unrecorded'
       else 'Other' end`;
 
 // The province test: v1's five when the parameter is blank, else the one given.
@@ -254,7 +265,7 @@ export function dbsMonitoringSql() {
     dr.effective as collected_date, s.received_time as received_date, lr.authored_at as registered_date, dr.issued as result_date`;
   const rejects = (name, panels, test, validName) => `${name} as (
   select ${requestColumns},
-    'REJECTED'::text as result, ${dbsSpecimenTypeSql('s.type_code')} as specimen_type, ${test} as test
+    'REJECTED'::text as result, ${dbsSpecimenTypeSql('s.type_code', 's.id')} as specimen_type, ${test} as test
   ${requestFrom}
   where dr.status = 'cancelled'
     and ${inListSql('lr.panel_code', panels)}
@@ -273,7 +284,7 @@ export function dbsMonitoringSql() {
 ${hivvlCte('hv', { from: 'from', to: 'to', labsInWindow: true })},
 ${eidCte('ed', { from: 'from', to: 'to' })},
 sp_vl as (
-  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code')} as specimen_type
+  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code', 'sx.id')} as specimen_type
   from lab_requests rq
   left join diagnostic_reports rd on rd.based_on_id = rq.id
   left join specimens sx on sx.id = rd.specimen_id
@@ -281,7 +292,7 @@ sp_vl as (
     and ${foldSql('rq.request_id')} in (select ${foldSql('h.lab_id')} from hv h)
 ),
 sp_eid as (
-  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code')} as specimen_type
+  select distinct ${foldSql('rq.request_id')} as lab_key, ${dbsSpecimenTypeSql('sx.type_code', 'sx.id')} as specimen_type
   from lab_requests rq
   left join diagnostic_reports rd on rd.based_on_id = rq.id
   left join specimens sx on sx.id = rd.specimen_id
@@ -299,7 +310,7 @@ vl_valid as (
 ${rejects('vl_rejects', DBS_VL_PANELS, "'VL'::text", 'vl_valid')},
 vl_incs as (
   select ${requestColumns},
-    ${result} as result, ${dbsSpecimenTypeSql('s.type_code')} as specimen_type, 'VL'::text as test
+    ${result} as result, ${dbsSpecimenTypeSql('s.type_code', 's.id')} as specimen_type, 'VL'::text as test
   from lab_requests lr
   join lab_results l on l.request_id = lr.id
   ${requesterJoin('lr', 'fmr')}

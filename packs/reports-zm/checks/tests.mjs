@@ -1062,7 +1062,8 @@ valid18('T18-TY-EMPTY', { type: '' }, { type: T18.none });
 valid18('T18-TY-SPACES', { type: '   ' }, { type: T18.none });
 valid18('T18-TY-X', { type: 'X' }, { type: T18.other });
 valid18('T18-TY-PLASMA', { type: 'PLASMA' }, { type: T18.other });
-valid18('T18-TY-NULL', { type: null }, { type: T18.other });
+// A specimen row whose code is NULL (cdr drops a blank code) or blank is 'Unrecorded'; no specimen row at all (below) is 'Other'.
+valid18('T18-TY-NULL', { type: null }, { type: T18.none });
 valid18('T18-TY-NOSPEC', { specimen: false }, { type: T18.other });
 
 // ---- Valid part: rows with no hivvl row (lines 22-25) ----
@@ -1124,6 +1125,7 @@ reject18('T18-RJ-EMPTY', { type: '', reason: '' }, { type: T18.none });
 reject18('T18-RJ-POCVR', { panel: 'POCVR', type: 'BLD', reason: 'Clotted' }, { type: T18.blood, reason: 'Clotted' });
 reject18('T18-RJ-POHVL', { panel: 'POHVL', reason: 'Haemolysed' }, { reason: 'Haemolysed' });
 // The result date is shown when the report has one; a report with no specimen has no received date and the type 'Other'.
+reject18('T18-RJ-NULLTYPE', { type: null }, { type: T18.none });
 reject18('T18-RJ-ISSUED', { iss: '2026-05-12T10:00:00Z', specimen: false }, { type: T18.other });
 // A lab with several request rows: one reason per distinct reason of its VL-panel rows (any status, any facility, even unmapped),
 // not those of an EID panel, not a blank one; 'Leaked' and 'leaked ' are one reason.
@@ -1223,6 +1225,7 @@ f18.req('T18-I-NULL', { ...A18 });
 f18.req('T18-I-NULL', { ...B18, results: [{ obs: 'HIVVL' }] });
 // The specimen of the unclear row is its own request's; the valid row has a row per type of the lab's VL requests.
 pair18('T18-I-TYPE', 'PTLTT', { type: 'P' }, { validTypes: [T18.dbs, T18.plasma], incsType: T18.plasma });
+pair18('T18-I-NULLTYPE', 'PTLTT', { type: null }, { validTypes: [T18.dbs, T18.none], incsType: T18.none });
 pair18('T18-I-NOSPEC', 'PTLTT', { specimen: false }, { validTypes: [T18.dbs, T18.other], incsType: T18.other });
 // The province (line 121).
 pair18('T18-I-P-NORTH', 'PTLTT', {}, { fac: 'NORTH' });
@@ -1257,6 +1260,8 @@ eid18('T18-E-WEIRD', { results: [{ obs: 'HIVPC', text: 'Weird' }] }, { result: n
 // The panels and observations of the eid table, and the Requests join on the three EID panels (lines 154-155).
 eid18('T18-E-POEID', { panel: 'POEID', type: 'WB', results: [{ obs: 'HIVPR', text: 'Negative' }] }, { result: 'Negative', type: T18.whole });
 eid18('T18-E-POCGH', { panel: 'POCGH', type: 'P', results: [{ obs: 'PGHIV', text: 'Positive' }] }, { type: T18.plasma });
+eid18('T18-E-NULLTYPE', { type: null }, { type: T18.none });
+eid18('T18-E-NOSPEC', { specimen: false }, { type: T18.other });
 eid18('T18-E-CASE', { panel: 'hivpc ', results: [{ obs: 'hivpr ', text: 'Positive' }] });
 f18.req('T18-E-OBS', { ...EID_18, results: [{ obs: 'XYZ', text: 'Positive' }] });
 // Two request rows of one lab number: a row per specimen type among its EID-panel requests; the eid table keeps the earlier one.
@@ -1286,6 +1291,8 @@ f18.req('T18-E-P-UNMAPPED', { ...EID_18, fac: 'UNMAPPED' });
 reject18('T18-E-RJ-HIVPC', { panel: 'HIVPC', reason: 'Dry spot damaged' }, { test: 'EID', reason: 'Dry spot damaged' });
 reject18('T18-E-RJ-POCGH', { panel: 'POCGH', reason: 'Wrong card', type: 'B' }, { test: 'EID', reason: 'Wrong card', type: T18.blood });
 reject18('T18-E-RJ-POEID', { panel: 'POEID', type: 'BLD' }, { test: 'EID', type: T18.blood });
+reject18('T18-E-RJ-NULLTYPE', { panel: 'HIVPC', type: null }, { test: 'EID', type: T18.none });
+reject18('T18-E-RJ-NOSPEC', { panel: 'HIVPC', specimen: false }, { test: 'EID', type: T18.other });
 reject18('T18-E-RJ-X1', { panel: 'HIVPC' }, { test: 'EID' });
 f18.req('T18-E-RJ-X1', { panel: 'HIVVL', report: false, reason: 'VL reason' });       // a VL panel reason is not used
 reject18('T18-E-RJ-WIN', { panel: 'HIVPC', authored: '2026-05-31T23:30:00+02:00' }, { test: 'EID' });
