@@ -1,7 +1,7 @@
 // Custom queries for the covid reports. Each task adds { name, sql, params } entries to the list.
 
 import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
-import { dateParams, likeVarcharSql, localTs, requestAttrSql, requesterJoin, ssTextKey } from '../zm-sql.mjs';
+import { dateParams, genderFmiuSql, inRange, likeVarcharSql, localDate, localTs, requestAttrSql, requesterJoin, ssTextKey } from '../zm-sql.mjs';
 
 // ---- The COVID-19 counts (Task 22) -----------------------------------------------------------------------------------------------
 //
@@ -279,10 +279,276 @@ export const positiveListParams = () => [
   { id: 'facility', label: 'Facility (name as in the register)', type: 'text', required: true },
 ];
 
+// ---- COVID-19 daily line list (Task 23) -------------------------------------------------------------------------------------------
+//
+// Replaces sp_cov_getDayLineList (the target) with sp_cov_getDayLineList_Levy merged in. "Target" lines below are lines of
+// StoredProcedure__dbo_sp_cov_getDayLineList.sql, "Levy" lines of the _Levy file. A diff of the two shows four differences:
+//   1. Levy adds `RequestingFacilityCode in ('LVCVD', 'LPMGH')` (Levy line 214).
+//   2. Levy windows on AnalysisDateTime and orders by it (Levy lines 215-217); the target uses AuthorisedDateTime (target lines 221-222).
+//   3. Levy joins Patients with a LEFT join (Levy line 199); the target uses an INNER join (target line 205).
+//   4. Levy's Result map lacks 'IgM/IgG Negative', 'IgM Negative' (target lines 112-113) and 'INVAL', 'Invalid' (target lines 122-123).
+// The four belong to one report, so the `version` parameter switches all four together: 'standard' (also when blank) is the target, 'Levy'
+// is the Levy copy. The `facility` parameter is a requesting facility CODE (lr.requester_code, v1 RequestingFacilityCode). Blank, standard
+// lists every facility (the target has no facility filter) and Levy lists v1's two constants LVCVD and LPMGH. A code given replaces both: it
+// narrows standard to that facility, and Levy lists that facility instead of its two (spec ruling 1: output parity first; a given value
+// replaces the v1 constant, as in the province parameter of DBS monitoring). Codes compare ignoring case and trailing blanks.
+//
+// Params: from, to (required), version (select), facility (text). One row per distinct combination of the 26 columns below, newest
+// first: Epid, Lab Number, Disalab Number, Patient Name, Contact Number, Gender, AgeinYears, Collected Date, Registered Date, Province,
+// District, Location, Tested Date, Date Result Reported, Result, Instrument, Testing Laboratory, TestType, Authorization Status, Sore Throat,
+// Fever, Shortness of Breath, Body Pains, Other(Specified), Hospitalised, Outcome.
+//
+// The window (spec ruling 3). v1 ran yesterday 04:00 to today 04:00 (`dateadd(hour, 4, datediff(d, 0, getdate() - 1))` to the same for
+// today, target line 221). `from` and `to` take that 04:00 as text, YYYY-MM-DDTHH:MM (a space for the T, and seconds, also work; a date alone is
+// midnight). CE custom queries have three parameter types: text, select and daterange, and daterange only carries a date (custom-query-run.ts
+// assertDate rejects a time), so a date and time is a text parameter. The text goes through ::timestamp, so a bad value raises Postgres'
+// own error, and a blank one is refused by CE (required). The stamp's own local wall time is compared (localTs: offset and fraction dropped,
+// a date-only stamp is midnight, a partial stamp such as '2026-07' is outside). v1 `between` is inclusive at both ends and so is this. A
+// DISA stamp has no fraction, so dropping it changes nothing.
+//
+// The rows (target lines 204-220). Requests joined to Patients (inner or left), LabResults (inner, on RequestID and OBRSetID, which is
+// one lab_requests row here), the facility dictionary (left) and seven symptom CTEs (left, on RequestID alone). Filters: panel in COVID,
+// COVII, COVAB, COVAG, COVRP and observation code in COV2, COV68, CVGXN, CO751, CO752, COVRP (lines 219-220), both ignoring case and trailing
+// blanks. There is no HL7 status filter, so a preliminary report with an issued stamp is listed.
+//
+// Columns:
+//   Epid                  Patients.REFNO: the request attribute reference-numbers (requestAttrSql). NULL when there is no patient row (Levy).
+//   Lab Number            Patients.HOSPID. CE has no request-attribute code for it (checked in the code system), so the column is NULL
+//                         (spec ruling 7: a CE gap).
+//   Disalab Number        `p.requestid` (target line 89): the PATIENT row's RequestID, so it is NULL when there is no patient row (Levy).
+//   Patient Name          concat(firstname, ' ', surname): a missing part leaves a blank, and no patient is one blank.
+//   Contact Number        v1 takes mobile, else TELHOME, else TELWORK, each only when len() > 0 (lines 91-95). CE holds ONE phone on
+//                         patients: cdr writes `Phone ?? Mobile` (v2-transform.ts:229, so DISA's Phone first, then Mobile), and DISA's work
+//                         phone goes to patient_data and is not in the warehouse. So the column is that phone when it has text, else NULL.
+//                         This is not v1's order (v1 prefers the mobile) and has no TELWORK: a CE gap (ruling 7), listed in the README.
+//   Gender                the sex code (lines 96-101): F, M, U, I only; N, O and anything else give NULL. v1 reads Requests.HL7SexCode and
+//                         CE keeps the sex on the patient, so a Levy row with no patient has no Gender (a CE gap).
+//   AgeinYears            lab_requests.age_years.
+//   Collected Date        SpecimenDateTime -> diagnostic_reports.effective. Registered Date -> lab_requests.authored_at.
+//   Tested Date           AnalysisDateTime -> lab_requests.analysis_at. Date Result Reported -> diagnostic_reports.issued. All CE text.
+//   Province, District, Location    the mapped register row (region, district, name); empty when the facility is not in the register.
+//   Result                the CASE of lines 110-126 on LIMSRptResult (rpt()). No ELSE, so a text that is not listed gives NULL. The accent
+//                         of 'Inconclusive' with an acute accent on the I (line 120, U+00CD) is v1's text and stays: the plain 'Inconclusive' gives NULL, as in v1.
+//   Instrument            the CASE of lines 127-135 on LIMSAnalyzerCode (lr.analyzer_code); others NULL.
+//   Testing Laboratory    the CASE of lines 136-189 on `case TestingFacilityCode when '' then ReceivingFacilityCode else TestingFacilityCode`.
+//                         CE's testing code is the report's performer (see Task 22's cross-cutting note on OPENLDR_LAB_CODE). It has no
+//                         ReceivingFacilityCode (ruling 7). A blank code matches no WHEN, so it gives NULL here, where v1 would try the receiving
+//                         code. A request with no report has no performer and shows NULL. `like 'ZU_'` and `like 'ZL_'` are varchar LIKE (likeVarcharSql).
+//                         This CASE is NOT the one of the counts: it has no ZCH, and the names are long ('University Teaching Hospital').
+//   TestType              'Rapid' for panels COVAB, COVAG, COVRP, else 'PCR Based' (lines 190-193).
+//   Authorization Status  'Reviewed' when AuthorisedDateTime is not null, else 'Pending Review' (lines 194-196). In the standard version the
+//                         window already needs the stamp, so every row is Reviewed; in Levy a request that is not authorised shows Pending.
+//   Sore Throat ... Outcome   one value per symptom CTE (below).
+//
+// The symptoms (lines 9-83). Seven CTEs read panel ADCOE and one observation code each: CSORT -> Sore Throat, CFERV -> Fever, CSHBR -> Shortness
+// of Breath, CMYBO -> Body Pains, COTHE -> Other(Specified), CPTHO -> Hospitalised, COUT -> Outcome; the value is LIMSRptResult. The first CTE
+// (cough, CCOUG, lines 9-18) is built and never joined or selected, so it changes nothing and the port leaves it out. The CTEs join on
+// RequestID alone, so the ADCOE answers can sit on a different OBR row than the COVID result, and the lab number compares ignoring case and
+// trailing blanks. Kept (ruling 1): several different answers to one question multiply the rows (two fevers and two sore throats make four
+// rows), and a missing answer is a value of its own (NULL beside 'Yes' is two rows). Read from lab_results by observation code, as v1 reads
+// LabResults, not from a form.
+//
+// SELECT DISTINCT (line 86). Kept: identical rows collapse, so two result rows that map to the same Result, or two equal answers, give one row.
+// Under SQL Server's collation DISTINCT also treats texts that differ only in case or trailing blanks as one value, so the port groups on the
+// folded text and shows the smallest spelling in byte order (v1 does not say which one it keeps).
+//
+// Order: newest first on Date Result Reported (standard) or Tested Date (Levy), a missing stamp last (SQL Server puts NULL last in DESC), then
+// every column in byte order, a missing value first, so the order is total. v1 orders by that stamp alone; the rest only fixes ties.
+//
+// Patients is one row per request in v1 (HONEST NON-PROOF: Task 17 could not check it on Tanzania's data, which has no Patients table).
+// PII: names, phone and Epid (spec ruling 12).
+const LINE_PANELS = ['COVID', 'COVII', 'COVAB', 'COVAG', 'COVRP'];
+const LINE_OBSERVATIONS = ['COV2', 'COV68', 'CVGXN', 'CO751', 'CO752', 'COVRP'];
+const RAPID_PANELS = ['COVAB', 'COVAG', 'COVRP'];
+const LEVY_FACILITIES = ['LVCVD', 'LPMGH'];
+// Result map (target lines 110-126). The Levy file has the same map without the `_STANDARD` entries (target lines 112-113, 122-123).
+const RESULT_NEGATIVE = ['SARS-Cov-2 Genes Not Detected', 'Negative'];
+const RESULT_NEGATIVE_STANDARD = ['IgM/IgG Negative', 'IgM Negative'];
+const RESULT_POSITIVE = ['SARS-Cov-2 Genes Detected', 'IgG Positive', 'IgM Positive', 'IgM/IgG Positive', 'Positive'];
+// The first text below has an acute accent on the I (U+00CD), as in v1 line 120; the file keeps it as an escape.
+const RESULT_RETEST = ['\u00cdnconclusive', 'No AFB seen.'];
+const RESULT_RETEST_STANDARD = ['INVAL', 'Invalid'];
+const SYMPTOMS = [
+  ['sx_sore_throat', 'CSORT', 'sore_throat'], ['sx_fever', 'CFERV', 'fever'], ['sx_breath', 'CSHBR', 'breath'], ['sx_body', 'CMYBO', 'body_pains'],
+  ['sx_other', 'COTHE', 'other'], ['sx_hosp', 'CPTHO', 'hospitalised'], ['sx_outcome', 'COUT', 'outcome'],
+];
+// [output name, key in the src and res CTEs, 'text' (grouped on the folded text) or 'plain' (grouped on the value)].
+const LINE_OUT = [
+  ['Epid', 'epid', 'text'], ['Lab Number', 'lab_number', 'text'], ['Disalab Number', 'disalab', 'text'], ['Patient Name', 'patient_name', 'text'],
+  ['Contact Number', 'contact', 'text'], ['Gender', 'gender', 'plain'], ['AgeinYears', 'age', 'plain'], ['Collected Date', 'collected', 'plain'],
+  ['Registered Date', 'registered', 'plain'], ['Province', 'province', 'text'], ['District', 'district', 'text'], ['Location', 'location', 'text'],
+  ['Tested Date', 'tested', 'plain'], ['Date Result Reported', 'reported', 'plain'], ['Result', 'result', 'plain'], ['Instrument', 'instrument', 'plain'],
+  ['Testing Laboratory', 'test_lab', 'plain'], ['TestType', 'test_type', 'plain'], ['Authorization Status', 'auth_status', 'plain'],
+  ['Sore Throat', 'sore_throat', 'text'], ['Fever', 'fever', 'text'], ['Shortness of Breath', 'breath', 'text'], ['Body Pains', 'body_pains', 'text'],
+  ['Other(Specified)', 'other', 'text'], ['Hospitalised', 'hospitalised', 'text'], ['Outcome', 'outcome', 'text'],
+];
+
+// One symptom CTE: the answers of one ADCOE observation code, keyed on the lab number the way SQL Server compares it.
+const symptomCte = (name, code) => `${name} as (
+  select ${foldSql('s.request_id')} as req_key, ${rpt('x')} as answer
+  from lab_requests s
+  join lab_results x on x.request_id = s.id
+  where ${inListSql('s.panel_code', ['ADCOE'])} and ${inListSql('x.observation_code', [code])}
+)`;
+
+// The Result CASE on the result text `r`. The standard version adds the four texts that Levy's map lacks.
+const lineResultSql = (r) => `case
+      when ${inListSql(r, RESULT_NEGATIVE)} or (not w.is_levy and ${inListSql(r, RESULT_NEGATIVE_STANDARD)}) then 'Negative'
+      when ${inListSql(r, RESULT_POSITIVE)} then 'Positive'
+      when ${inListSql(r, RESULT_RETEST)} or (not w.is_levy and ${inListSql(r, RESULT_RETEST_STANDARD)}) then 'To be retested'
+    end`;
+
+// The Instrument CASE (target lines 127-135) on the analyser code `a`.
+const instrumentSql = (a) => `case
+      when ${inListSql(a, ['FRTP', 'FRTB'])} then 'AB7500'
+      when ${inListSql(a, ['C6800'])} then 'C6800'
+      when ${inListSql(a, ['GENEX', 'GENEB'])} then 'GeneXpert'
+      when ${inListSql(a, ['PNTHR', 'PNTHB'])} then 'Hologic Panther'
+    end`;
+
+// The Testing Laboratory CASE (target lines 136-189) on the testing code `c` (NULL when blank). The WHENs keep v1's order.
+const longLabSql = (c) => `case
+      when ${likeVarcharSql(c, 'ZU', 1)} then 'University Teaching Hospital'
+      when ${inListSql(c, ['ZAP'])} then 'Arthur Davison Childrens'' Hospital'
+      when ${inListSql(c, ['ZSP'])} then 'Solwezi General Hospital'
+      when ${inListSql(c, ['ZBP'])} then 'Kabwe General Hospital'
+      when ${likeVarcharSql(c, 'ZL', 1)} then 'Livingstone Teaching Hospital'
+      when ${inListSql(c, ['ZMP'])} then 'Lewanika General Hospital'
+      when ${inListSql(c, ['ZKS'])} then 'Kasama General Hospital'
+      when ${inListSql(c, ['ZML'])} then 'Mansa General Hospital'
+      when ${inListSql(c, ['ZTV'])} then 'TDRC'
+      when ${inListSql(c, ['ZTT'])} then 'TDRC'
+    end`;
+
+export function lineListSql() {
+  const symptomJoins = SYMPTOMS.map(([name, , key]) => `left join ${name} ${key} on ${key}.req_key = ${foldSql('lr.request_id')}`).join('\n  ');
+  const symptomColumns = SYMPTOMS.map(([, , key]) => `${key}.answer as ${key}`).join(',\n    ');
+  const groupBy = LINE_OUT.map(([, key, kind]) => (kind === 'text' ? foldSql(`s.${key}`) : `s.${key}`)).join(', ');
+  const picks = LINE_OUT.map(([, key, kind]) => (kind === 'text' ? `min(s.${key} collate "C") as ${key}` : `min(s.${key}) as ${key}`)).join(',\n    ');
+  const orders = LINE_OUT.map(([, key]) => (key === 'age' ? 'r.age nulls first' : `r.${key} collate "C" nulls first`));
+  return `with win as (
+  select ({{param.from}})::timestamp as w_from, ({{param.to}})::timestamp as w_to, ${foldSql('{{param.version}}')} = 'levy' as is_levy
+),
+${SYMPTOMS.map(([name, code]) => symptomCte(name, code)).join(',\n')},
+src as (
+  select case when p.id is not null then ${requestAttrSql('lr.id', 'reference-numbers')} end as epid,
+    null::text as lab_number,
+    case when p.id is not null then lr.request_id end as disalab,
+    concat(p.firstname, ' ', p.surname) as patient_name,
+    case when length(rtrim(p.phone)) > 0 then p.phone end as contact,
+    ${genderFmiuSql('p.sex')} as gender,
+    lr.age_years as age,
+    dr.effective as collected,
+    lr.authored_at as registered,
+    fmr.region as province, fmr.district as district, fmr.name as location,
+    lr.analysis_at as tested,
+    dr.issued as reported,
+    ${lineResultSql('rr.val')} as result,
+    ${instrumentSql('lr.analyzer_code')} as instrument,
+    ${longLabSql('dr.performer')} as test_lab,
+    case when ${inListSql('lr.panel_code', RAPID_PANELS)} then 'Rapid' else 'PCR Based' end as test_type,
+    case when dr.issued is not null then 'Reviewed' else 'Pending Review' end as auth_status,
+    ${symptomColumns}
+  from win w
+  cross join lab_requests lr
+  left join patients p on p.id = lr.patient_id
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  cross join lateral (select ${rpt('l')} as val) rr
+  ${symptomJoins}
+  where ${inListSql('lr.panel_code', LINE_PANELS)}
+    and ${inListSql('l.observation_code', LINE_OBSERVATIONS)}
+    and (p.id is not null or w.is_levy)
+    and ${localTs('case when w.is_levy then lr.analysis_at else dr.issued end')} between w.w_from and w.w_to
+    and case when {{param.facility}} = '' then (not w.is_levy or ${inListSql('lr.requester_code', LEVY_FACILITIES)})
+      else ${foldSql('lr.requester_code')} = ${foldSql('{{param.facility}}')} end
+),
+res as (
+  select ${picks}
+  from src s
+  group by ${groupBy}
+)
+select ${LINE_OUT.map(([name, key]) => `r.${key} as "${name}"`).join(', ')}
+from res r
+cross join win w
+order by ${localTs('case when w.is_levy then r.tested else r.reported end')} desc nulls last,
+  ${orders.join(',\n  ')}`;
+}
+
+export const lineListParams = () => [
+  { id: 'from', label: 'From, date and time (YYYY-MM-DDTHH:MM, local time; v1 ran from yesterday 04:00)', type: 'text', required: true },
+  { id: 'to', label: 'To, date and time (YYYY-MM-DDTHH:MM, local time; v1 ran to today 04:00)', type: 'text', required: true },
+  {
+    id: 'version', label: 'Version: standard (default; window on the date the result was reported) or Levy (window on the date tested, patient optional, shorter result list)',
+    type: 'select', required: false, optionsSql: "select 'standard' as version union all select 'Levy'",
+  },
+  {
+    id: 'facility', label: 'Requesting facility code (blank: standard shows all facilities, Levy shows LVCVD and LPMGH; a code given replaces both)',
+    type: 'text', required: false,
+  },
+];
+
+// ---- COVID-19 daily positivity (Task 23) ------------------------------------------------------------------------------------------
+//
+// Replaces sp_dash_covid_7d_moving_avg (no parameters in v1). Params: from, to (required, YYYY-MM-DD). One row per day that has data:
+// TestDate, Tests, Positive, Positivity Rate, Svn_d_moving_average, oldest first.
+//
+// What v1 does (lines 10-50):
+//   Rows      requests joined to LabResults on RequestID and OBRSetID, panel in COVID, COVII and observation code in CVGXN, CO751, CO752, cov2,
+//             cov68 (lines 33-34), TestingFacilityCode not in ZZZ, XXX, ZXZ, ZCX, ZLX (line 37). Text compares ignore case and trailing blanks.
+//   Window    AuthorisedDateTime between '20210101 00:00:01' and getdate() (line 35). Spec ruling 3: the 2021 floor and "now" become from and
+//             to, whole days of the local date of diagnostic_reports.issued (inRange). Deviation: v1's floor excluded a stamp at exactly
+//             2021-01-01 00:00:00; the port includes a stamp at 00:00:00 on the from date. Run it with from 2021-01-01 to match v1's series.
+//             The average is over the days inside the window only, so the first rows average fewer days than they would in v1.
+//   Day       cast(AuthorisedDatetime as date): the LOCAL date of the stamp (localDate), not the UTC date.
+//   Tests     count(*): RESULT ROWS, not distinct requests (a request with two result rows counts twice). Kept.
+//   Positive  result rows whose LIMSCodedValue is DET or POS (line 21): lab_results.coded_value, not the result text. A positive text with no
+//             coded value is not positive. Kept.
+//   Rate      Positive * 1.0 / Tests. MEASURED on SQL Server 16: decimal(24,12), and the division TRUNCATES, so 2/3 is 0.666666666666, not
+//             ...667. The port computes the same integer division on 12 places (div), exactly, with no float.
+//   Average   avg(rate) over the last 7 ROWS (rows between 6 preceding and current row, lines 23-26), ordered by day: the mean of the last 7
+//             daily rates that have data, not 7 calendar days and not pooled positives over tests. A day with no result rows has no row and is
+//             skipped. MEASURED: decimal(38,12), also truncated (the mean of 0.333333333333 and 0.666666666666 is 0.499999999999). The port
+//             sums the 12-place rates as integers and divides with div, so it truncates the same way.
+//   Excluded labs   `TestingFacilityCode not in (...)` is unknown for a NULL code, so a report with no performer is dropped; a blank code is not
+//             in the list and is counted. Kept. The list is v1's constant and stays in the query (ruling 1); CE's performer is the configured
+//             OPENLDR_LAB_CODE (see Task 22), so each lab's push must set it to its v1 code for the exclusion to work.
+//   No status filter: a preliminary report with an issued stamp counts. A report with no issued stamp, or a partial one, is outside.
+//   The commented-out Platform columns (lines 11-19, 36, 40-48) are not output and not ported.
+export function positivitySql() {
+  return `with src as (
+  select ${localDate('dr.issued')} as test_date, case when ${inListSql('l.coded_value', ['DET', 'POS'])} then 1 else 0 end as is_positive
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  join lab_results l on l.request_id = lr.id
+  where ${inListSql('lr.panel_code', ['COVID', 'COVII'])}
+    and ${inListSql('l.observation_code', ['CVGXN', 'CO751', 'CO752', 'cov2', 'cov68'])}
+    and ${inRange('dr.issued')}
+    and ${foldSql('dr.performer')} not in ('zzz', 'xxx', 'zxz', 'zcx', 'zlx')
+),
+daily as (
+  select s.test_date, count(*) as tests, sum(s.is_positive) as positive, div(sum(s.is_positive)::numeric * 1000000000000, count(*)) as rate12
+  from src s
+  group by s.test_date
+),
+averaged as (
+  select d.test_date, d.tests, d.positive, d.rate12, div(sum(d.rate12) over w, count(d.rate12) over w) as average12
+  from daily d
+  window w as (order by d.test_date rows between 6 preceding and current row)
+)
+select a.test_date as "TestDate", a.tests::int as "Tests", a.positive::int as "Positive", (a.rate12 / 1000000000000)::numeric(24,12) as "Positivity Rate",
+  (a.average12 / 1000000000000)::numeric(38,12) as "Svn_d_moving_average"
+from averaged a
+order by a.test_date`;
+}
+
 export function queries() {
   return [
     { name: 'COVID-19 by testing lab', sql: labStatsSql(), params: dateParams(true) },
     { name: 'COVID-19 positive patients', sql: positiveListSql(), params: positiveListParams() },
     { name: 'COVID-19 by source facility', sql: sourceStatsSql(), params: sourceStatsParams() },
+    { name: 'COVID-19 daily line list', sql: lineListSql(), params: lineListParams() },
+    { name: 'COVID-19 daily positivity', sql: positivitySql(), params: dateParams(true) },
   ];
 }
