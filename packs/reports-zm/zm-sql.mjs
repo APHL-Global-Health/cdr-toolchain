@@ -1353,7 +1353,20 @@ export const dateWeekSql = (dateExpr) => `((extract(doy from ${dateExpr})::int -
 // A result text as a number after v1's REPLACE(x, ',', ''), or NULL when SQL Server's ISNUMERIC would say no. A
 // currency sign is not parsed: v1's CONVERT(float, '$5') fails, so such a text has no number here. The exponent has at
 // most three digits.
-const NUMBER_TEXT = String.raw`^\s*[-+]?(\d[\d,]*(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?\s*$`;
+//
+// Whitespace and commas, measured on the local SQL Server 2026-10-10 (varchar and nvarchar alike; `ok` means ISNUMERIC is 1 and the cast
+// works, so v1 gets the number; anything else is NULL here, either because ISNUMERIC says no and v1 never casts, or because ISNUMERIC says yes
+// and the cast fails, which stops v1 and gives no output):
+//   - Leading: spaces, tabs, line feeds and carriage returns, in any mix, are ok. A vertical tab, a form feed or a no-break space in front
+//     makes ISNUMERIC 0.
+//   - Trailing: spaces only. A trailing tab, CR, LF ('5' + CR + LF) makes ISNUMERIC 0. A trailing vertical tab, form feed or no-break space
+//     gives ISNUMERIC 1 but the cast fails.
+//   - Between the sign and the digits, or inside the number: nothing ('- 5' passes ISNUMERIC and fails the cast; '5 e3' is 0).
+//   - A comma is ok in a number with spaces in front (or none) and no exponent: '1,000', ' 1,000 '. With a tab, LF or CR in front, or with an
+//     exponent, any comma makes ISNUMERIC 0 ('<TAB>1,000' and '1,000e2' are not numbers; '<TAB>1000' and '1e3' are).
+// Not covered (rare, left as they were): ISNUMERIC also accepts a comma in front of the digits (',5') or after the decimal point ('1.5,0');
+// the helper gives NULL for those where v1 reads the number.
+const NUMBER_TEXT = String.raw`^( *[-+]?\d[\d,]*(\.\d*)?|[ \t\r\n]*[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d{1,3})?) *$`;
 export const numberOfTextSql = (x) => `(case when ${x} ~ ${sqlLit(NUMBER_TEXT)} then replace(${x}, ',', '')::numeric end)`;
 
 // A date text as 'YYYY-MM-DD', or NULL. Two forms are read: dd/mm/yyyy (the form cdr measured in LIMSRptResult for the

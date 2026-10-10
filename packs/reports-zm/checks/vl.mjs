@@ -2928,15 +2928,29 @@ F30.req('T30C-A01');
 F30.req('T30C-B01', { req: 'ZT30B' });
 F30.req('T30C-C01', { req: 'ZT30C' });
 F30.req('T30C-D01', { req: 'ZT30D' });
+// Item F, seen through the query: the suppressed and unsuppressed counts read the result as a number the way SQL Server's ISNUMERIC and CAST
+// do (numberOfTextSql). Facility ZT30E (Western / Mongu), five tests, each with a turnaround of 9:
+//   '999 '          trailing space: the number 999, suppressed
+//   TAB '998'       leading tab: 998, suppressed
+//   '997' CR LF     trailing CR LF: ISNUMERIC 0, not a number: counted as a test, neither suppressed nor unsuppressed
+//   TAB '1,500'     a tab and a comma: ISNUMERIC 0, not a number: neither
+//   ' 1,500'        a space and a comma: 1500, unsuppressed
+F30.req('T30C-N1', { req: 'ZT30E', results: [{ text: '999 ' }] });
+F30.req('T30C-N2', { req: 'ZT30E', results: [{ text: '\t998' }] });
+F30.req('T30C-N3', { req: 'ZT30E', results: [{ text: '997\r\n' }] });
+F30.req('T30C-N4', { req: 'ZT30E', results: [{ text: '\t1,500' }] });
+F30.req('T30C-N5', { req: 'ZT30E', results: [{ text: ' 1,500' }] });
 const SETUP30 = F30.setup(facilityRows('t30c', [
   ['ZT30A', 'Choma Clinic', 'Southern', 'Choma'],
   ['ZT30B', 'CHOMA CLINIC ', 'SOUTHERN ', 'CHOMA'],
   ['ZT30C', 'ALPHA CLINIC', 'Southern', 'Choma'],
   ['ZT30D', 'Alpha Clinic ', 'southern', 'CHOMA'],
+  ['ZT30E', 'Mongu Clinic', 'Western', 'Mongu'],
 ]));
 suites30c.push(
-  // Province: four mapping rows, one region group. 'SOUTHERN ' is the smallest spelling in byte order.
-  orderedSuite10('t30c-province-fold', provQ?.sql ?? 'select 1', MAY10, P10_COLUMNS, [p10('SOUTHERN ', 4, 4, 4, null, 4, 36)], SETUP30),
+  // Province: four mapping rows, one region group. 'SOUTHERN ' is the smallest spelling in byte order. Western is the number cases.
+  orderedSuite10('t30c-province-fold', provQ?.sql ?? 'select 1', MAY10, P10_COLUMNS, [p10('SOUTHERN ', 4, 4, 4, null, 4, 36), p10('Western', 5, 5, 2, 1, 5, 45)], SETUP30),
+  orderedSuite10('t30c-district-numbers', distQ?.sql ?? 'select 1', { province: 'Western', ...MAY10 }, D10_COLUMNS, [d10('Mongu', 5, 5, 2, 1, 5, 45)]),
   // District of Southern (the parameter ignores case and trailing spaces too): one row, 'CHOMA'.
   orderedSuite10('t30c-district-fold', distQ?.sql ?? 'select 1', { province: 'southern', ...MAY10 }, D10_COLUMNS, [d10('CHOMA', 4, 4, 4, null, 4, 36)]),
   // Facility of district Choma: two groups. Names come from one mapping row each.

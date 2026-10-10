@@ -4,7 +4,7 @@ import { lit, caseSuite } from '../../shared/pg-check.mjs';
 import {
   sqlList, inRange, ZM_REGISTER_URL, ATTR_SYSTEM, provinceParam, districtParam, facilityParam, labParam,
   dateParams, requesterJoin, areaFilter, zmIdsCte, genderSql, ageGroupSql, formAnswerSql, labNameSql,
-  districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql,
+  districtOptionsSql, ssTextKey, dateParamSql, dateTextParamSql, optionalWindowSql, numberOfTextSql,
 } from '../zm-sql.mjs';
 import { dateErrorSuites } from './epi-fixture.mjs';
 import { zmQueryFile } from '../zm-queries.mjs';
@@ -460,6 +460,42 @@ suites30c.push(evalSuite('date-window-helpers', [
   winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '', to: 'yesterday' }, bad('to', 'yesterday'), 'optional bad to'),
   winCase(`(${optionalWindowSql("'2026-05-15'")})::text`, { from: '09/10/2026', to: '' }, bad('from', '09/10/2026'), 'optional bad from'),
 ]));
+// Item F: numberOfTextSql and the whitespace and commas SQL Server's ISNUMERIC and CAST accept. Every row is a case measured on the local SQL
+// Server (varchar and nvarchar alike; see the note above NUMBER_TEXT in zm-sql.mjs). `want` is the number v1 gets, or null: ISNUMERIC says no
+// (v1 never casts) or says yes and the cast fails (v1 stops, no output). Each text is an SQL expression, so the control characters are exact.
+const TAB = 'chr(9)';
+const LF = 'chr(10)';
+const CR = 'chr(13)';
+const VT = 'chr(11)';
+const FF = 'chr(12)';
+const NBSP = 'chr(160)';
+const q = (t) => `'${t}'`;
+const numberCases = [
+  // Leading space, tab, LF and CR: ok. Trailing space: ok.
+  [q('5'), '5'], [q(' 5'), '5'], [q('5 '), '5'], [q(' 5 '), '5'], [q('5   '), '5'], [q('   5'), '5'],
+  [`${TAB} || '5 '`, '5'], [`' ' || ${TAB} || '5'`, '5'], [`${CR} || ${LF} || '5'`, '5'], [`${LF} || ${TAB} || ${CR} || ' 5'`, '5'],
+  [`${TAB} || '-5'`, '-5'], [`${TAB} || '+5'`, '5'], [`${TAB} || '5e3'`, '5000'], [`${TAB} || '5e3 '`, '5000'], [`${TAB} || '.5'`, '0.5'],
+  [`${TAB} || '5.5'`, '5.5'], [`${TAB} || '5.'`, '5'], [`${LF} || '5. '`, '5'], [`${TAB} || '5E-2'`, '0.05'], [`${TAB} || '5000'`, '5000'],
+  [`${LF} || '  12'`, '12'], [`${CR} || ${LF} || ' .5'`, '0.5'], [q(' .5 '), '0.5'], [q(' 5e3'), '5000'], [q('5e+3  '), '5000'],
+  // Trailing tab, CR, LF (the brief's '5' + CR + LF): ISNUMERIC 0.
+  [`'5' || ${CR} || ${LF}`, null], [`'5' || ${TAB}`, null], [`'5' || ${LF}`, null], [`'5' || ${CR}`, null], [`'5 ' || ${TAB}`, null],
+  [`'5' || ${TAB} || ' '`, null], [`'5' || ${CR} || ${LF} || ' '`, null],
+  // Vertical tab, form feed and no-break space: ISNUMERIC 0 in front; ISNUMERIC 1 behind but the cast fails.
+  [`${VT} || '5'`, null], [`${FF} || '5'`, null], [`${NBSP} || '5'`, null], [`'5' || ${VT}`, null], [`'5' || ${FF}`, null], [`'5' || ${NBSP}`, null],
+  [`' ' || ${NBSP} || '5'`, null],
+  // Inside the number.
+  [q('5 e3'), null], [q('5e 3'), null], [q('- 5'), null], [q('+ 5'), null], [`'-' || ${TAB} || '5'`, null], [q('5 5'), null],
+  // Commas: ok with spaces in front and no exponent; not with a tab, LF or CR in front, nor with an exponent.
+  [q('1,000'), '1000'], [q(' 1,000'), '1000'], [q('1,000 '), '1000'], [q(' 1,000 '), '1000'], [q('1,000.50 '), '1000.50'], [q('5,'), '5'],
+  [`${TAB} || '1,000'`, null], [`${LF} || '1,000.5'`, null], [`${CR} || '1,000'`, null], [`'  ' || ${TAB} || '1,000'`, null], [`${TAB} || '-1,000'`, null],
+  [`${TAB} || '1,0'`, null], [`${TAB} || '5,'`, null], [`${TAB} || '1,000e2'`, null], [q(' 1,000e2 '), null], [q('1,000e2'), null], [q('1,0e2'), null],
+  // Not numbers at all.
+  [q(''), null], [q(' '), null], [q('abc'), null], [q('$5'), null], [q('<20'), null], [q('5e'), null], [q('--5'), null], [q('.'), null], [q('5.5.5'), null],
+  ['null::text', null],
+];
+suites30c.push(evalSuite('number-of-text', numberCases.map(([expr, want]) => ({
+  expr: `(${numberOfTextSql(expr)})::text`, params: {}, want: want === null ? 'ok (null)' : `ok ${want}`, label: expr,
+}))));
 // Slice 1's query (VL clients by province) is not in an area file.
 suites30c.push(...dateErrorSuites('t30c-slice1', zmQueryFile().queries));
 
