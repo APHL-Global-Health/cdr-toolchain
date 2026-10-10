@@ -2,7 +2,8 @@
 
 import { foldSql, inListSql, isNumericSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
 import {
-  dateParams, eidCte, hivvlCte, inRange, provinceParam, recencyCte, recencySurveillanceCte, requesterJoin, requestAttrSql, ssTextKey, tndCte,
+  dateParams, eidCte, hivvlCte, inRange, labNameSql, localDate, localTs, numberOfTextSql, provinceParam, recencyCte, recencySurveillanceCte,
+  requesterJoin, requestAttrSql, ssTextKey, tndCte,
 } from '../zm-sql.mjs';
 
 // ---- The three recency queries (Task 17) ---------------------------------------------------------------------------------
@@ -375,11 +376,268 @@ export const dbsMonitoringParams = () => [
   { ...provinceParam('province', false), label: 'Province (blank for Lusaka, Southern, Eastern, Western and North-Western)' },
 ];
 
+// ---- CD4 by area, age and sex (Task 19) -----------------------------------------------------------------------------------
+//
+// Replaces sp_get_CDC_CD4_data_month (no parameters in v1). One row per month, province, district, facility, age band and sex, with the
+// number of CD4 absolute-count tests in each count range and the number of CD4% tests in each percentage range.
+//
+// Columns (v1 names and order, lines 6-72 and 139): Year, Month, MonthName, Province, District, Facility, AgeGroup, Sex,
+// CD4 Absolute Count Range, CD4 Absolute Count Tests, CD4 Percent Range, CD4 Percent Tests.
+//
+// How v1 builds it. Two groups of rows, joined at the end (lines 138-140):
+//   - the absolute rows (CTE a, lines 6-72): panel CD4, observation CD4, grouped by month, area, age band, sex and count range;
+//   - the percent rows (CTE b, lines 73-136): panel CD4, observation CD4L, grouped the same way with the percentage range;
+//   - a left join of a to b on year, month, province, district, facility, age band and sex, and `Province is not null` (line 140).
+// Both read Requests joined to LabResults on RequestID and OBRSetID, which is lab_results.request_id = lab_requests.id in CE. Neither reads a
+// report: v1 has no status or authorised-date test, so a request with no report, or a cancelled one, counts.
+//
+// Rules, with v1 lines:
+//   Count range (lines 21-24)   the result text as a number, ROUNDED to a whole number (v1 casts to numeric with no scale; measured on the
+//                               local SQL Server: '199.5' gives 200, '409.5' 410, '1590.5' 1591). Under 200 'Advanced HIV', 200 to 409
+//                               'CD4 count below normal range', 410 to 1590 'CD4 count Within normal range', over 1590 'CD4 count Above normal
+//                               range'; anything that is not a number 'Missing Absolute CD4 Count Result'.
+//   Percent range (lines 89-91) the same number: under 31 'CD4 percentage below normal range', 31 to 60 'CD4 percentage Within normal range',
+//                               over 60 'CD4 percentage above normal range', else 'Missing CD4% Result'.
+//   Age band (lines 8-20)       0 '<01', 1-4 '01-04', 5-9 '05-09', ... 45-49, 50 and over '50+', anything else (no age, a negative age) 'Missing'.
+//                               Not the dbo.Agegroup of the other reports: here 50 to 54 is '50+'.
+//   Sex (lines 21-24)           the HL7 sex letter as stored; '' is 'Missing'.
+//   Tests                       count(distinct RequestID), so a request with two results in one range counts once there, and a request with
+//                               results in two ranges counts in each.
+//   Province, District, Facility the mapped register row of the requesting facility (v1: the Facilities and HealthcareAreas dictionaries).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The join of the two groups is many to many: each absolute row meets each percent row of the same cell, so a cell with 2 count ranges
+//     and 3 percent ranges gives 6 rows, each carrying its own absolute count and its own percent count.
+//   - A request with both a CD4 and a CD4L result counts in both groups.
+//   - The join compares text with `=`, so a cell whose district or facility has no name never meets its percent row: the percent columns are
+//     NULL there (null never equals null). A percent row with no absolute row in its cell is not shown at all.
+//   - The three area names, the sex and the join compare as SQL Server compares text: case and trailing spaces do not count. Two register
+//     rows spelled 'Chilenje Clinic' and 'CHILENJE CLINIC ' are one group; the row shows the smallest spelling of each name in byte order
+//     (v1 shows whichever it meets first).
+//   - The labels are v1's, with their capitals: 'CD4 count Within normal range', 'CD4 count Above normal range', 'CD4 percentage Within normal
+//     range'.
+//   - A request whose requesting facility is not in the register, or whose register row has no province, is dropped (line 140).
+//   - The month is the LOCAL month of RegisteredDateTime: '2026-05-01T00:30:00+02:00' is in May, where its UTC date says April.
+//
+// Deviations:
+//   - Spec ruling 3: v1's window is fixed, last calendar month (lines 41-44). `from` and `to` are required; a window of several months gives
+//     one set of rows per month, and the months are not joined to each other.
+//   - Spec ruling 2: v1 stops with a conversion error on a result that ISNUMERIC accepts and CAST to numeric rejects: '1,000', '1E5', '$5', '-',
+//     '.' (measured on the local SQL Server). A report that stops has no output, so the port reads the number as the shared numberOfTextSql does
+//     (thousands commas and an exponent are read; a currency sign, a lone '-' or '.' are not numbers). Results over 18 digits are read too.
+//   - The number comes from the result TEXT (rpt, v1's LIMSRptResult), not from numeric_value, as v1 does. A censored value such as '< 20' is
+//     therefore not a number, as in v1.
+//
+// CE gaps (spec ruling 7):
+//   - CE cannot tell a missing sex from an empty one. v1 holds '' for a blank sex code and shows 'Missing'; a client with no sex, or a request
+//     with no client row, is NULL in CE and shows 'Missing' too.
+//   - Area names are the register's (facility_map), where v1 reads its dictionaries; they differ where Zambia's dictionary is spelled differently.
+const CD4_AGE_BANDS = [['01-04', 1, 4], ['05-09', 5, 9], ['10-14', 10, 14], ['15-19', 15, 19], ['20-24', 20, 24], ['25-29', 25, 29],
+  ['30-34', 30, 34], ['35-39', 35, 39], ['40-44', 40, 44], ['45-49', 45, 49]];
+const cd4AgeGroupSql = (x) => `case when ${x} = 0 then '<01' ${CD4_AGE_BANDS.map(([name, lo, hi]) => `when ${x} between ${lo} and ${hi} then '${name}'`).join(' ')} when ${x} >= 50 then '50+' else 'Missing' end`;
+const MONTH_NAMES_SQL = "array['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']";
+
+export function cd4Sql() {
+  const n = `round(${numberOfTextSql(rpt('l'))})`;
+  const columns = [
+    { e: 'res.year', as: 'Year', num: true }, { e: 'res.month', as: 'Month', num: true }, { e: 'res.month_name', as: 'MonthName' },
+    { e: 'res.province', as: 'Province' }, { e: 'res.district', as: 'District' }, { e: 'res.facility', as: 'Facility' },
+    { e: 'res.age_group', as: 'AgeGroup' }, { e: 'res.sex', as: 'Sex' },
+    { e: 'res.abs_range', as: 'CD4 Absolute Count Range' }, { e: 'res.abs_tests', as: 'CD4 Absolute Count Tests', num: true },
+    { e: 'res.pct_range', as: 'CD4 Percent Range' }, { e: 'res.pct_tests', as: 'CD4 Percent Tests', num: true },
+  ];
+  // The same cell in both groups: year, month, the three names and the sex compared as SQL Server compares text, and the age band.
+  const cell = 's.yr, s.mo, s.kp, s.kd, s.kf, s.age_group, s.ks';
+  const group = (name, obsWord, rangeColumn) => `${name} as (
+  select s.yr, s.mo, s.kp, s.kd, s.kf, s.age_group, s.ks, s.${rangeColumn} as rng,
+    min(s.province collate "C") as province, min(s.district collate "C") as district, min(s.facility collate "C") as facility,
+    min(s.sex collate "C") as sex, count(distinct s.req_key) as cnt
+  from src s
+  where ${inListSql('s.obs', [obsWord])}
+  group by ${cell}, s.${rangeColumn}
+)`;
+  const sexText = "case when coalesce(rtrim(p.sex), '') = '' then 'Missing' else p.sex end";
+  return `with src as (
+  select extract(year from ld.d)::int as yr, extract(month from ld.d)::int as mo,
+    fmr.region as province, fmr.district as district, fmr.name as facility,
+    ${foldSql('fmr.region')} as kp, ${foldSql('fmr.district')} as kd, ${foldSql('fmr.name')} as kf,
+    ${cd4AgeGroupSql('lr.age_years')} as age_group,
+    ${sexText} as sex, ${foldSql(sexText)} as ks,
+    ${foldSql('lr.request_id')} as req_key, l.observation_code as obs,
+    case when ${n} < 200 then 'Advanced HIV'
+      when ${n} between 200 and 409 then 'CD4 count below normal range'
+      when ${n} between 410 and 1590 then 'CD4 count Within normal range'
+      when ${n} > 1590 then 'CD4 count Above normal range'
+      else 'Missing Absolute CD4 Count Result' end as abs_range,
+    case when ${n} < 31 then 'CD4 percentage below normal range'
+      when ${n} between 31 and 60 then 'CD4 percentage Within normal range'
+      when ${n} > 60 then 'CD4 percentage above normal range'
+      else 'Missing CD4% Result' end as pct_range
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  left join patients p on p.id = lr.patient_id
+  ${requesterJoin('lr', 'fmr')}
+  cross join lateral (select ${localDate('lr.authored_at')} as d) ld
+  where ${inListSql('lr.panel_code', ['CD4'])}
+    and ${inListSql('l.observation_code', ['CD4', 'CD4L'])}
+    and ${inRange('lr.authored_at')}
+    and fmr.region is not null
+),
+${group('abs_g', 'CD4', 'abs_range')},
+${group('pct_g', 'CD4L', 'pct_range')},
+res as (
+  select a.yr as year, a.mo as month, (${MONTH_NAMES_SQL})[a.mo] as month_name, a.province, a.district, a.facility, a.age_group, a.sex,
+    a.rng as abs_range, a.cnt as abs_tests, b.rng as pct_range, b.cnt as pct_tests
+  from abs_g a
+  left join pct_g b on a.yr = b.yr and a.mo = b.mo and a.kp = b.kp and a.kd = b.kd and a.kf = b.kf and a.age_group = b.age_group and a.ks = b.ks
+)
+select ${selectItems(columns)}
+from res
+order by ${orderItems(columns)}`;
+}
+
+// ---- HPV results by month (Task 19) ---------------------------------------------------------------------------------------
+//
+// Replaces sp_get_HPV_data (no parameters in v1). One row per month, province, district, facility, testing lab and lab type, with the number
+// of HPV tests, of positive tests, and of positive HPV16, HPV18, other and high-risk tests.
+//
+// Columns (v1 names and order, line 213): Province, District, Description (the facility name), LabName, LabType, Year, Month, Tests,
+// Positives, HPV16, HPV18, HPVOT, HPVHR.
+//
+// How v1 builds it. Six CTEs over the same rows (lines 4-211), each grouped by province, district, facility, lab name, lab type, year and
+// month, each counting distinct requests; the final select (line 213) takes Tests and left-joins the other five:
+//   Tests      panel in HPV, POHPV, HPVGT; observation not STXT or SCOM; authorised in the window
+//   Positives  the same and the result is one of POSITIVE, Positive, Positive*, REACTIVE (SQL Server ignores case, so 'positive' and
+//              'POSITIVE' are the same text; 'Positive*' is its own text)
+//   HPV16, HPV18, HPVOT, HPVHR   the same as Positives and the observation is that code
+// A request counts in a CTE when any of its results meets the condition, so a request with HPV16 and HPV18 positive counts once in Positives
+// and once in each type. The commented-out `sum(...)` lines in v1 (lines 14-20 and repeats) do nothing and are not ported.
+//
+// Rules, with v1 lines:
+//   LabType (lines 11-14)  analyser code like 'GEN%' is 'GeneXpert'; empty (or spaces) is 'Unrecorded'; everything else, a missing code too,
+//                          'Conventional'. The `like` ignores case; a leading space is not 'GEN'.
+//   Year, Month            of AuthorisedDateTime (diagnostic_reports.issued), taken from the stamp's own text, which is the LOCAL date:
+//                          '2026-05-01T00:30:00+02:00' is in May, where its UTC date says April.
+//   Window (line 37)       AuthorisedDateTime between '20200101 00:00:01' and the end of last month at 23:59:59. A stamp at exactly midnight on
+//                          the first day is OUT; the last day runs to 23:59:59. v1's fixed window becomes `from` (00:00:01) to `to` (23:59:59)
+//                          on the local wall time of the stamp (the same method as the facility report of Tasks 7 and 8).
+//   Province, District, Description   the mapped register row of the requesting facility; `Province is not null` (line 217): a facility
+//                          that is not in the register, or has no province, is dropped.
+//   LabName (line 22)      see CE gaps.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - THE ROWS MULTIPLY. The final joins (lines 214-217) match on province, district, facility, lab name, year and month, but NOT on lab type.
+//     A test row of one lab type therefore meets the Positives, HPV16, HPV18, HPVOT and HPVHR rows of EVERY lab type of the same facility, lab
+//     and month, and the output holds one row per combination. Where a facility's lab has both GeneXpert and Conventional tests in a month,
+//     each Tests row appears several times, with the positive counts of the other lab type. Where no lab type has positives, there is no
+//     multiplication. (One line to fix: add t.LabType = p.LabType and so on to the five joins.)
+//   - The joins use `=` on text, so a row whose district, facility name or lab has no value never meets its positives: Positives, HPV16, HPV18,
+//     HPVOT and HPVHR are 0 there, whatever the data holds (null never equals null).
+//   - No status test: a report of any status with an authorised date counts; a request with no report has no authorised date and is out.
+//   - 'Tests' counts any non-comment result, including observations that are none of the four types.
+//   - Text compares ignore case and trailing spaces: the panel and observation lists, the result list, and the grouping of the three area
+//     names and the lab. Two register rows spelled 'Chilenje Clinic' and 'CHILENJE CLINIC ' are one group; the row shows the smallest
+//     spelling of each name in byte order (v1 shows whichever it meets first).
+//   - `NOT IN ('STXT', 'SCOM')` drops a result with no observation code (unknown, not true).
+//
+// Deviations:
+//   - Spec ruling 2 (controller ruling): the HPVOT join (line 218) compares t.Month = hot.Year. A month never equals a year, so v1's HPVOT is
+//     always 0. The port joins t.Month = hot.Month, like the other four.
+//   - Spec ruling 3: the window is `from` and `to`, required (v1: 2020-01-01 to the end of last month).
+//   - A stamp with a fraction of a second is cut to whole seconds (localTs): 23:59:59.500 on the last day counts as in, where v1's datetime
+//     drops it. DISA stamps carry no fraction.
+//
+// CE gaps (spec ruling 7, 8):
+//   - v1 gets LabName from its Laboratories dictionary, keyed on the testing lab code. CE has no dictionary (ruling 8): a report has a name
+//     (the report's display, else the register name of the mapped code, else the code). The rows are grouped and joined on the testing lab
+//     CODE (case and trailing spaces ignored), and the row shows ONE name per code, the same on every row of that code: chosen from the names
+//     of all the code's reports in the window (any requesting facility), a name that is not just the code beats the bare code, then the
+//     smallest in byte order. So the answer is total and does not depend on row order or on the facility. This is the ruling of Task 16.
+//     Two codes that share a name in Zambia's dictionary are two groups here (v1 groups on the name).
+//   - A report with no testing code (or spaces only) has a NULL LabName, as v1's join finds no lab for a NULL code, whatever the report's
+//     display says. Such rows form their own group and meet no positives.
+const HPV_PANELS = ['HPV', 'POHPV', 'HPVGT'];
+const HPV_POSITIVE = ['POSITIVE', 'Positive', 'Positive*', 'REACTIVE'];
+
+export function hpvSql() {
+  const stamp = localTs('dr.issued');
+  const columns = [
+    { e: 'res.province', as: 'Province' }, { e: 'res.district', as: 'District' }, { e: 'res.description', as: 'Description' },
+    { e: 'res.lab_name', as: 'LabName' }, { e: 'res.lab_type', as: 'LabType' },
+    { e: 'res.year', as: 'Year', num: true }, { e: 'res.month', as: 'Month', num: true }, { e: 'res.tests', as: 'Tests', num: true },
+    { e: 'res.positives', as: 'Positives', num: true }, { e: 'res.hpv16', as: 'HPV16', num: true }, { e: 'res.hpv18', as: 'HPV18', num: true },
+    { e: 'res.hpvot', as: 'HPVOT', num: true }, { e: 'res.hpvhr', as: 'HPVHR', num: true },
+  ];
+  const positive = inListSql('s.result', HPV_POSITIVE);
+  const measure = (name, cond) => `${name} as (
+  select s.kp, s.kd, s.kf, s.lab_key, s.yr, s.mo, s.lab_type, count(distinct s.req_key) as cnt
+  from src s
+  where ${cond}
+  group by s.kp, s.kd, s.kf, s.lab_key, s.yr, s.mo, s.lab_type
+)`;
+  const joinOn = (a) => `t.kp = ${a}.kp and t.kd = ${a}.kd and t.kf = ${a}.kf and t.lab_key = ${a}.lab_key and t.yr = ${a}.yr and t.mo = ${a}.mo`;
+  return `with src as (
+  select ${foldSql('lr.request_id')} as req_key,
+    fmr.region as province, fmr.district as district, fmr.name as description,
+    ${foldSql('fmr.region')} as kp, ${foldSql('fmr.district')} as kd, ${foldSql('fmr.name')} as kf,
+    ${foldSql("case when rtrim(dr.performer) = '' then null else dr.performer end")} as lab_key,
+    ${labNameSql('dr')} as report_name,
+    case when lr.analyzer_code ilike 'GEN%' then 'GeneXpert' when rtrim(lr.analyzer_code) = '' then 'Unrecorded' else 'Conventional' end as lab_type,
+    extract(year from ld.d)::int as yr, extract(month from ld.d)::int as mo,
+    l.observation_code as obs, ${rpt('l')} as result
+  from lab_requests lr
+  join lab_results l on l.request_id = lr.id
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  cross join lateral (select ${localDate('dr.issued')} as d) ld
+  where ${inListSql('lr.panel_code', HPV_PANELS)}
+    and not ${inListSql('l.observation_code', ['STXT', 'SCOM'])}
+    and ${stamp} >= ({{param.from}})::date + time '00:00:01'
+    and ${stamp} <= ({{param.to}})::date + time '23:59:59'
+),
+names as (
+  select s.lab_key, (array_agg(s.report_name order by ${foldSql('s.report_name')} = s.lab_key, s.report_name collate "C"))[1] as lab_name
+  from src s
+  where s.lab_key is not null
+  group by s.lab_key
+),
+tests as (
+  select s.kp, s.kd, s.kf, s.lab_key, s.lab_type, s.yr, s.mo,
+    min(s.province collate "C") as province, min(s.district collate "C") as district, min(s.description collate "C") as description,
+    min(nm.lab_name) as lab_name, count(distinct s.req_key) as cnt
+  from src s
+  left join names nm on nm.lab_key = s.lab_key
+  group by s.kp, s.kd, s.kf, s.lab_key, s.lab_type, s.yr, s.mo
+),
+${measure('positives', positive)},
+${measure('hpv16', `${inListSql('s.obs', ['HPV16'])} and ${positive}`)},
+${measure('hpv18', `${inListSql('s.obs', ['HPV18'])} and ${positive}`)},
+${measure('hpvot', `${inListSql('s.obs', ['HPVOT'])} and ${positive}`)},
+${measure('hpvhr', `${inListSql('s.obs', ['HPVHR'])} and ${positive}`)},
+res as (
+  select t.province, t.district, t.description, t.lab_name, t.lab_type, t.yr as year, t.mo as month, t.cnt as tests,
+    coalesce(p.cnt, 0) as positives, coalesce(h16.cnt, 0) as hpv16, coalesce(h18.cnt, 0) as hpv18, coalesce(hot.cnt, 0) as hpvot,
+    coalesce(hr.cnt, 0) as hpvhr
+  from tests t
+  left join positives p on ${joinOn('p')}
+  left join hpv16 h16 on ${joinOn('h16')}
+  left join hpv18 h18 on ${joinOn('h18')}
+  left join hpvot hot on ${joinOn('hot')}
+  left join hpvhr hr on ${joinOn('hr')}
+  where t.province is not null
+)
+select ${selectItems(columns)}
+from res
+order by ${orderItems(columns)}`;
+}
+
 export function queries() {
   return [
     { name: 'Recency tests', sql: recencyTestsSql(), params: windowParams() },
     { name: 'Recency surveillance counts', sql: recencySurveillanceSql(), params: windowParams() },
     { name: 'Recency tests with client names', sql: recencyTestsWithClientNamesSql(), params: windowParams() },
     { name: 'DBS monitoring (VL and EID)', sql: dbsMonitoringSql(), params: dbsMonitoringParams() },
+    { name: 'CD4 by area, age and sex', sql: cd4Sql(), params: windowParams() },
+    { name: 'HPV results by month', sql: hpvSql(), params: windowParams() },
   ];
 }
