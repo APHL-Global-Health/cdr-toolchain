@@ -28,9 +28,10 @@ range.
 - **The connector `Target Warehouse (Postgres)`.** CE's own setup creates it. The install binds each
   new query to the connector with that exact name, and fails if there is none. A query that already
   exists under the same name keeps its connector.
-- The manifest says it works with any CE version (`ceVersion` `*`). It cannot say 0.1.9 or later yet:
-  CE checks the range against a version number fixed at 0.1.0 in its code, so any minimum would
-  block the install everywhere. Check your CE version yourself before you install.
+- From version 0.1.2 the manifest says so (`ceVersion` `>=0.1.9`). CE 0.1.11 and later check it
+  and refuse the install on an older CE. CE 0.1.8, the release before 0.1.11, carries a version
+  number fixed at 0.1.0: its Marketplace page shows the pack as not compatible, and its CLI install
+  does not check at all. Upgrade to 0.1.11 before you install.
 
 ## Set up before you use it
 
