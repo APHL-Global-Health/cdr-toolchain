@@ -2,7 +2,8 @@
 
 A content pack for OpenLDR CE. It installs Zambia's health facility register and 74 custom queries
 that port Zambia's v1 reports. Version 0.1.0 held one query, "VL clients by province", which replaces
-12 v1 procedures. Version 0.1.1 adds the other 73. This is the source of the pack. The signed bundle
+12 v1 procedures. Version 0.1.1 adds the other 73. Version 0.1.2 declares that it needs CE 0.1.9 or
+later. This is the source of the pack. The signed bundle
 is built from it.
 
 Read `INVENTORY.md` for what happens to each of the 181 objects of Zambia's v1 reporting database.
@@ -38,7 +39,7 @@ Read `QUESTIONS-FOR-ZM.md` for what we still need from the Zambia team.
 | File | What it is |
 |---|---|
 | `pack.json` | The pack payload: `{ formatVersion: 1, steps }`. |
-| `manifest.json` | The unsigned artifact manifest, version `0.1.1`. |
+| `manifest.json` | The unsigned artifact manifest, version `0.1.2`. |
 | `build-summary.json` | Row counts, and every row or value left out with the reason. |
 
 ## Build
