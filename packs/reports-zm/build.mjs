@@ -12,7 +12,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { toCsv, summarizeStep } from '../shared/pack-build.mjs';
-import { zmQueryFile, ZM_REGISTER_URL } from './zm-queries.mjs';
+import { ZM_REGISTER_URL } from './zm-sql.mjs';
+import { allQueryFile } from './all-queries.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DIST = join(here, 'dist');
@@ -115,7 +116,7 @@ function main() {
     // No link-matching step: DISA facility codes are letters, MFL codes are numbers, so equal codes
     // never meet. An admin maps DISA codes to these rows in CE's Facilities screen (spec section 1).
     { kind: 'facility-register', url: ZM_REGISTER_URL, name: 'Zambia health facilities', code: 'ZMFAC', csv: toCsv(regRows, COLUMNS), extraColumns: EXTRA_COLUMNS },
-    { kind: 'custom-queries', file: zmQueryFile() },
+    { kind: 'custom-queries', file: allQueryFile() },
   ];
   writeJson('pack.json', { formatVersion: 1, steps });
 
@@ -130,7 +131,7 @@ function main() {
     schemaVersion: 1,
     type: 'content-pack',
     id: 'reports-zm',
-    version: '0.1.0',
+    version: '0.1.1',
     description: "Zambia's v1 reports in OpenLDR CE, for data exported from DISA*Lab.",
     readme,
     license: 'UNLICENSED',

@@ -4,9 +4,18 @@
 //
 // Uses the shared runner (../shared/pg-check.mjs): temp copies of the warehouse tables in the CE
 // dev Postgres container, rolled back. Exits 1 on any mismatch. Run it by hand before a release.
+// Slice 1 is group "slice1"; "t1" holds the shared helpers; each area adds its groups in checks/.
 
-import { lit, caseSuite, inOrder, runSuites } from '../shared/pg-check.mjs';
+import { lit, caseSuite, inOrder, runSuiteGroups } from '../shared/pg-check.mjs';
 import { artNumberSql, provinceClientsSql, provinceOptionsSql, ZM_CODES, ZM_REGISTER_URL } from './zm-queries.mjs';
+
+import { groups as helperGroups } from './checks/helpers.mjs';
+import { groups as vlGroups } from './checks/vl.mjs';
+import { groups as eidGroups } from './checks/eid.mjs';
+import { groups as tbGroups } from './checks/tb.mjs';
+import { groups as testsGroups } from './checks/tests.mjs';
+import { groups as covidGroups } from './checks/covid.mjs';
+import { groups as labOpsGroups } from './checks/lab-ops.mjs';
 
 const suites = [];
 
@@ -164,6 +173,51 @@ function querySuite(name, params, expected, setup = '') {
 suites.push(querySuite('clients-all', { province: '', from: '2026-05-01', to: '2026-05-31' }, EXPECTED_ALL, WIRING_ROWS));
 suites.push(querySuite('clients-southern', { province: 'Southern', from: '2026-05-01', to: '2026-05-31' }, EXPECTED_SOUTHERN));
 
+// Final review minor 3: slice 1 compares text as SQL Server does (case and trailing spaces ignored). July 2026, so the May suites above
+// never see these rows. J1: panel 'hivvl ', observation 'hivvl' and sex 'f ' (v1's IN and CASE ignore both). J2: a cancelled 'j2 ' beside
+// a valid 'J2' (v1's NOT IN, line "not exists", is under the same collation, so no REJECTED row). J3: an unclear 'j3' beside a valid 'J3'
+// (no INVAL row). J4: two cancelled requests 'J4' and 'j4' that differ only in case: v1's UNION keeps one row; the port shows the smaller
+// spelling in byte order. The window starts on 07-02, after W8's result of 07-01.
+const FOLD_ROWS = `insert into patients (id, firstname, surname, sex) values
+  ('fx-p1', 'Ann', 'Phiri', 'f '), ('fx-p2', 'Ben', 'Banda', 'M'), ('fx-p3', 'Cara', 'Mumba', 'F'), ('fx-p4', 'Dan', 'Zulu', 'M');
+insert into lab_requests (id, request_id, panel_code, authored_at, requester_code, patient_id, age_years) values
+  ('fx-q1', 'J1', 'hivvl ', '2026-07-02T08:00:00Z', 'ZSOUT', 'fx-p1', 30),
+  ('fx-q2a', 'J2', 'HIVVL', '2026-07-02T08:00:00Z', 'ZSOUT', 'fx-p2', 40),
+  ('fx-q2b', 'j2 ', 'HIVVL', '2026-07-03T08:00:00Z', 'ZSOUT', 'fx-p2', 40),
+  ('fx-q3a', 'J3', 'HIVVL', '2026-07-02T08:00:00Z', 'ZSOUT', 'fx-p4', 50),
+  ('fx-q3b', 'j3', 'HIVVL', '2026-07-02T08:00:00Z', 'ZSOUT', 'fx-p4', 50),
+  ('fx-q4a', 'J4', 'HIVVL', '2026-07-04T08:00:00Z', 'ZSOUT', 'fx-p3', 25),
+  ('fx-q4b', 'j4', 'HIVVL', '2026-07-04T08:00:00Z', 'ZSOUT', 'fx-p3', 25);
+insert into diagnostic_reports (id, based_on_id, status, effective, issued) values
+  ('fx-d1', 'fx-q1', 'final', '2026-07-01T07:00:00Z', '2026-07-10T10:00:00Z'),
+  ('fx-d2a', 'fx-q2a', 'final', '2026-07-01T07:00:00Z', '2026-07-10T10:00:00Z'),
+  ('fx-d2b', 'fx-q2b', 'cancelled', '2026-07-01T07:00:00Z', null),
+  ('fx-d3a', 'fx-q3a', 'final', '2026-07-01T07:00:00Z', '2026-07-11T10:00:00Z'),
+  ('fx-d3b', 'fx-q3b', 'final', '2026-07-01T07:00:00Z', '2026-07-11T10:00:00Z'),
+  ('fx-d4a', 'fx-q4a', 'cancelled', '2026-07-03T07:00:00Z', null),
+  ('fx-d4b', 'fx-q4b', 'cancelled', '2026-07-03T07:00:00Z', null);
+insert into lab_results (id, request_id, observation_code, text_value, numeric_value, numeric_comparator, coded_value) values
+  ('fx-r1', 'fx-q1', 'hivvl', null, 540, null, null),
+  ('fx-r2', 'fx-q2a', 'HIVVL', null, 300, null, null),
+  ('fx-r3a', 'fx-q3a', 'HIVVL', null, 2000, null, null),
+  ('fx-r3b', 'fx-q3b', 'HIVVL', 'INVAL', null, null, null);`;
+const EXPECTED_FOLD = [
+  row(...S, 'J1', 'Ann Phiri', 30, 'Female', '', '2026-07-01T07:00:00Z', '2026-07-02T08:00:00Z', '2026-07-10T10:00:00Z', '540', 'Yes'),
+  row(...S, 'J2', 'Ben Banda', 40, 'Male', '', '2026-07-01T07:00:00Z', '2026-07-02T08:00:00Z', '2026-07-10T10:00:00Z', '300', 'Yes'),
+  row(...S, 'J3', 'Dan Zulu', 50, 'Male', '', '2026-07-01T07:00:00Z', '2026-07-02T08:00:00Z', '2026-07-11T10:00:00Z', '2000', 'No'),
+  row(...S, 'J4', 'Cara Mumba', 25, 'Female', null, '2026-07-03T07:00:00Z', '2026-07-04T08:00:00Z', null, 'REJECTED', null),
+];
+suites.push(querySuite('clients-fold', { province: '', from: '2026-07-02', to: '2026-07-31' }, EXPECTED_FOLD, FOLD_ROWS));
+
 // ---- Suites above this line ----
 
-runSuites(suites);
+runSuiteGroups([
+  { name: 'slice1', suites },
+  ...helperGroups,
+  ...vlGroups,
+  ...eidGroups,
+  ...tbGroups,
+  ...testsGroups,
+  ...covidGroups,
+  ...labOpsGroups,
+]);

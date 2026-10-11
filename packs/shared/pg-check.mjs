@@ -4,6 +4,9 @@
 // tables (CREATE TEMP TABLE ... LIKE), which Postgres searches before the real ones, inside a
 // transaction that is rolled back. It reads no warehouse rows.
 //
+// runSuites runs one list in one transaction. runSuiteGroups runs { name, suites }[] with one
+// transaction per group and one combined report.
+//
 // A suite is { name, count, check(rows) -> string[] failures, sql?, setup? }. `setup` runs before
 // every suite's `sql`. Each `sql` prints lines "<name>\t<json>".
 
@@ -14,7 +17,7 @@ const DATABASE = process.env.PG_DATABASE ?? 'openldr_target';
 
 export const WAREHOUSE_TABLES = [
   'lab_requests', 'lab_results', 'diagnostic_reports', 'specimens', 'patients',
-  'lab_request_attributes', 'facility_map', 'terminology_codes', 'facility_registry',
+  'lab_request_attributes', 'facility_map', 'terminology_codes', 'facility_registry', 'questionnaire_responses',
 ];
 
 export const lit = (v) => (v === null || v === undefined ? 'null::text' : `'${String(v).replace(/'/g, "''")}'::text`);
@@ -64,7 +67,9 @@ function runPsql(sqlText) {
   return r.stdout;
 }
 
-export function runSuites(suites) {
+// Runs one list of suites in one psql call (one transaction, rolled back). Returns the count and
+// the failure lines; it does not print or exit.
+function executeSuites(suites) {
   const sqlSuites = suites.filter((s) => s.sql);
   const script = [
     'begin;',
@@ -90,7 +95,39 @@ export function runSuites(suites) {
     total += s.count;
     for (const f of s.check(rowsBySuite.get(s.name) ?? [])) failures.push(`${s.name}: ${f}`);
   }
+  return { total, failures };
+}
+
+function report(total, failures) {
   for (const f of failures) console.error(`FAIL ${f}`);
   console.log(`${total} checks, ${failures.length} failed`);
   process.exit(failures.length > 0 ? 1 : 0);
+}
+
+export function runSuites(suites) {
+  const { total, failures } = executeSuites(suites);
+  report(total, failures);
+}
+
+// Runs { name, suites }[] groups. Each group is its own psql call with its own begin ... rollback,
+// so one group's fixture rows never reach another group's queries. One combined report at the end.
+// When psql fails for a group (an SQL error stops its whole script), the report names the group and
+// the error, counts that group's checks as not run, and the other groups still run. The exit is 1.
+export function runSuiteGroups(groups) {
+  let total = 0;
+  const failures = [];
+  for (const g of groups) {
+    let r;
+    try {
+      r = executeSuites(g.suites);
+    } catch (err) {
+      const checks = g.suites.reduce((n, s) => n + s.count, 0);
+      total += checks;
+      failures.push(`${g.name}: psql failed, so its ${checks} checks did not run: ${err.message}`);
+      continue;
+    }
+    total += r.total;
+    for (const f of r.failures) failures.push(`${g.name}/${f}`);
+  }
+  report(total, failures);
 }
