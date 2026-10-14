@@ -15,6 +15,7 @@ export class SpecimenRecpt {
 
   InnerLabNumber: string | null = null;
   ReferenceNumber: string | null = null;
+  UniqueID: string | null = null;
   NID: string | null = null;
   Facility: Facility | null = null;
   WardClinic: string | null = null;
@@ -94,10 +95,12 @@ export class SpecimenRecpt {
 
       r.InnerLabNumber = regdat4.InnerLabNumber;
       r.ReferenceNumber = regdat4.ReferenceNumber;
+      r.UniqueID = regdat4.UniqueID;
       r.NID = regdat4.NID;
 
       if (Core.IsNullOrEmpty(r.InnerLabNumber)) r.InnerLabNumber = null;
       if (Core.IsNullOrEmpty(r.ReferenceNumber)) r.ReferenceNumber = null;
+      if (Core.IsNullOrEmpty(r.UniqueID)) r.UniqueID = null;
       if (Core.IsNullOrEmpty(r.NID)) r.NID = null;
 
       if (!Core.IsEmpty(regdat4.Location)) {

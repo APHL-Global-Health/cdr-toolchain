@@ -1,0 +1,1833 @@
+// Custom queries for the lab-ops reports. Each task adds { name, sql, params } entries to the list.
+
+import { foldSql, inListSql, rpt } from '../../vl-reports-mz/vl-queries.mjs';
+import {
+  ATTR_SYSTEM, count1, dateParams, dateWeekSql, eidCte, hivvlCte, inRange, labNameSql, labNamesCte, likeVarcharSql, localDate, localTs, numberOfTextSql,
+  optionalWindowSql, requestAttrSql, requesterJoin, sqlLit, ssTextKey, TODAY_ZM, tbgnxCte, testedAtSql, testingCodeSql, vleidRequestsCte,
+  dateParamSql, optionsListSql,
+  isNumericZmSql,
+} from '../zm-sql.mjs';
+import { labMonthSource, rateCutSql } from './vl.mjs';
+
+// ---- The three lab performance dashboards (Task 25) ----------------------------------------------------------------------------------
+//
+// Replaces sp_dash_getLabStats (VL), sp_dash_getLabStatsEID (EID) and sp_dash_getTBLabStats (TB). Each is a monthly dashboard with one row
+// per testing laboratory. Each procedure joins two halves:
+//   a  the tests: the copy table (HIVVL, EID, TBGNX), rebuilt here by hivvlCte, eidCte and tbgnxCte;
+//   b  the requests: v1's Requests table, here lab_requests with its report (one row per request row and report).
+// Both halves are grouped by testing lab, and the lab codes compare as SQL Server compares text (case and trailing spaces ignored).
+//
+// Parameters (spec ruling 3): `from` and `to`, YYYY-MM-DD, both required. v1 defaulted a missing start to the first day of the month before
+// last and a missing end to the last day of last month, and added a day to a given end date (line 20). The day is added here too.
+//
+// Window. v1 compares DATETIME columns with the two dates, so a stamp counts from `from` 00:00:00 up to and including (to + 1 day) 00:00:00.
+// A stamp at exactly midnight of the day after `to` is in, one second later is out (the same decision as Tasks 7 and 8). The time is the
+// stamp's own local wall time. TB's authorised stamp is cast to a date first, so there the whole day after `to` counts.
+//
+// Testing lab (spec ruling 5). The testing lab of a test or a request is the performer of its report, which cdr writes from OPENLDR_LAB_CODE
+// for each push (cdr v2-transform.ts:401). v1 uses the testing code and falls back to the receiving code when the testing code is blank
+// (`len(TestingFacilityCode) = 0`, lines 41-43). CE does not carry the receiving code (spec ruling 7). A blank DISA testing code is not lost:
+// cdr writes the configured lab code for every push (site-config.ts:64-73), so such a request is credited to the pushing lab where v1 credits
+// the receiving lab. The difference is which lab gets the credit, not a lower count. Only a report with a blank performer (data cdr did not
+// push, or no OPENLDR_LAB_CODE set) or a request with no report has no lab; it is left out of the list (a NULL code is in no `in` list and
+// is not numeric) and never counted.
+//
+// Rates are SQL Server's `int * 100.0 / int`: decimal(26,12), the quotient CUT at 12 decimals, not rounded (rateCutSql; measured on the
+// local SQL Server: 2 of 3 gives 66.666666666666). TB's rate columns are float (`cast(.. as float) * 100.0 / nullif(.., 0)`). A rate over
+// nothing is NULL, and so is any column read from a missing half of the join.
+//
+// Referrals (VL and EID) are NULL in every row. v1's Referral flag needs the receiving lab code, which CE does not carry (spec ruling 7;
+// referralSql returns NULL), and `sum(Referral) * 100.0 / count(*)` over NULLs is NULL. It is not coalesced to 0, because v1 does not.
+// Disalink comes from the builders' disalink column (the attributes prereg-registration-facility and referring-request-id); cdr does not
+// fill them yet, so it is 0 until it does.
+//
+// Lab names (spec ruling 8). Each procedure has a constant CASE on the TEST lab code (a.TestedAt), and for any other lab reads the name from
+// its Laboratories dictionary. The CASE is kept as it is. CE has no dictionary: the name is the report's (labNameSql: the display, else the
+// register name of the mapped code, else the code) with ONE name per lab code, the Task 16 rule (labNamesCte): rows never split on per-report
+// names; the group has the name of its rows that is not just the code, the smallest in byte order. The names are read from the REQUEST rows
+// that are listed (VL, TB) or the TEST rows (EID), the half v1's dictionary join hangs off. Where a request row's own testing code differs from
+// the folded lab code (ZUB in lab ZUL, ZLP in lab ZLR, ZUA in lab ZUE) it does not name the lab: the lab's name is then the code itself unless
+// a row with that very code has a name. Why: v1 keys the dictionary on the folded code (VL lines 97-98, TB lines 89-90), so the name belongs to
+// the folded code and not to any raw code that folds into it. The rule never changes a shown name in EID: its folds only touch codes that
+// have a constant name (ZUL, ZLR, ZUE), and the constant wins over the dictionary name. The rows are ordered by lab name, as v1 orders by its first column, in SQL Server's text order
+// (ssTextKey), then by every other column so that CE can page the result.
+//
+// Windows: the three queries take the same two parameters.
+
+const START = `${dateParamSql('from')}::timestamp`;
+const END = `(${dateParamSql('to')} + 1)::timestamp`;
+// v1 `datetime BETWEEN @StartDate AND @EndDate` (dates, the end already moved a day).
+const inWindow = (stamp) => `(${localTs(stamp)} >= ${START} and ${localTs(stamp)} <= ${END})`;
+// v1 `cast(datetime as date) BETWEEN @StartDate AND @EndDate`: the whole local day counts at both ends.
+const authorisedDay = (stamp) => `${localDate(stamp)} between ${dateParamSql('from')} and ${dateParamSql('to')} + 1`;
+
+// decimal(26,12), cut. NULL when the count is 0 or either side is NULL.
+const rate = (top, count) => `(${rateCutSql(top, count)})::numeric(26,12)`;
+// float: `cast(top as float) * 100.0 / nullif(count, 0)`.
+const floatRate = (top, count) => `(${top})::float8 * 100.0 / nullif(${count}, 0)`;
+
+// The request half (v1 CTE b): a request row with its report. A request with no report has no testing code, so no lab. A request with two
+// reports counts once per report (v1 has one testing code per request row; CE has one per report).
+// Steps: rq (the rows of the panels registered in the window), rz (a code like ZU_ becomes ZUL unless the testing code is ZUE or ZUA; VL and
+// EID only), rc (ZLP becomes ZLR; VL and EID only).
+const requestsCte = (panels, { fold }) => `rq as (
+  select lr.request_id, lr.analysis_at, dr.issued, dr.status, dr.performer as testing, ${testingCodeSql('dr')} as base, ${labNameSql('dr')} as report_name
+  from lab_requests lr
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', panels)}
+    and ${inWindow('lr.authored_at')}
+),
+rz as (
+  select q.*, ${fold ? testedAtSql('q.base', 'q.testing') : 'q.base'} as zu
+  from rq q
+),
+rc as (
+  select z.*, ${fold ? `case when ${foldSql('z.zu')} = 'zlp' then 'ZLR' else z.zu end` : 'z.zu'} as code
+  from rz z
+)`;
+
+// The rows that name the labs, for labNamesCte (`src`: code, report_name). See "Lab names" above.
+const nameRows = (rows) => `src as (
+  select r.code as code, case when ${foldSql('r.testing')} = ${foldSql('r.code')} then r.report_name else r.code end as report_name
+  from ${rows} r
+)`;
+
+// The constant CASE on the test lab: `key` is the folded lab code of the test half (NULL when the lab has no test).
+const labCase = (key, pairs) => `case ${key} ${pairs.map(([code, name]) => `when ${sqlLit(code.toLowerCase())} then ${sqlLit(name)}`).join(' ')} else n.lab_name end`;
+
+// The final select over `res` (columns c01, c02, ...): v1 names, and the order: the lab name, then every other column.
+function finalSelect(labels) {
+  const cols = labels.map((_, i) => `c${String(i + 1).padStart(2, '0')}`);
+  const select = cols.map((c, i) => `res.${c} as "${labels[i]}"`).join(',\n  ');
+  const order = [`${ssTextKey('res.c01')} collate "C" nulls first`, 'res.c01 collate "C" nulls first', ...cols.slice(1).map((c) => `res.${c} nulls first`)].join(',\n  ');
+  return `select ${select}\nfrom res\norder by ${order}`;
+}
+
+// ---- VL lab performance -------------------------------------------------------------------------------------------------------------
+//
+// Replaces sp_dash_getLabStats. One row per testing lab that has a viral load request in the window.
+//
+// Columns (v1 names and order, 16): Laboratory, CollectedDate, ReceivedDate, VLTestRequests, ProcessedNotReviewed, ReviewedWithInvalids,
+// ValidTests, ValidTestsTotal, LabThroughput1, LabThroughput2, Referrals, Disalink, Suppressed, LabTestedWithin3days, LabTestedWithin7days,
+// LabTestedWithin14days.
+//
+// What v1 does (lines):
+//   a (21-38)  the HIVVL rows (hivvlCte) whose lab is listed (27 codes, line 32) or numeric (a point-of-care site: isnumeric), tested in the
+//              window (line 33); lab ZLP is lab ZLR (line 24). Per lab: CollectedDate and ReceivedDate are the share of tests with that date;
+//              ValidTests the tests registered AND tested in the window (line 26); ValidTestsTotal all the tests; Referrals, Disalink and
+//              Suppressed the share of tests with the flag; LabTestedWithin3/7/14days the share tested at most 3, 7 or 14 days after they
+//              were registered (lines 28-30).
+//   b (39-66)  the requests of the panels HIVVL, POCVR and POHVL registered in the window (lines 49, 60) whose lab code (after the ZU_ and ZLP
+//              folds, lines 41-42) is listed or numeric (lines 50-59): VLTestRequests, ProcessedNotReviewed (analysis stamp) and
+//              ReviewedWithInvalids (authorised stamp).
+//   final      b LEFT JOIN a (lines 95-98): a lab with requests and no tests shows with every test column NULL; a lab with tests and no
+//              request in the window does not show. LabThroughput1 is ValidTests and LabThroughput2 ValidTestsTotal, as a share of VLTestRequests.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The join starts from the requests (above), so a lab's tests are lost when it has no request in the window.
+//   - The constant lab name is chosen by the TEST lab (a.TestedAt, line 68). A lab with requests and no tests gets the dictionary's name
+//     even if it is one of the 23 constants.
+//   - ValidTests and ValidTestsTotal count tests, VLTestRequests counts request rows (count(requestid), line 45): a lab number with two
+//     request rows (OBR sets) counts twice, and a request with no result counts although it has no test. A lab can be above 100%.
+//   - Days from registration to test are datediff(dd): date boundaries of the LOCAL dates, taken from the stamp's own text. A test before
+//     its registration counts in every cut-off; a test with no registered stamp in none (and is not a valid test).
+//   - The two lab lists are one list (27 codes), so they repeat it: a, filtered on the raw lab, and b, filtered on the folded one. The ZUH,
+//     ZUX and ZUP entries are dead (the ZU_ fold makes them ZUL before the list is read); ZLP is live in a.
+//   - The ZU_ fold (line 41) matches ZUB and also 'ZU ' (likeVarcharSql) and takes ZUE and ZUA out of it.
+//   - An `isnumeric` lab code is any text SQL Server calls a number: 001, 12, 1E5.
+//   - The request half has no register join and no report status test: a request whose facility is not in the register, or whose report is
+//     cancelled, counts in b. The test half needs a mapped facility and a final report (the builder).
+//
+// CE gaps (spec ruling 7): Referrals (above). A blank DISA testing code is credited to the pushing lab, not dropped (see the testing lab note
+// above); only a report with a blank performer, or no report, has no lab.
+//
+// Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
+const VL_LABS = ['ZAP', 'ZBP', 'ZCH', 'ZCM', 'ZCN', 'ZCD', 'ZCP', 'ZFP', 'ZKM', 'ZKS', 'ZKT', 'ZLR', 'ZLP', 'ZMB', 'ZMG', 'ZML', 'ZMP', 'ZNP', 'ZSJ',
+  'ZSP', 'ZTV', 'ZUL', 'ZUA', 'ZUE', 'ZUH', 'ZUX', 'ZUP'];
+const VL_PANELS = ['HIVVL', 'POCVR', 'POHVL'];
+const VL_NAMES = [
+  ['ZMP', 'Lewanika General Hospital'], ['ZCM', 'Choma General Hospital'], ['ZFP', 'Levy Mwanawasa UTH'], ['ZKM', 'Kaoma District Hospital'],
+  ['ZKS', 'Kasama General Hospital'], ['ZSJ', 'Serenje District Hospital'], ['ZUL', 'UTH Virology Laboratory'],
+  ['ZCP', 'Chipata Central Hospital'], ['ZML', 'Mansa General Hospital'], ['ZUA', 'UTH HAP ACOE'], ['ZCH', 'CHAZ Complex Laboratory'],
+  ['ZNP', 'Ndola Teaching Hospital'], ['ZLR', 'Livingstone Teaching Hospital'], ['ZMG', 'Minga Mission Hospital'],
+  ['ZBP', 'Kabwe General Hospital'], ['ZCN', 'Chinsali District Hospital'], ['ZCD', 'New Chinsali District Hospital'],
+  ['ZKT', 'Kitwe Teaching Hospital'], ['ZMB', 'Mazabuka General Hospital'], ['ZSP', 'Solwezi General Hospital'],
+  ['ZAP', 'Arthur Davison Childrens Hospital'], ['ZUE', 'UTH HAP PCOE'], ['ZTV', 'TDRC Laboratory'],
+];
+
+export function vlLabPerformanceSql() {
+  const listed = (code) => `(${inListSql(code, VL_LABS)} or ${isNumericZmSql(code)})`;
+  const days = (v, n) => count1(`${localDate(`${v}.tested_date`)} - ${localDate(`${v}.registered_date`)} <= ${n}`);
+  return `with ${hivvlCte('hv', { from: 'from', to: 'to', extraDays: 1 })},
+vt as (
+  select case when ${foldSql('h.tested_at')} = 'zlp' then 'ZLR' else h.tested_at end as code,
+    h.collected_date, h.received_date, h.registered_date, h.tested_date, h.referral, h.disalink, h.suppressed
+  from hv h
+  where ${listed('h.tested_at')}
+    and ${localTs('h.tested_date')} <= ${END}
+),
+ag as (
+  select ${foldSql('v.code')} as k, count(*) as n, count(v.collected_date) as n_collected, count(v.received_date) as n_received,
+    ${count1(inWindow('v.registered_date'))} as valid, sum(v.referral) as referral, sum(v.disalink) as disalink, sum(v.suppressed) as suppressed,
+    ${days('v', 3)} as w3, ${days('v', 7)} as w7, ${days('v', 14)} as w14
+  from vt v
+  group by ${foldSql('v.code')}
+),
+${requestsCte(VL_PANELS, { fold: true })},
+rb as (
+  select c.* from rc c where ${listed('c.code')}
+),
+${nameRows('rb')},
+${labNamesCte()},
+bg as (
+  select ${foldSql('c.code')} as k, count(c.request_id) as n_req, ${count1('c.analysis_at is not null')} as n_proc, ${count1('c.issued is not null')} as n_rev
+  from rb c
+  group by ${foldSql('c.code')}
+),
+res as (
+  select ${labCase('a.k', VL_NAMES)} as c01,
+    ${rate('a.n_collected', 'a.n')} as c02, ${rate('a.n_received', 'a.n')} as c03,
+    b.n_req as c04, b.n_proc as c05, b.n_rev as c06, a.valid as c07, a.n as c08,
+    ${rate('a.valid', 'b.n_req')} as c09, ${rate('a.n', 'b.n_req')} as c10,
+    ${rate('a.referral', 'a.n')} as c11, ${rate('a.disalink', 'a.n')} as c12, ${rate('a.suppressed', 'a.n')} as c13,
+    ${rate('a.w3', 'a.n')} as c14, ${rate('a.w7', 'a.n')} as c15, ${rate('a.w14', 'a.n')} as c16
+  from bg b
+  left join ag a on a.k = b.k
+  left join names n on n.code_key = b.k
+)
+${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'VLTestRequests', 'ProcessedNotReviewed', 'ReviewedWithInvalids', 'ValidTests',
+    'ValidTestsTotal', 'LabThroughput1', 'LabThroughput2', 'Referrals', 'Disalink', 'Suppressed', 'LabTestedWithin3days', 'LabTestedWithin7days',
+    'LabTestedWithin14days'])}`;
+}
+
+// ---- EID lab performance ------------------------------------------------------------------------------------------------------------
+//
+// Replaces sp_dash_getLabStatsEID. One row per testing lab that has a final EID test in the window.
+//
+// Columns (v1 names and order, 23): Laboratory, CollectedDate, ReceivedDate, EIDTestRequests, ProcessedNotReviewed, ReviewedWithInvalids,
+// ValidTests, ValidTestsTotal, LabThroughput1, LabThroughput2, Rejections, Referrals, Disalink, Positive, Negative, Indeterminate, Error,
+// Invalid, LabTestedWithin1days, LabTestedWithin2days, LabTestedWithin3days, LabTestedWithin7days, LabTestedWithin14days.
+//
+// What v1 does (lines):
+//   a (21-46)  the EID rows (eidCte) of every lab but ZZZ, MNC, MZM, ZNN and XXX (line 39), tested in the window (line 40); ZLP is ZLR and ZUA
+//              is ZUE (lines 23-26). Per lab: the share of tests with a collected date, a received date, the result classes the builder sets
+//              (Positive, Negative, Indeterminate, Error, Invalid), and the share tested at most 1, 2, 3, 7 and 14 days after they were RECEIVED
+//              (lines 33-37; the other two procedures count from registration). ValidTests, Referrals and Disalink as in the VL report.
+//   b (47-70)  the requests of the panels HIVPC, POCGH and POEID registered in the window, with the same lab folds as the VL report but ZUA
+//              kept as it is; EIDTestRequests, ProcessedNotReviewed, ReviewedWithInvalids and Rejections (report status X).
+//   final      a LEFT JOIN b (lines 110-111, the opposite of the VL and TB reports): a lab with tests and no request in the window shows with
+//              the b columns and both throughputs NULL; a lab with requests and no tests does not show.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The left join (above). Division by a missing b is NULL in SQL Server (NULL arithmetic does not raise), so no error is possible: a b row
+//     only exists when it has at least one request (a group), so the divisor is never 0. The port gives NULL as v1 does.
+//   - ZUA is folded into ZUE in a (line 25) but not in b (line 49 keeps ZUA, and takes it out of the ZUL fold). A ZUA test is therefore counted
+//     in the ZUE row ("UTH HAP PCOE"), while that row's request counts are those of testing code ZUE only. ZUA requests are a group of their
+//     own that no test group matches, so they are never output. A lab with ZUA tests and no ZUE request shows NULL request columns, and a
+//     lab with many ZUA tests and few ZUE requests shows a throughput above 100%.
+//   - The constant name for ZUA ("UTH HAP PCOE", line 82) can never be reached, because a has no ZUA after the fold. It is kept.
+//   - There is no list of labs, only the five excluded codes; any other code, numeric or not, is a lab. Excluded codes are tested in a and b.
+//   - Days to test are datediff(dd, RecievedDate, TestedDate): LOCAL date boundaries; a test with no received stamp is in no cut-off; a test
+//     before its receipt is in all of them.
+//   - The result classes are the builder's lists ('INVAL' sets no class, 'VALID' sets Invalid). A result on no list counts in no class.
+//   - Rejections counts requests with report status cancelled, which is v1's X. CE folds v1's other statuses to unknown, so those are not seen.
+//
+// CE gaps (spec ruling 7): Referrals (above). A blank DISA testing code is credited to the pushing lab, not dropped (see the testing lab note
+// above); a request or test whose report has a blank performer (data cdr did not push), or no report, is dropped.
+//
+// Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
+const EID_OUT = ['ZZZ', 'MNC', 'MZM', 'ZNN', 'XXX'];
+const EID_PANELS = ['HIVPC', 'POCGH', 'POEID'];
+const EID_NAMES = [
+  ...VL_NAMES.map(([code, name]) => [code, code === 'ZUA' ? 'UTH HAP PCOE' : name]),
+  ['001', 'St. Luke Mission Hospital(Mphanshya)'], ['002', 'Chinyunyu Rural Health Center'], ['003', 'Chipata District Hospital'],
+  ['004', 'Nyimba District Hospital'], ['005', 'Kalomo District Hospital'], ['013', 'Lundazi District Hospital'],
+  ['ZMM', 'Musumali Health Post'], ['ZMT', 'Matero General Hospital'], ['ZMJ', 'Mwanjuni Health Post'], ['ZCW', 'Chawama General Hospital'],
+];
+
+export function eidLabPerformanceSql() {
+  const days = (n) => count1(`${localDate('t.tested_date')} - ${localDate('t.recieved_date')} <= ${n}`);
+  return `with ${eidCte('ed', { from: 'from', to: 'to', extraDays: 1, rowIds: true })},
+et as (
+  select case ${foldSql('e.tested_at')} when 'zlp' then 'ZLR' when 'zua' then 'ZUE' else e.tested_at end as code, e.tested_at as testing,
+    ${labNameSql('dr')} as report_name, e.collected_date, e.recieved_date, e.registered_date, e.tested_date, e.referral, e.disalink,
+    e.positive, e.negative, e.indeterminate, e.error, e.invalid
+  from ed e
+  join diagnostic_reports dr on dr.id = e.report_row_id
+  where not (${inListSql('e.tested_at', EID_OUT)})
+    and ${localTs('e.tested_date')} <= ${END}
+),
+ag as (
+  select ${foldSql('t.code')} as k, count(*) as n, count(t.collected_date) as n_collected, count(t.recieved_date) as n_received,
+    ${count1(inWindow('t.registered_date'))} as valid, sum(t.referral) as referral, sum(t.disalink) as disalink,
+    sum(t.positive) as positive, sum(t.negative) as negative, sum(t.indeterminate) as indeterminate, sum(t.error) as error, sum(t.invalid) as invalid,
+    ${days(1)} as w1, ${days(2)} as w2, ${days(3)} as w3, ${days(7)} as w7, ${days(14)} as w14
+  from et t
+  group by ${foldSql('t.code')}
+),
+${requestsCte(EID_PANELS, { fold: true })},
+rb as (
+  select c.* from rc c where not (${inListSql('c.code', EID_OUT)})
+),
+bg as (
+  select ${foldSql('c.code')} as k, count(c.request_id) as n_req, ${count1('c.analysis_at is not null')} as n_proc, ${count1('c.issued is not null')} as n_rev,
+    ${count1(`${foldSql('c.status')} = 'cancelled'`)} as n_rej
+  from rb c
+  group by ${foldSql('c.code')}
+),
+${nameRows('et')},
+${labNamesCte()},
+res as (
+  select ${labCase('a.k', EID_NAMES)} as c01,
+    ${rate('a.n_collected', 'a.n')} as c02, ${rate('a.n_received', 'a.n')} as c03,
+    b.n_req as c04, b.n_proc as c05, b.n_rev as c06, a.valid as c07, a.n as c08,
+    ${rate('a.valid', 'b.n_req')} as c09, ${rate('a.n', 'b.n_req')} as c10, b.n_rej as c11,
+    ${rate('a.referral', 'a.n')} as c12, ${rate('a.disalink', 'a.n')} as c13, ${rate('a.positive', 'a.n')} as c14, ${rate('a.negative', 'a.n')} as c15,
+    ${rate('a.indeterminate', 'a.n')} as c16, ${rate('a.error', 'a.n')} as c17, ${rate('a.invalid', 'a.n')} as c18,
+    ${rate('a.w1', 'a.n')} as c19, ${rate('a.w2', 'a.n')} as c20, ${rate('a.w3', 'a.n')} as c21, ${rate('a.w7', 'a.n')} as c22, ${rate('a.w14', 'a.n')} as c23
+  from ag a
+  left join bg b on b.k = a.k
+  left join names n on n.code_key = a.k
+)
+${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'EIDTestRequests', 'ProcessedNotReviewed', 'ReviewedWithInvalids', 'ValidTests',
+    'ValidTestsTotal', 'LabThroughput1', 'LabThroughput2', 'Rejections', 'Referrals', 'Disalink', 'Positive', 'Negative', 'Indeterminate', 'Error',
+    'Invalid', 'LabTestedWithin1days', 'LabTestedWithin2days', 'LabTestedWithin3days', 'LabTestedWithin7days', 'LabTestedWithin14days'])}`;
+}
+
+// ---- TB lab performance -------------------------------------------------------------------------------------------------------------
+//
+// Replaces sp_dash_getTBLabStats. One row per testing lab that has a GeneXpert request in the window.
+//
+// Columns (v1 names and order, 24): Laboratory, CollectedDate, ReceivedDate, TBTestRequests, TotalTests, ProcessedNotReviewed,
+// ReviewedWithInvalids, LabThroughput, LabThroughput2, MTB_Positive, RIF_Positive, RIF_Indeterminate, NoResults, Errors, Invalids,
+// MTB_Positivity, No_Result_Rate, RIF_IND_Rate, Error_Rate, Invalid_Rate, RIF_RES_Rate, TATW24H, TATW48H, TATW72H.
+//
+// What v1 does (lines):
+//   a (21-46)  the TBGNX rows (tbgnxCte) of every lab but ZZZ, XXX and 000 (line 41), with NO date filter (line 42 is commented out). Per lab:
+//              CollectedDate and ReceivedDate (shares), TotalTests (the only windowed measure, line 23), the counts MTB_Positive,
+//              RIF_Positive, RIF_Indeterminate, Errors, Invalids and NoResults (lines 24-29), and the rates over all rows (lines 30-39).
+//   b (47-59)  the requests of the panels TBGNX and POCGT registered in the window, with the lab not ZZZ, XXX, 000 or blank (line 55).
+//              TBTestRequests, ProcessedNotReviewed and ReviewedWithInvalids. There is no ZU_ or ZLP fold in this report.
+//   final      b LEFT JOIN a (lines 87-90), as in the VL report. LabThroughput is ReviewedWithInvalids and LabThroughput2 TotalTests, each as a
+//              share of TBTestRequests; the first reads b alone, so it shows even for a lab with no tests. AverageTAT (line 36) is
+//              computed and not returned.
+//
+// Kept v1 quirks (spec ruling 1, and the controller's ruling on the TB window gap):
+//   - THE WINDOW GAP. Only TBTestRequests, ProcessedNotReviewed, ReviewedWithInvalids, LabThroughput and (through its two date conditions)
+//     TotalTests depend on the dates. CollectedDate, ReceivedDate, MTB_Positive, RIF_Positive, RIF_Indeterminate, NoResults, Errors,
+//     Invalids and every rate and TAT share count ALL tests, whatever their date. A lab's rates therefore do not change when the window
+//     moves. v1's own note says to filter them too; that is a change, so it is not done. (The inventory suggests "fix by filtering all";
+//     the spec's ruling 1 outranks it.)
+//   - TotalTests needs RegisteredDateTime in the window (a datetime: midnight of the day after `to` is the last instant) AND the authorised
+//     stamp cast to a date from `from` to the day after `to` (the whole last day counts).
+//   - The join starts from the requests: a lab with tests and no request in the window does not show; a lab with requests and no test
+//     ever shows the b columns and NULL for the rest. The constant name is chosen by the TEST lab (a.TestedAt), so such a lab gets the
+//     dictionary's name.
+//   - MTB_Positive is MTB = 'MTB Detected' and RIF_Positive RIF in (Detected, DET, Detected_Low) on the cleaned results (tbgnxCte). The rate
+//     columns spell the last word 'DEtected_Low'; the collation makes it the same word. A reported 'Detected _ Low' (with spaces) is not on
+//     the list.
+//   - Errors, Invalids and NoResults test the MTB and the RIF result: any of the two. An empty MTB result counts as no result; a missing
+//     one (NULL) does not.
+//   - RIF_RES_Rate and RIF_IND_Rate divide by the MTB-positive count, so they are NULL for a lab with no MTB-positive test.
+//   - The TB report has no lab fold: ZUB is its own lab, not ZUL.
+//   - TBGNX has one row per GXMTB result with no dedupe, and v_GeneXpert joins GXRIF to GXMTB on equal facts (tbgnxCte, Task 4, not solved
+//     again here): a request with a missing fact loses its RIF result, so it is not a RIF test.
+//
+// CE gaps (spec ruling 7): none of its own. Line 49 falls back to the receiving lab when the testing code is blank; in CE a blank DISA testing
+// code is credited to the pushing lab (see the testing lab note above), so the count is the same and only the lab can differ. A report with a
+// blank performer, or no report, has no lab and is dropped.
+//
+// Deviations (spec ruling 3): the default window becomes the required `from` and `to`.
+const TB_OUT = ['ZZZ', 'XXX', '000'];
+const TB_PANELS = ['TBGNX', 'POCGT'];
+const TB_NAMES = [
+  ['ZMP', 'Lewanika General Hospital'], ['ZCM', 'Choma General Hospital'], ['ZFP', 'Levy Mwanawasa UTH'], ['ZKM', 'Kaoma District Hospital'],
+  ['ZKS', 'Kasama General Hospital'], ['ZSJ', 'Serenje District Hospital'], ['ZUL', 'UTH Virology Laboratory'],
+  ['ZCP', 'Chipata Central Hospital'], ['ZML', 'Mansa General Hospital'], ['ZCH', 'CHAZ Complex Laboratory'],
+  ['ZNP', 'Ndola Teaching Hospital'], ['ZLR', 'Livingstone Teaching Hospital'], ['ZMG', 'Minga Mission Hospital'],
+  ['ZBP', 'Kabwe General Hospital'], ['ZCN', 'Chinsali District Hospital'], ['ZKT', 'Kitwe Teaching Hospital'],
+  ['ZMB', 'Mazabuka General Hospital'], ['ZSP', 'Solwezi General Hospital'], ['ZAP', 'Arthur Davison Childrens Hospital'],
+  ['ZTT', 'TDRC Laboratory'], ['ZNY', 'Nyimba District Hospital Laboratory'],
+];
+
+export function tbLabPerformanceSql() {
+  // The tests of lines 24-29 on the cleaned results of tbgnxCte. Text compares ignore case and trailing spaces.
+  const mtb = inListSql('t.mtb', ['MTB Detected']);
+  const rifPositive = inListSql('t.rif', ['Detected', 'DET', 'Detected_Low']);
+  const rifIndeterminate = inListSql('t.rif', ['Indeterminate']);
+  const error = `(${inListSql('t.mtb', ['Error'])} or ${inListSql('t.rif', ['Error'])})`;
+  const invalid = `(${inListSql('t.mtb', ['Invalid'])} or ${inListSql('t.rif', ['Invalid'])})`;
+  const noResult = `(${inListSql('t.mtb', ['No Results', ''])} or ${inListSql('t.rif', ['No Results', ''])})`;
+  return `with ${tbgnxCte('tb')},
+tt as (
+  select t.requestid, t.tested_at, t.specimen_date_time, t.received_date_time, t.registered_date_time, t.authorised_date_time, t.mtb, t.rif,
+    t.w24h, t.w48h, t.w72h
+  from tb t
+  where not (${inListSql('t.tested_at', TB_OUT)})
+),
+ag as (
+  select ${foldSql('t.tested_at')} as k, count(t.requestid) as n, count(t.specimen_date_time) as n_collected, count(t.received_date_time) as n_received,
+    ${count1(`${inWindow('t.registered_date_time')} and ${authorisedDay('t.authorised_date_time')}`)} as total,
+    ${count1(mtb)} as mtb_positive, ${count1(rifPositive)} as rif_positive, ${count1(rifIndeterminate)} as rif_indeterminate,
+    ${count1(error)} as errors, ${count1(invalid)} as invalids, ${count1(noResult)} as no_results,
+    ${count1(`${mtb} and ${rifPositive}`)} as mtb_rif_positive, ${count1(`${mtb} and ${rifIndeterminate}`)} as mtb_rif_indeterminate,
+    sum(t.w24h) as w24, sum(t.w48h) as w48, sum(t.w72h) as w72
+  from tt t
+  group by ${foldSql('t.tested_at')}
+),
+${requestsCte(TB_PANELS, { fold: false })},
+rb as (
+  select c.* from rc c where not (${inListSql('c.code', [...TB_OUT, ''])})
+),
+${nameRows('rb')},
+${labNamesCte()},
+bg as (
+  select ${foldSql('c.code')} as k, count(c.request_id) as n_req, ${count1('c.analysis_at is not null')} as n_proc, ${count1('c.issued is not null')} as n_rev
+  from rb c
+  group by ${foldSql('c.code')}
+),
+res as (
+  select ${labCase('a.k', TB_NAMES)} as c01,
+    ${rate('a.n_collected', 'a.n')} as c02, ${rate('a.n_received', 'a.n')} as c03,
+    b.n_req as c04, a.total as c05, b.n_proc as c06, b.n_rev as c07,
+    ${rate('b.n_rev', 'b.n_req')} as c08, ${rate('a.total', 'b.n_req')} as c09,
+    a.mtb_positive as c10, a.rif_positive as c11, a.rif_indeterminate as c12, a.no_results as c13, a.errors as c14, a.invalids as c15,
+    ${floatRate('a.mtb_positive', 'a.n')} as c16, ${floatRate('a.no_results', 'a.n')} as c17,
+    ${floatRate('a.mtb_rif_indeterminate', 'a.mtb_positive')} as c18, ${floatRate('a.errors', 'a.n')} as c19, ${floatRate('a.invalids', 'a.n')} as c20,
+    ${floatRate('a.mtb_rif_positive', 'a.mtb_positive')} as c21,
+    ${floatRate('a.w24', 'a.n')} as c22, ${floatRate('a.w48', 'a.n')} as c23, ${floatRate('a.w72', 'a.n')} as c24
+  from bg b
+  left join ag a on a.k = b.k
+  left join names n on n.code_key = b.k
+)
+${finalSelect(['Laboratory', 'CollectedDate', 'ReceivedDate', 'TBTestRequests', 'TotalTests', 'ProcessedNotReviewed', 'ReviewedWithInvalids',
+    'LabThroughput', 'LabThroughput2', 'MTB_Positive', 'RIF_Positive', 'RIF_Indeterminate', 'NoResults', 'Errors', 'Invalids', 'MTB_Positivity',
+    'No_Result_Rate', 'RIF_IND_Rate', 'Error_Rate', 'Invalid_Rate', 'RIF_RES_Rate', 'TATW24H', 'TATW48H', 'TATW72H'])}`;
+}
+
+// ---- The three data quality and DISA Link reports (Task 26) ---------------------------------------------------------------------------
+//
+// Replaces sp_DQ_DaysSinceLastVLEIDTans, sp_DQ_VLEIDSuspectedWrongSampleCollectionDateEntries and sp_getDisaLinkStats (with its body
+// fn_WeeklyDisaLinkUpdate; fn_WeeklyDisaLinkUpdate2 and 3 are dropped). Lab names follow the Task 16 rule (labNamesCte).
+//
+// Parameters. All date parameters are text, YYYY-MM-DD, required, and validated (dateParamSql: a bad date raises an error that names the parameter).
+//
+// Row order. v1 orders by its first columns and CE pages a result with LIMIT and OFFSET, so each query orders by every output column: text
+// in SQL Server's word order (ssTextKey, then the plain text), a number as a number, a missing value first.
+//
+// Collection date. A report's collection date is diagnostic_reports.effective (SpecimenDateTime): the same source as the hivvl, eid and
+// geneXpert/tbgnx builders (zm-sql.mjs:601 reportSourceSql, :1103 eidCte, :1184 geneXpertCte). specimens.collected_time is not read anywhere
+// in the pack.
+
+// ---- Days since last transmission ----
+//
+// Replaces sp_DQ_DaysSinceLastVLEIDTans (D below). One row per laboratory: the days since it last sent data, the smaller of two counts.
+// Columns (v1 names and order): Province, LabCode, LabName, LastTransmission.
+// Parameter `from`: v1's 2019 floor (D lines 30 and 44, `RegisteredDateTime > '20190101'`).
+//
+// What v1 does (lines):
+//   a (18-36)  the requests registered after the floor, per lab: datediff(dd, max(RegisteredDateTime), getdate()). The lab is the receiving
+//              code when one is set, else the testing code (reverse of the usual order); it must be in the Laboratories dictionary.
+//   b (37-51)  per Laboratories row: the requests whose DISA Link pre-registration facility (LIMSPreReg_RegistrationFacilityCode) is the lab's
+//              FacilityCode, registered after the floor: datediff(dd, max(AuthorisedDateTime), getdate()). Labs with no such request, or
+//              with no authorised stamp, or with a value of -1, are left out (line 50).
+//   final      a UNION b, per province (of the lab's facility), code and name: the MIN of the two counts. The lab code is not one of the
+//              45 codes of line 62. Ordered by province, then lab name.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - THE DEFINITION. LastTransmission is the age of the latest REGISTRATION (a) or latest AUTHORISATION of a DISA Link pre-registration (b),
+//     not the arrival of data in CE (ingest_events would be a different fact). The controller's ruling 1.
+//   - The floor is strict: `RegisteredDateTime > 2019-01-01 00:00:00`. A stamp at exactly the floor's midnight is out, a second later is in.
+//     The floor applies to the registered stamp in both parts (line 44 puts it in b's join).
+//   - Days are date boundaries between the LOCAL date of the stamp's text and today's date in Zambia (datediff(dd), whole dates, not
+//     24-hour periods, not UTC). A stamp tomorrow gives -1; part a keeps it. Part b drops a value of exactly -1 (line 50 tests
+//     `isnull(x, -1) != -1`), so an authorised stamp one day ahead is dropped, two days ahead (-2) is kept.
+//   - `having min(LastTransmission) < getdate()` (line 64) compares an int with a datetime (days since 1900). It is always true. Kept as
+//     no condition at all.
+//   - The exclusion list is v1's own constant (line 62, 45 lab codes). It is pack content and stays in the query. It applies to the folded
+//     code, so case and trailing spaces do not matter, and a leading space does. It cuts part b rows as well.
+//   - Part a counts every panel (D lines 18-36 have no panel condition): a lab whose only requests are TB, COVID or any other panel is listed.
+//   - Part b has no panel or status condition: any request pre-registered at the facility counts.
+//   - Text compares ignore case and trailing spaces. Two spellings of one lab code are one lab. The code shown is the smallest spelling in
+//     byte order.
+//   - A lab with a part a row but no part b row is shown with part a; a lab with a part b row but no part a row is shown with part b, provided
+//     it has a report somewhere in CE (see the gap below).
+//
+// CE gaps (spec rulings 7 and 8):
+//   - A DISA Link site in v1's Laboratories that never tests has a part b row only in v1. CE has no Laboratories list: a lab exists only through a
+//     report's testing code, so such a site has no row in CE.
+//   - v1's lab key is ReceivingFacilityCode when set, else TestingFacilityCode. CE carries no receiving code, so the key is the testing
+//     code, diagnostic_reports.performer. cdr writes it from its configured OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401,
+//     site-config.ts:64-73), so the lab is the lab that PUSHED the data, which v1's receiving lab is not always. A blank DISA testing code is
+//     not lost: its request is credited to the pushing lab. Only a request with no report, or a report with a blank performer (not pushed by
+//     cdr), has no lab and is left out.
+//   - There is no Laboratories dictionary, so the inner join to it (which drops codes it does not hold) is not reproduced: every code is a
+//     lab. The name is the report's name with one name per code (labNamesCte), read from every report of the code (a dictionary does not
+//     depend on the floor).
+//   - Part b needs the lab's FacilityCode (Laboratories.FacilityCode), which CE does not hold. The port uses the register facility the lab
+//     code is mapped to in facility_map (same source and performer systems as the report, registry_id set): a pre-registration belongs to
+//     the lab when its facility code (request attribute 'prereg-registration-facility', read with requestAttrSql) maps to the SAME register
+//     facility. The province is the region of that mapping (v1: HealthcareAreas via Facilities). A lab with no register mapping has no
+//     province and no part b row. This is the port's assumption; the dictionary (QUESTIONS-FOR-ZM.md question 1) would settle it.
+//   - The pre-registration attribute is not filled by cdr-toolchain yet and Zambia's feed is not measured: part b is empty on real data
+//     until it is. Part a works now.
+//   - "Today" is the Zambian date, (now() at time zone 'Africa/Lusaka')::date: v1's getdate() is the clock of Zambia's SQL Server.
+//
+// Deviations: none (the floor is a parameter, ruling 3).
+const D_EXCLUDED = ['ZXZ', 'ZZZ', 'MZM', 'MNC', 'XXX', 'ZNA', 'ZNC', 'ZLA', '005', '144', '028', '004', 'ZFI', '022', 'POC', 'ZDR', 'MAC', 'MAF',
+  'MDR', 'ZCX', 'ZLX', 'ZMR', '094', '095', '068', '108', '001', '015', '073', '054', '009', '055', '091', '128', '131', '153', '154', '155',
+  '125', '132', '161', '074', '026', '115', '097'];
+const PREREG = 'prereg-registration-facility';
+
+// The final select and ORDER BY over `res`, whose columns are c01, c02, ... in output order. `kinds`: 'text' or 'number'. `orderIdx`: the
+// indexes of the columns in ORDER BY order (default: output order), all of them.
+function finalSelect26(labels, kinds, orderIdx = labels.map((_, i) => i)) {
+  const names = labels.map((_, i) => `c${String(i + 1).padStart(2, '0')}`);
+  const select = names.map((n, i) => `res.${n} as "${labels[i]}"`).join(',\n  ');
+  const order = orderIdx.map((i) => {
+    const n = `res.${names[i]}`;
+    if (kinds[i] === 'number') return `${n} nulls first`;
+    return `${ssTextKey(n)} collate "C" nulls first, ${n} collate "C" nulls first`;
+  }).join(',\n  ');
+  return `select ${select}\nfrom res\norder by ${order}`;
+}
+
+export function daysSinceSql() {
+  const floor = `${dateParamSql('from')}::timestamp`;
+  return `with lab_dist as (
+  select distinct dr.performer, dr.performer_display, dr.source_system, dr.performer_system
+  from diagnostic_reports dr
+  where ${testingCodeSql('dr')} is not null
+),
+src as (
+  select x.performer as code, ${labNameSql('x')} as report_name
+  from lab_dist x
+),
+${labNamesCte()},
+lab_fac as (
+  select ${foldSql('x.performer')} as code_key, x.performer as spelling, fm.registry_id, fm.region, fm.id as map_id
+  from lab_dist x
+  join facility_map fm on fm.source_system = coalesce(x.source_system, '') and fm.performer_system = coalesce(x.performer_system, '')
+    and fm.source_code = x.performer and fm.registry_id is not null
+),
+lab_prov as (
+  select f.code_key, (array_agg(f.region order by (f.region is null), f.map_id))[1] as region
+  from lab_fac f
+  group by f.code_key
+),
+reqs as (
+  select dr.performer as code, ${localDate('lr.authored_at')} as reg_day
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${testingCodeSql('dr')} is not null
+    and ${localTs('lr.authored_at')} > ${floor}
+),
+a as (
+  select ${foldSql('q.code')} as k, min(q.code collate "C") as spelling, ${TODAY_ZM} - max(q.reg_day) as days
+  from reqs q
+  group by ${foldSql('q.code')}
+),
+pre as (
+  select ${requestAttrSql('lr.id', PREREG)} as pcode,
+    (select max(${localDate('dr.issued')}) from diagnostic_reports dr where dr.based_on_id = lr.id) as auth_day
+  from lab_requests lr
+  where ${localTs('lr.authored_at')} > ${floor}
+    and exists (select 1 from lab_request_attributes pa where pa.lab_request_id = lr.id and pa.system = ${sqlLit(ATTR_SYSTEM)} and pa.code = ${sqlLit(PREREG)})
+),
+site as (
+  select distinct ${foldSql('fm.source_code')} as code_key, fm.registry_id
+  from facility_map fm
+  where fm.registry_id is not null
+),
+b as (
+  select f.code_key as k, min(f.spelling collate "C") as spelling, ${TODAY_ZM} - max(p.auth_day) as days
+  from pre p
+  join site s on s.code_key = ${foldSql('p.pcode')}
+  join lab_fac f on f.registry_id = s.registry_id
+  where rtrim(p.pcode) <> ''
+  group by f.code_key
+  having coalesce(${TODAY_ZM} - max(p.auth_day), -1) <> -1
+),
+c as (
+  select a.k, a.spelling, a.days from a
+  union all
+  select b.k, b.spelling, b.days from b
+),
+res as (
+  select lp.region as c01, min(c.spelling collate "C") as c02, n.lab_name as c03, min(c.days) as c04
+  from c
+  left join lab_prov lp on lp.code_key = c.k
+  left join names n on n.code_key = c.k
+  where not (${inListSql('c.k', D_EXCLUDED)})
+  group by c.k, lp.region, n.lab_name
+)
+${finalSelect26(['Province', 'LabCode', 'LabName', 'LastTransmission'], ['text', 'text', 'text', 'number'], [0, 2, 1, 3])}`;
+}
+
+// ---- Suspect collection dates ----
+//
+// Replaces sp_DQ_VLEIDSuspectedWrongSampleCollectionDateEntries (S below). The viral load and EID requests registered more than 90 days
+// after their sample was collected, so staff can correct the dates. Columns (v1 names and order): Laboratory, Test Type, RequestID,
+// Days from collection to accessioning. Parameters: `from` and `to` (@StartDate, @EndDate).
+//
+// What v1 does (lines):
+//   - Requests with a result row (inner join on RequestID and OBRSetID, line 29-31) of the panel HIVVL or HIVPC (38) and an observation
+//     HIVVL, HIVVC or HIVPC (39, whatever the panel), more than 90 days between collection and registration (40), testing lab not ZZZ,
+//     XXX or ZXZ (41), analysed BETWEEN the two dates (42).
+//   - Test Type: HIVVL is 'Viral Load', HIVPC is 'EID' (23-26). Laboratory: the name of the lab in the dictionary (32-36).
+//   - SELECT DISTINCT (22), ordered by lab name, then test type (44).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - datediff(dd, SpecimenDatetime, registeredDatetime) counts date boundaries of the LOCAL dates of the stamps' own text (90 days and two
+//     minutes can be 91; 91 local days can be 90 in UTC). The 90-day threshold is v1's constant: more than 90 is in, exactly 90 is out.
+//   - BETWEEN @StartDate AND @EndDate on a DATETIME: both dates are midnight, so the end day is NOT included, except its first instant
+//     (a stamp at exactly 00:00:00 of the end date is in, a second later is out). Not the whole end day as in the dashboard reports.
+//   - SELECT DISTINCT on the four output columns, with text that ignores case and trailing spaces: two request numbers that differ in case
+//     or trailing spaces are one row (the smallest spelling shows), and so are two labs with one name. Several result rows, reports or
+//     OBR sets of one request that give the same four values are one row.
+//   - The observation list is not tied to the panel: a HIVVL request with an HIVPC observation is in.
+//   - A testing code of NULL is out (`NULL not in (...)` is unknown). A testing code that is blank is not in the exclusion list, so the
+//     row stays, with no lab name.
+//   - A request with no collection date, a partial one ('2026-01'), no report or no registered date has no day count, so it is out.
+//
+// CE gaps (spec ruling 7 and 8):
+//   - v1's lab is the testing code, else the receiving code (lines 33-36). CE has no receiving code. A blank DISA testing code is credited to
+//     the pushing lab (cdr writes OPENLDR_LAB_CODE as the performer of every push, v2-transform.ts:401), so the lab differs from v1's receiving
+//     lab but the request is listed. Only a report with a blank performer (not pushed by cdr) is listed with no lab name.
+//   - Laboratory is the report's name with ONE name per testing code (labNamesCte, the Task 16 rule), chosen from the rows this query
+//     returns: the report's display, else the register name of the mapped code, else the code. v1's join is to its dictionary.
+//   - The collection date is diagnostic_reports.effective, the registered date lab_requests.authored_at, the analysis date
+//     lab_requests.analysis_at.
+//
+// Deviations: none (the dates are parameters, as v1's).
+export function suspectDatesSql() {
+  const start = `${dateParamSql('from')}::timestamp`;
+  const end = `${dateParamSql('to')}::timestamp`;
+  return `with sel as (
+  select ${testingCodeSql('dr')} as code,
+    case ${foldSql('lr.panel_code')} when 'hivvl' then 'Viral Load' when 'hivpc' then 'EID' end as test_type,
+    lr.request_id, ${localDate('lr.authored_at')} - ${localDate('dr.effective')} as days, ${labNameSql('dr')} as report_name
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', ['HIVVL', 'HIVPC'])}
+    and exists (select 1 from lab_results l where l.request_id = lr.id and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVPC'])})
+    and ${localDate('lr.authored_at')} - ${localDate('dr.effective')} > 90
+    and not (${inListSql('dr.performer', ['ZZZ', 'XXX', 'ZXZ'])})
+    and ${localTs('lr.analysis_at')} between ${start} and ${end}
+),
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()},
+res as (
+  select min(n.lab_name collate "C") as c01, s.test_type as c02, min(s.request_id collate "C") as c03, s.days as c04
+  from sel s
+  left join names n on n.code_key = ${foldSql('s.code')}
+  group by ${foldSql('n.lab_name')}, s.test_type, ${foldSql('s.request_id')}, s.days
+)
+${finalSelect26(['Laboratory', 'Test Type', 'RequestID', 'Days from collection to accessioning'], ['text', 'text', 'text', 'number'])}`;
+}
+
+// ---- DISA Link weekly stats ----
+//
+// Replaces sp_getDisaLinkStats, which only selects from fn_WeeklyDisaLinkUpdate (L below) ordered by column 1. One row per DISA Link
+// facility with a new registration in the period. Columns (v1 names and order): Facility, New Registrations, Tested, Reviewed,
+// Tested from Old Requests, Tested & Reviewed from Old Requests. Parameters: `from` and `to` (@From, @To).
+//
+// What v1 does (lines):
+//   - The requests of the panels HIVVL and HIVPC registered from `from` up to, not including, the day after `to` (37-39), joined to the
+//     Facilities dictionary on the pre-registration facility code (36), grouped by the facility DESCRIPTION (41).
+//   - New Registrations: count(distinct RequestID) (11). Tested: count(analysisDateTime) over request rows (12). Reviewed:
+//     count(authorisedDateTime) (13).
+//   - Tested from Old Requests (14-23): the requests of the same facility description registered BEFORE `from` (old), analysed in the
+//     period (analysis from `from` up to the day after `to`), with a result row of observation HIVVL, HIVVC or HIVPC: count(distinct
+//     RequestID). Tested & Reviewed from Old Requests (24-35): the same, and authorised in the period too.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The end date is moved by a day: the whole `to` day counts, and the first instant of the day after does not (`< dateadd(dd,1,@To)`).
+//   - The group key is the facility description, so two facility codes with one description (case and trailing spaces aside) are ONE row.
+//   - The two old-request columns are NULL, not 0, when no old request qualifies: their sub-selects are `top 1 count(...) group by
+//     FacilityCode`, and a group by over no rows returns no row. A facility with no description (NULL) never matches the sub-select
+//     (`NULL = NULL` is not true), so its old columns are always NULL.
+//   - The output starts from the new registrations: a facility with only old requests tested in the period has no row.
+//   - Old requests need a result row of the observation list; the new-registration counts do not look at results at all.
+//   - Text compares ignore case and trailing spaces (the pre-registration code, the panel, the request number, the description).
+//
+// CE gaps and choices (spec rulings 7 and 8):
+//   - The Facilities dictionary is facility_map (registry_id set), by source_code; the description is its register name (one name per code,
+//     the first mapped row). A code outside the register has no facility and its requests are left out, as v1's inner join does.
+//   - The pre-registration facility is the request attribute 'prereg-registration-facility' (requestAttrSql). cdr-toolchain does not fill it
+//     yet and Zambia's feed is not measured, so the report is empty on real data until it is.
+//   - Authorised is the latest issued stamp of the request row's reports (v1 has one stamp per request row; a request row with two reports
+//     counts once, not twice). A report with no issued stamp is not reviewed.
+//   - v1's `top 1 ... group by FacilityCode` returns ONE arbitrary facility code's count when two codes share a description (TOP 1 with no
+//     ORDER BY). The port adds them up (distinct requests of both codes), as New Registrations does. This is a deviation from an
+//     undefined result (spec ruling 2). A facility with one code is exactly v1.
+//
+// Deviations: none besides the one above.
+export function disaLinkSql() {
+  const start = `${dateParamSql('from')}::timestamp`;
+  const end = `(${dateParamSql('to')} + 1)::timestamp`;
+  const inWindow = (stamp) => `${stamp} >= ${start} and ${stamp} < ${end}`;
+  return `with fac as (
+  select ${foldSql('fm.source_code')} as code_key, (array_agg(fm.name order by (fm.name is null), fm.id))[1] as name
+  from facility_map fm
+  where fm.registry_id is not null
+  group by ${foldSql('fm.source_code')}
+),
+rq as (
+  select lr.request_id, ${requestAttrSql('lr.id', PREREG)} as pcode,
+    ${localTs('lr.authored_at')} as reg_ts, ${localTs('lr.analysis_at')} as ana_ts, lr.analysis_at is not null as tested,
+    exists (select 1 from diagnostic_reports d where d.based_on_id = lr.id and d.issued is not null) as reviewed,
+    (select max(${localTs('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth_ts,
+    exists (select 1 from lab_results l where l.request_id = lr.id and ${inListSql('l.observation_code', ['HIVVL', 'HIVVC', 'HIVPC'])}) as has_obs
+  from lab_requests lr
+  where ${inListSql('lr.panel_code', ['HIVVL', 'HIVPC'])}
+    and (${inWindow(localTs('lr.authored_at'))} or (${localTs('lr.authored_at')} < ${start} and ${inWindow(localTs('lr.analysis_at'))}))
+    and exists (select 1 from lab_request_attributes pa where pa.lab_request_id = lr.id and pa.system = ${sqlLit(ATTR_SYSTEM)} and pa.code = ${sqlLit(PREREG)})
+),
+rf as (
+  select r.request_id, r.reg_ts, r.ana_ts, r.tested, r.reviewed, r.auth_ts, r.has_obs, f.name, ${foldSql('f.name')} as nk
+  from rq r
+  join fac f on f.code_key = ${foldSql('r.pcode')}
+),
+ng as (
+  select f.nk, min(f.name collate "C") as facility, count(distinct ${foldSql('f.request_id')}) as n_new,
+    count(*) filter (where f.tested) as n_tested, count(*) filter (where f.reviewed) as n_reviewed
+  from rf f
+  where ${inWindow('f.reg_ts')}
+  group by f.nk
+),
+og as (
+  select f.nk, count(distinct ${foldSql('f.request_id')}) as n_old
+  from rf f
+  where f.has_obs and ${inWindow('f.ana_ts')} and f.reg_ts < ${start}
+  group by f.nk
+),
+og2 as (
+  select f.nk, count(distinct ${foldSql('f.request_id')}) as n_old
+  from rf f
+  where f.has_obs and ${inWindow('f.ana_ts')} and f.reg_ts < ${start} and ${inWindow('f.auth_ts')}
+  group by f.nk
+),
+res as (
+  select n.facility as c01, n.n_new as c02, n.n_tested as c03, n.n_reviewed as c04, o.n_old as c05, o2.n_old as c06
+  from ng n
+  left join og o on o.nk = n.nk
+  left join og2 o2 on o2.nk = n.nk
+)
+${finalSelect26(['Facility', 'New Registrations', 'Tested', 'Reviewed', 'Tested from Old Requests', 'Tested & Reviewed from Old Requests'],
+    ['text', 'number', 'number', 'number', 'number', 'number'])}`;
+}
+
+// ---- VL and EID weekly stats (Task 27) -------------------------------------------------------------------------------------------------
+//
+// Replaces sp_getVLEIDstats (W below, StoredProcedure__dbo_sp_getVLEIDstats.sql) and the function it calls twice, fn_WeeklyLISUpdate (F below,
+// UserDefinedFunction__dbo_fn_WeeklyLISUpdate.sql). Per laboratory and per test type: how many requests came in during the period and what became
+// of them. Columns (v1 names and order, 15): TestType, Lab, LabName, Requests, Tests, TestedAuthorised, BacklogTests, BacklogTestsAuthorised,
+// Rejects, ORejects, Invalids, Suppressed, Positives, Indeterminates, LabTAT. Parameters: `from` and `to` (@StartDate, @EndDate), both required.
+//
+// What v1 does (lines):
+//   W 21-49, 54-82  the function for panel HIVPC (TestType 'EID', observations HIVP_) and for panel HIVVL (TestType 'HIVVL', observations
+//                   HIVV_), joined by UNION ALL; the lab names of W 23-33 and 56-66 are a constant CASE on the lab code, else the dictionary name.
+//   F 255-268       the lab list: the requests of the panel registered in the period (F 260-262), per lab, inner joined to the dictionary of
+//                   laboratories (F 255-259). Requests (F 16) counts distinct request numbers; LabTAT (F 253) averages the whole days from
+//                   registration to authorisation over those request rows.
+//   F 18-252        ten counts, each a correlated sub-select over the same panel, repeating the lab test (F 31-37, 58-64, ...). Each is a count of
+//                   distinct request numbers. They are rebuilt as FILTER counts over one grouped set of request rows (rws). A result-based count
+//                   asks "has the request row a result of observation HIVV_ (or HIVP_) that meets the condition", so each row carries that fact (exists).
+//                   All ten share the period test "stamp >= @From and stamp < @To + 1 day" (a whole local day at both ends).
+//   Tests              F 18-38    registered AND analysed in the period, with a result of the observation pattern.
+//   TestedAuthorised   F 40-65    the same, and authorised in the period, report status F, and a result text that is not one of the 13 invalid texts.
+//   BacklogTests       F 66-85    analysed in the period, registered before @From, with a result of the pattern (no authorisation needed).
+//   BacklogTestsAuthorised F 87-112  as BacklogTests, plus authorised in the period, status F and a text that is not invalid.
+//   Rejects            F 113-130  analysed in the period and a rejection code with a length over 0. No result and no registered stamp.
+//   ORejects           F 131-154  analysed and authorised in the period, a result that is not numeric (ISNUMERIC = 0) and not one of 15 known texts.
+//   Invalids           F 155-177  analysed and authorised in the period, a non-numeric result that starts with INV.
+//   Suppressed         F 178-203  analysed and authorised in the period, status F, a text that is not invalid, and (one of 10 suppressed texts, or a
+//                                 number under 1000, or any non-empty coded value).
+//   Positives          F 204-228  analysed and authorised in the period, coded value P, POS or DTS. No status test.
+//   Indeterminates     F 229-252  the same with coded value I.
+//
+// Kept v1 quirks (spec ruling 1; the controller's ruling for this task):
+//   - The definitions are v1's, word for word, including their gaps: Backlog needs no authorisation; Rejects reads no result; ORejects, Invalids,
+//     Positives and Indeterminates have no status test; Positives and Indeterminates do not look at the result text; ORejects and Invalids need no
+//     registered stamp; and Tests and TestedAuthorised need the registered stamp in the period but the backlog counts need it before. A lab is
+//     listed only when it has a request registered in the period (F 260-262): a lab with backlog or tests and no new request is not.
+//   - The period test is `>= @From and < dateadd(dd, 1, @To)` on datetimes: the whole end day is in. It is the LOCAL date of the stamp's own text
+//     (inRange). Unlike the dashboard reports, no day is added to the end.
+//   - The result conditions look at the result's text (LIMSRptResult, rpt()), and compare ignoring case and trailing spaces. `NOT IN` of a
+//     result with no text is unknown, so a result with no value is in no "valid" count and no ORejects count. An empty text counts: '' is not in
+//     any list and is not numeric.
+//   - Suppressed counts any non-empty coded value, with a number of 1000 or more beside it, and a coded value alone (the text is then the coded
+//     value, as rpt() reads it). A coded value on an invalid text does not count: the invalid test comes first.
+//   - LabTAT is AVG of an int: the whole-day (date boundary) differences of the LOCAL dates, summed and divided as integers, so it is cut toward
+//     zero (1.67 is 1, -1.5 is -1). Rows with no authorisation are left out of the average (AVG skips NULL). It averages request ROWS: one request
+//     number in two OBR sets gives two values. Only requests registered in the period are in it.
+//   - A request number that appears in two OBR sets counts once in every count (count(distinct RequestID)); the spellings compare ignoring case.
+//   - The lab is the group: two spellings of one code ('WC1', 'wc1 ') are one lab and the smallest spelling in byte order is shown.
+//   - The invalid list of TestedAuthorised, BacklogTestsAuthorised and Suppressed (13 texts), the known list of ORejects (15 texts) and the
+//     suppressed list (10 texts) are separate lists, kept as written, duplicates and all ('<30 copies/mL' and '<30 copies/ml' are one text under
+//     v1's collation).
+//
+// Deviations (spec ruling 2 and 3):
+//   - v1 tests a number with `cast(rpt as bigint) < 1000` (F 195). A decimal ('999.5'), a text with a thousands comma or an exponent makes that cast
+//     fail, and v1 stops with a conversion error (the same finding as Tasks 5 and 7). The port reads the number (numberOfTextSql), so '999.5' is
+//     suppressed and '1200.5' is not. A text with a currency sign has no number here, so it is never suppressed. These expectations are intent.
+//   - `from` and `to` are required parameters (v1's @StartDate and @EndDate are required too).
+//
+// CE gaps (spec ruling 7 and 8):
+//   - v1's lab is the testing code, else the receiving code (F 11-14, W). CE has no receiving code: the lab is the report's performer (cdr writes
+//     OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401, site-config.ts:64-73). A blank DISA testing code is not lost: the request is
+//     credited to the pushing lab, where v1 credits the receiving lab (which lab differs, the counts do not). A request with no report, or whose
+//     report has a blank performer (not pushed by cdr), has no lab and is in no count (a rejected request with no report is not counted in Rejects).
+//   - v1 inner joins its dictionary of laboratories (F 255-259), so a lab missing from it is not listed. CE has no dictionary: every testing code
+//     is a laboratory.
+//   - LabName. W 23-33 is a constant CASE and is kept as written, on the folded lab code (ZUL, ZUX, ZUC, ZUP, ZUA, ZUE, ZLP, ZLR). Any other lab has
+//     the dictionary name; CE has no dictionary, so it is the report's name with ONE name per testing code (labNamesCte, the Task 16 rule): the
+//     report's display, else the register name of the mapped code, else the code. The names are read from every report of the lab, not only the
+//     rows listed here, because a dictionary does not depend on the period, and one lab has one name in both halves.
+//   - A request with two reports counts once per report row in the average (one testing lab per report); the counts are of distinct request numbers
+//     per lab. The window columns come from CE's stamps: registered = lab_requests.authored_at, analysed = lab_requests.analysis_at, authorised =
+//     diagnostic_reports.issued, status F = report status final.
+//   - vleidRequestsCte is not used: its header says fn_WeeklyLISUpdate reads OpenLDRData.dbo.Requests, which holds every panel, and the builder
+//     keeps no row id to join the results on. The query reads lab_requests and lab_results.
+//
+// Row order: v1 has no ORDER BY (the union keeps EID first); the rows come ordered by every column, EID first, with the lab in SQL Server's
+// text order.
+const WS_INVALID = ['INVAL', 'Please repeat', 'Insufficient serum received', 'Insufficient for further tests', 'Indeterminate', 'Haemolysed', 'FAIL',
+  'Absent', 'Haemolysed ++', 'Icteric ++++', 'INV', 'This result has been checked', 'to confirm patient identity.'];
+const WS_KNOWN = ['NDET', '<30 copies/mL', '<30 copies/ml', 'Target Not Detected', 'TAR', 'RNA not detected', '< 20', '<20', '<20 copies/ml', '> 10000000',
+  'Target Not Detected.', 'INV', 'INVAL', 'INVALID', 'ND'];
+const WS_SUPPRESSED = ['ND', '<20 copies/mL', 'TAR', 'Target Not Detected', 'TARG', '< 20', 'RNA not detected', '<30 copies/ml', '<30 copies/mL', 'NDET'];
+const WS_NAMES = [['ZUL', 'UTH Virology'], ['ZUX', 'UTH High Cost'], ['ZUC', 'UTH Cytology'], ['ZUP', 'UTH Pediatrics'], ['ZUA', 'UTH-HAP ACOE'],
+  ['ZUE', 'UTH-HAP PCOE'], ['ZLP', 'Livingstone Main Lab'], ['ZLR', 'Livingstone PCR']];
+
+export function weeklyStatsSql() {
+  // A stamp in the period (the local date, whole end day); a missing or partial stamp is outside.
+  const inPeriod = (stamp) => `coalesce(${inRange(stamp)}, false)`;
+  const reg = inPeriod('lr.authored_at');
+  const ana = inPeriod('lr.analysis_at');
+  const auth = inPeriod('dr.issued');
+  const regBefore = `coalesce(${localDate('lr.authored_at')} < ${dateParamSql('from')}, false)`;
+  // The request rows of one panel: the facts every count reads. The result facts are `exists` over the request row's results of the pattern.
+  const rows = (testType, panel, prefix) => {
+    const result = rpt('y');
+    const valid = `${result} is not null and not (${inListSql(result, WS_INVALID)})`;
+    const ex = (cond) => `exists (select 1 from lab_results y where y.request_id = lr.id and ${likeVarcharSql('y.observation_code', prefix, 1)} and ${cond})`;
+    return `  select ${sqlLit(testType)}::text as test_type, lr.request_id, dr.performer as code,
+    ${reg} as reg_in, ${ana} as ana_in, ${auth} as auth_in, ${regBefore} as reg_before,
+    coalesce(${foldSql('dr.status')} = 'final', false) as is_final,
+    ${localDate('dr.issued')} - ${localDate('lr.authored_at')} as tat,
+    coalesce(length(rtrim(lr.rejection_code)) > 0, false) as has_rej,
+    ${ex('true')} as has_obs,
+    ${ex(valid)} as is_valid,
+    ${ex(`not ${isNumericZmSql(result)} and ${result} is not null and not (${inListSql(result, WS_KNOWN)})`)} as is_other,
+    ${ex(`not ${isNumericZmSql(result)} and ${result} ilike 'INV%'`)} as is_inv,
+    ${ex(`${valid} and (${inListSql(result, WS_SUPPRESSED)} or coalesce(${numberOfTextSql(result)} < 1000, false) or length(rtrim(y.coded_value)) > 0)`)} as is_supp,
+    ${ex(inListSql('y.coded_value', ['P', 'POS', 'DTS']))} as is_pos,
+    ${ex(`${foldSql('y.coded_value')} = 'i'`)} as is_ind
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${foldSql('lr.panel_code')} = ${sqlLit(panel.toLowerCase())}
+    and ${testingCodeSql('dr')} is not null
+    and (${reg} or ${ana})`;
+  };
+  const rid = foldSql('r.request_id');
+  const n = (cond) => `count(distinct ${rid}) filter (where ${cond})`;
+  const labels = ['TestType', 'Lab', 'LabName', 'Requests', 'Tests', 'TestedAuthorised', 'BacklogTests', 'BacklogTestsAuthorised', 'Rejects', 'ORejects',
+    'Invalids', 'Suppressed', 'Positives', 'Indeterminates', 'LabTAT'];
+  return `with lab_dist as (
+  select distinct dr.performer, dr.performer_display, dr.source_system, dr.performer_system
+  from diagnostic_reports dr
+  where ${testingCodeSql('dr')} is not null
+),
+src as (
+  select x.performer as code, ${labNameSql('x')} as report_name
+  from lab_dist x
+),
+${labNamesCte()},
+rws as (
+${rows('EID', 'HIVPC', 'HIVP')}
+  union all
+${rows('HIVVL', 'HIVVL', 'HIVV')}
+),
+g as (
+  select r.test_type, ${foldSql('r.code')} as k, min(r.code collate "C") as lab,
+    ${n('r.reg_in')} as requests,
+    ${n('r.reg_in and r.ana_in and r.has_obs')} as tests,
+    ${n('r.reg_in and r.ana_in and r.auth_in and r.is_final and r.is_valid')} as tested_authorised,
+    ${n('r.ana_in and r.reg_before and r.has_obs')} as backlog,
+    ${n('r.ana_in and r.auth_in and r.is_final and r.is_valid and r.reg_before')} as backlog_authorised,
+    ${n('r.ana_in and r.has_rej')} as rejects,
+    ${n('r.ana_in and r.auth_in and r.is_other')} as other_rejects,
+    ${n('r.ana_in and r.auth_in and r.is_inv')} as invalids,
+    ${n('r.ana_in and r.auth_in and r.is_final and r.is_supp')} as suppressed,
+    ${n('r.ana_in and r.auth_in and r.is_pos')} as positives,
+    ${n('r.ana_in and r.auth_in and r.is_ind')} as indeterminates,
+    trunc(avg(r.tat) filter (where r.reg_in))::int as lab_tat
+  from rws r
+  group by r.test_type, ${foldSql('r.code')}
+  having count(*) filter (where r.reg_in) > 0
+),
+res as (
+  select g.test_type as c01, g.lab as c02, ${labCase('g.k', WS_NAMES)} as c03,
+    g.requests as c04, g.tests as c05, g.tested_authorised as c06, g.backlog as c07, g.backlog_authorised as c08, g.rejects as c09,
+    g.other_rejects as c10, g.invalids as c11, g.suppressed as c12, g.positives as c13, g.indeterminates as c14, g.lab_tat as c15
+  from g
+  left join names n on n.code_key = g.k
+)
+${finalSelect26(labels, ['text', 'text', 'text', ...Array(12).fill('number')])}`;
+}
+
+// ---- Tests authorised by lab and type (Task 27) ----------------------------------------------------------------------------------------
+//
+// Replaces sp_LabTestingSummary (S below, StoredProcedure__dbo_sp_LabTestingSummary.sql). The tests authorised in a period, per laboratory, in 16
+// test-type columns. Columns (v1 names and order, 22): Province, District, Facility, FacilityCode, FacilityType, LabCode, Full Blood Count, ALT,
+// Creatinine, AST, Total Bilirubin, Direct Bilirubin, HIV Rapid, RPR, Hepatitis B, HIV VL, HIV EID, HPV, TB, Malaria Rapid, TB Microscopy,
+// Glucose (the inventory says 14 test types; S has 16). Parameters: `from` and `to`, both required.
+//
+// What v1 does (lines):
+//   S 94-103   Requests, left joined to the laboratory dictionary on the lab (testing code, else receiving code, S 96-97), to the facility of the
+//              lab (S 98-99) and to the healthcare areas for the province and the district (S 100-103).
+//   S 104-112  36 panel codes; authorised on a date within the window (S 109); analysed and authorised not NULL (S 110-111); the TESTING code (not
+//              the lab of S 96) not in ZXZ, POC, 000, ZZZ, XXX (S 112). No status test (S 114 is commented out).
+//   S 9-93     per column, a sum of 1 for each request row whose panel is one of the column's codes; HSDUO is in both HIV Rapid (S 36-37) and RPR
+//              (S 41-42). The WHERE list (S 104-107) is the union of the column lists.
+//   S 116-120  grouped by province, district, facility, facility code, facility type and lab code; ordered by the first four.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - It counts REQUEST ROWS, not distinct requests: a lab number in two OBR sets is counted twice (S 9-93 are plain sums).
+//   - HSDUO counts in HIV Rapid and in RPR. Every other code is in one column.
+//   - The panel-to-type map is v1's own content (Zambia's), kept as lists in this query: SUMMARY_COLUMNS (the columns) and SUMMARY_PANELS (the
+//     WHERE list), typed as v1 has them.
+//   - The window is on the LOCAL date of the authorised stamp (S 109 casts it to a date). v1's window is getdate()-7 to getdate(), which compared
+//     with dates is the 7 days today-6 to today; the port takes the same days as `from` and `to`, both inclusive.
+//   - The five excluded codes are tested on the TESTING code only. A NULL testing code is out (NOT IN of NULL is unknown); a blank one is not.
+//   - The panel, the testing code and the lab compare ignoring case and trailing spaces.
+//
+// Deviations (spec ruling 3): the rolling 7 days become the required `from` and `to`.
+//
+// CE gaps (spec ruling 7 and 8):
+//   - The lab key. v1 uses the testing code, else the receiving code (S 96-97). CE has no receiving code, so the lab is the report's performer.
+//     A request whose report has a blank performer (not pushed by cdr, which writes the pushing lab for every push, so a blank DISA testing code
+//     is credited to that lab) is in the row with no lab (all six leading columns NULL); v1 would put it with its receiving lab.
+//     That row also holds the requests of v1's labs missing from the dictionary. v1 puts all of those in ONE row with NULL province, district,
+//     facility and lab code (S 95 is a left join and the LabCode column is the dictionary's). CE has no dictionary, so each unmapped code keeps
+//     its own row with LabCode set and NULL in the other five columns (fixture SL3); only a blank testing code is in the NULL row.
+//   - Province, District, Facility, FacilityType. CE has no laboratory dictionary. The lab's facility is the register row its testing code is
+//     mapped to (facility_map: source system, performer system and source code equal to the report's; registry_id set; the first row by id when
+//     several match): Province and District are that mapped row's region and district, Facility its register name and FacilityType the
+//     register's `type`. A lab with no such row has NULL in all four. The lab code is shown as stored (the smallest spelling in byte order).
+//   - FacilityCode is NULL in every row (spec ruling 7). v1's l.FacilityCode is the DISA code of the facility that hosts the lab, from the
+//     Laboratories dictionary (S 7, S 98-99). CE does not hold it, and the register's MFL code is a different code system, so it is not used.
+//   - FacilityType reads the MFL "Type" text (facility_registry.extras under "type", build.mjs). v1's dictionary vocabulary for FacilityType
+//     is unverified, so the values may differ in wording from v1's.
+//   - FacilityType is read from the JSON text of the extras with a pattern, so odd JSON never fails the query (a type with an escaped quote is cut).
+//   - A request with two reports counts once per report (one testing lab per report).
+//
+// Row order: Province, District, Facility, FacilityCode (v1 orders by 1 to 4), then every other column, in SQL Server's text order, NULL first.
+const SUMMARY_COLUMNS = [
+  ['Full Blood Count', ['FBC', 'FBCP', 'FBCD4']], ['ALT', ['ALT']], ['Creatinine', ['CREA']], ['AST', ['AST']], ['Total Bilirubin', ['TBIL']],
+  ['Direct Bilirubin', ['DBIL']], ['HIV Rapid', ['HIVR', 'HSDUO']], ['RPR', ['RPR', 'HSDUO']], ['Hepatitis B', ['HEPB']],
+  ['HIV VL', ['HIVVL', 'POCVR', 'POHVL']], ['HIV EID', ['POEID', 'POCGH', 'HIVPC']], ['HPV', ['HPV', 'POHPV', 'HPVGT']], ['TB', ['TBGNX', 'POCGT']],
+  ['Malaria Rapid', ['POCML', 'MALRD']], ['TB Microscopy', ['TBA1', 'TBA2', 'TBA3', 'TBZ1', 'TBZ2', 'TBZ3']],
+  ['Glucose', ['GLUCR', 'GLUCF', 'POCGL', 'GLUC', 'GLUCS']],
+];
+const SUMMARY_PANELS = ['FBC', 'FBCP', 'FBCD4', 'ALT', 'CREA', 'AST', 'TBIL', 'DBIL', 'HIVR', 'HSDUO', 'RPR', 'HEPB', 'HIVVL', 'POCVR', 'POHVL', 'POEID',
+  'HIVPC', 'POCGH', 'HPV', 'POHPV', 'HPVGT', 'TBGNX', 'POCGT', 'POCML', 'MALRD', 'TBA1', 'TBA2', 'TBA3', 'TBZ1', 'TBZ2', 'TBZ3', 'GLUC', 'GLUCR', 'GLUCF',
+  'GLUCS', 'POCGL'];
+const SUMMARY_OUT = ['ZXZ', 'POC', '000', 'ZZZ', 'XXX'];
+
+export function labSummarySql() {
+  const typeSql = `substring(fre.extras from ${sqlLit(String.raw`"type"\s*:\s*"([^"]*)"`)})`;
+  const counts = SUMMARY_COLUMNS.map(([, codes], i) => `count(*) filter (where ${inListSql('r.panel', codes)}) as c${String(i + 7).padStart(2, '0')}`);
+  const labels = ['Province', 'District', 'Facility', 'FacilityCode', 'FacilityType', 'LabCode', ...SUMMARY_COLUMNS.map(([label]) => label)];
+  return `with rws as (
+  select ${testingCodeSql('dr')} as code, lr.panel_code as panel, dr.source_system, dr.performer_system
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', SUMMARY_PANELS)}
+    and ${inRange('dr.issued')}
+    and lr.analysis_at is not null
+    and dr.performer is not null
+    and not (${inListSql('dr.performer', SUMMARY_OUT)})
+),
+labs as (
+  select distinct on (x.k) x.k, fm.region, fm.district, fm.name, fm.registry_id
+  from (select distinct ${foldSql('d.code')} as k, d.source_system, d.performer_system from rws d where d.code is not null) x
+  join facility_map fm on ${foldSql('fm.source_code')} = x.k
+    and fm.source_system = coalesce(x.source_system, '') and fm.performer_system = coalesce(x.performer_system, '') and fm.registry_id is not null
+  order by x.k, fm.id
+),
+res as (
+  select l.region as c01, l.district as c02, l.name as c03, null::text as c04, ${typeSql} as c05, min(r.code collate "C") as c06,
+    ${counts.join(',\n    ')}
+  from rws r
+  left join labs l on l.k = ${foldSql('r.code')}
+  left join facility_registry fre on fre.id = l.registry_id
+  group by ${foldSql('r.code')}, l.region, l.district, l.name, fre.extras
+)
+${finalSelect26(labels, [...Array(6).fill('text'), ...Array(16).fill('number')])}`;
+}
+
+// ---- VL throughput by lab and month (Task 27) ---------------------------------------------------------------------------------------------
+//
+// Replaces sp_LabThroughputTrendbyYear (T below, StoredProcedure__dbo_sp_LabThroughputTrendbyYear.sql), which selects from the function
+// fn_annualrequestsTestsTrend (N, UserDefinedFunction__dbo_fn_annualrequestsTestsTrend.sql), which selects from the view vVLRequestsTestsByMonth
+// (M). Task 12 ported the view as "VL requests and tests by lab and month"; this query reads the same rows through the shared labMonthSource
+// (queries/vl.mjs), so the view's logic and its quirks are not copied. Columns (v1 names and order): Laboratory, Month, MonthDescription,
+// Requests, Tested. Parameter: `year` (@Year, required).
+//
+// What v1 does (lines):
+//   N 28       the view's rows of the year @Year (the view's Year is the year of RegisteredDateTime, M 21).
+//   N 22       MonthDescription: DATENAME(month, ...) of a month of 2018 (the base date '2018-01-01' only gives the month names; it is not a data
+//              filter, and the function's default year 2019 is replaced by the parameter).
+//   T 27       ordered by the first column, the laboratory.
+//   M 21-48    per year, month and lab: Requests = distinct HIVVL request numbers registered in the month; Tested = distinct HIVVL requests with a
+//              result of observation HIVVL or HIVVC, status F, authorised in the MONTH of the row, at the same testing code.
+//
+// Kept v1 quirks (spec ruling 1, and the controller's ruling for this task: the year is NOT added to Tested):
+//   - Tested matches the authorised month only, not the year (M 31: datepart(mm, ...) = datepart(mm, ...)). The Tested of a month in the year asked
+//     for therefore counts every year's tests of that month: May 2026 holds May 2025's tests too. The year filters Requests (the function's
+//     `where [Year] = @Year`), not Tested. A request registered in one month and tested in another counts in the month it was authorised.
+//   - Tested has no registered stamp test: a final HIVVL test with no registered date still counts in its authorised month.
+//   - Tested is matched on the lab by the TESTING code only (M 32); CE holds only that code.
+//   - The lab (and the request number) compares ignoring case and trailing spaces; the laboratory shown is the smallest spelling in byte order.
+//   - The year and the month are the LOCAL date of the registered stamp, from the stamp's own text ('2026-01-01T01:00:00+02:00' is January 2026,
+//     where UTC says December 2025). A request with no registered stamp is in no year.
+//
+// CE gaps (spec ruling 7): the lab key. v1 uses the testing code, else the receiving code (M 39-43). CE has no receiving code, so the lab is the
+// report's performer (cdr writes OPENLDR_LAB_CODE into it for each push, cdr v2-transform.ts:401, so a blank DISA testing code is credited to the
+// pushing lab, not lost); a request whose report has a blank performer (not pushed by cdr) is out. v1's
+// inner join to the laboratory dictionary (which drops a lab missing from it) is not reproduced: every testing code is a laboratory. A request with
+// no report has no lab and is not counted.
+// Deviations (spec ruling 3): the default year of the function (2019) is the required parameter. MonthDescription is English month names
+// (to_char FMMonth), as DATENAME with SQL Server's default language.
+//
+// Row order: the laboratory (v1 orders by it) in SQL Server's text order, then the month, then the counts.
+export function throughputSql() {
+  const year = `extract(year from ${localDate('lr.authored_at')})::int = ({{param.year}})::int`;
+  return `${labMonthSource(year, `g."Laboratory", g."Month", to_char(make_date(2018, g."Month", 1), 'FMMonth') as "MonthDescription", g."Requests", coalesce(t.n, 0) as "Tested"`)}
+order by ${ssTextKey('g."Laboratory"')} collate "C", g."Laboratory" collate "C", g."Month", g."Requests", coalesce(t.n, 0)`;
+}
+
+// ---- Rejections by facility and reason, VL rejections by facility (total), VL rejections by lab (Task 28) ------------------------------
+//
+// Replaces five v1 views over OpenLDRData.dbo.Requests (A, E, V, T and L below are their files in the task folder):
+//   A  vAllSampleRejectionsByFacility   all panels, 37 columns
+//   E  vEIDSampleRejectionsByFacility   A plus panel HIVPC (every sub-select, line 269)
+//   V  vVLSampleRejectionsByFacility    A plus panels HIVVL and VIRAL, and the bucket date coalesce(SpecimenDateTime, RegisteredDateTime)
+//   T  vVLTotalRejectionsByFacility     FacilityName, Rejections: panel HIVVL, count distinct RequestID, no time buckets
+//   L  vVLSpecimenRejections            Laboratory, Rejections: panel HIVVL, count distinct RequestID, by lab name
+//
+// One query for A, E and V ("Rejections by facility and reason"). Their 37 columns are the same, and the three differences are one choice
+// (spec ruling "one query per v1 column set"): the parameter test_type, a select with all, EID and VL (blank is all).
+//   all  A: every panel; bucket date RegisteredDateTime (lines 8-11).
+//   EID  E: panel HIVPC; bucket date RegisteredDateTime.
+//   VL   V: panels HIVVL and VIRAL; bucket date coalesce(SpecimenDateTime, RegisteredDateTime) (V lines 10-13). The VL differences belong to
+//        that view, so they switch together.
+// T is NOT the period query with a "total" setting: its columns are FacilityName and Rejections (no province, district, code, buckets or
+// reason columns), it counts DISTINCT requests, it groups by facility NAME, and it takes panel HIVVL only (the period VL view also takes
+// VIRAL). One query per column set: "VL rejections by facility (total)". There is no grain parameter. L is a third query for the same reason.
+//
+// Columns of the first (A lines 7-12 and 13-264, names and order): ProvinceName, DistrictName, FacilityName, RequestingFacilityCode, Year,
+// Quarter, Month, Week, TotalSampleRejections, then the 28 reason columns. Two reason names are cut at 30 characters in v1 ("Mismatched names
+// on Form n Spe", "Empty Specimen containers rece") and stay cut.
+//
+// What v1 does (A lines):
+//   - The rejected requests: LIMSRejectionCode is not NULL and not '' (line 269; SQL Server's '' = ' ' is true, so spaces are empty). One row
+//     per Requests row: Count(RequestID) (line 12) counts rows with a RequestID, not distinct requests.
+//   - Grouped by facility (the FacilityList names and the requesting code) and by Datepart(year / qq / mm / wk) of the bucket date (270-274).
+//     Datepart(wk) is the US week: Sunday first, week 1 holds 1 January (dateWeekSql), not the ISO week. Local dates, never UTC.
+//   - Each reason column is a correlated sub-select that counts the rows of the SAME facility code and the SAME year, quarter, month and week
+//     whose LIMSRejectionCode equals the reason code (lines 13-264). It is a conditional count of the group: count(*) filter (where ...).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The reason codes are v1's content (Zambia's 28 codes) and stay in the query. A code compares ignoring case and trailing spaces
+//     ('wrong ' is WRONG); a leading space is a different code. A rejected request with a code that is none of the 28 is in the total only.
+//   - A request with no bucket date still has a group (Datepart of NULL is NULL, and NULL groups together), but the sub-selects compare
+//     Datepart(...) = Datepart(...), which is unknown for NULL: every reason column of that group is 0 while the total counts. The same goes
+//     for a request with no facility code (NULL = NULL is unknown): total counted, reason columns 0. An empty code '' is a code and counts.
+//   - A RequestID that is NULL is not counted (Count(RequestID) and the sub-select count(rq.requestid) skip it). A group made only of such rows
+//     appears with a total of 0.
+//   - The group key is the facility code ignoring case and trailing spaces ('ZSOUT' and 'zsout ' are one group, as SQL Server groups them).
+//     The code shown is the smallest spelling in byte order (SQL Server shows whichever it met first).
+//   - Facilities missing from the list get NULL province, district and facility names (left join, line 268).
+//   - Week 53 of a year is a partial week; 1 January is always in week 1 of its own year.
+//
+// CE mapping (spec rulings 4 and 5, Task 14): Requests -> lab_requests; RegisteredDateTime -> authored_at; SpecimenDateTime ->
+// diagnostic_reports.effective; LIMSRejectionCode -> rejection_code; LIMSPanelCode -> panel_code; RequestingFacilityCode -> requester_code;
+// FacilityList (it is not in Zambia's script) -> the ZMFAC register mapping through requesterJoin (province = region, district, facility =
+// name), left join.
+//
+// Deviations and CE gaps:
+//   - The facility mapping matches the requesting code EXACTLY against facility_map.source_code (requesterJoin). facility_map holds one row
+//     per observed spelling of a code, byte for byte, and cdr trims codes; v1's join ignores case and trailing spaces. A spelling gets NULL
+//     names only when that observed spelling has no mapping. It still joins the group of the code it folds to, so its counts merge as in v1.
+//     A folding join would count a request twice, so the join stays exact.
+//   - The facility NAMES are not part of the group key (v1's are): one folded facility code, one row per period. When the spellings in a group
+//     map to different register rows, the three names come from ONE row, the one with the smallest facility name (then province, then
+//     district, in byte order), so they never mix across register rows.
+//   - Window (spec ruling 7). The views have no window, so from and to are optional and blank is v1's all history. A given side keeps the
+//     rows whose BUCKET date (the local date of the stamp's own text) is on or after from and on or before to; a row with no bucket date is
+//     out as soon as one side is given. The bucket date is the registered date, and for VL the collection date else the registered date.
+//   - The collection date is the earliest local date among the request's reports (CE can hold several reports per request row; v1 holds one
+//     SpecimenDateTime). A blank or partial stamp ('', '2026-07') is no date and falls back to the registered date, where a v1 datetime is
+//     always a full date. The request is still counted once.
+//   - An unknown test_type gives no rows. The date parameters are validated (dateParamSql).
+//
+// Rows are ordered by the three names (SQL Server's word order), the facility code, and the bucket (v1 has no ORDER BY; this key is total).
+const REJECTION_REASONS = [
+  ['WRONG', 'Blood received in wrong tube'],
+  ['CLOT', 'Specimen clotted'],
+  ['LEAK', 'Leaked sample'],
+  ['HAEM', 'Specimen haemolysed'],
+  ['AOOO', 'ANALYSER OUT OF ORDER'],
+  ['NOQC', 'Quality Control Failed'],
+  ['TEST', 'No test requested'],
+  ['SPUN', 'Specimen unlabelled'],
+  ['007', 'Specimen more than 7 days old'],
+  ['UNS', 'Unsuitable for testing'],
+  ['INS', 'Insufficient blood received'],
+  ['FORM', 'Request form incomplete.'],
+  ['LOCOU', 'Low Count Error'],
+  ['LAC', 'Limited analyser capacity.'],
+  ['INVOL', 'Volume of Blood Exceeds Limit'],
+  ['ACC', 'Laboratory Accident'],
+  ['NAMES', 'Mismatched names on Form n Spe'],
+  ['SNR', 'SPECIMEN NOT RECEIVED IN LAB'],
+  ['EMPT', 'Empty Specimen containers rece'],
+  ['NOESR', 'ESR Tubes are Out of Stock'],
+  ['NRQF', 'No request form received'],
+  ['WRGCO', 'Wrong Sputum Container Used'],
+  ['SAMFN', 'Sample fibrin - Clot detected'],
+  ['OLD', 'Specimen too old for testing'],
+  ['INSF', 'Sample insufficient to culture'],
+  ['SWC', 'Sample Withdrawn by Client'],
+  ['DAY3', 'Specimen 3 days old on receipt'],
+  ['OS', 'Not done. Reagent out of stock'],
+];
+
+// The local date of a request's collection (the earliest among its reports), else NULL.
+const collectionDateSql = (lrAlias) => `(select min(${localDate('dr.effective')}) from diagnostic_reports dr where dr.based_on_id = ${lrAlias}.id)`;
+// A rejected request: the code is not NULL and not blank.
+const rejectedSql = (code) => `length(rtrim(${code})) > 0`;
+
+export function rejectionsByReasonSql() {
+  const testType = foldSql('{{param.test_type}}');
+  const isVl = `${testType} = 'vl'`;
+  const reasons = REJECTION_REASONS.map(([code, name], i) => `count(b.request_id) filter (where b.requester_code is not null and b.d is not null and ${foldSql('b.rejection_code')} = ${sqlLit(code.toLowerCase())}) as r${String(i + 1).padStart(2, '0')}`);
+  const outputs = REJECTION_REASONS.map(([, name], i) => `g.r${String(i + 1).padStart(2, '0')} as "${name}"`);
+  return `with rq as (
+  select lr.request_id, lr.requester_code, lr.rejection_code, fmr.region as province, fmr.district as district, fmr.name as facility,
+    case when ${isVl} then coalesce(${collectionDateSql('lr')}, ${localDate('lr.authored_at')}) else ${localDate('lr.authored_at')} end as d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${rejectedSql('lr.rejection_code')}
+    and (${testType} in ('', 'all')
+      or (${testType} = 'eid' and ${inListSql('lr.panel_code', ['HIVPC'])})
+      or (${isVl} and ${inListSql('lr.panel_code', ['HIVVL', 'VIRAL'])}))
+),
+b as (
+  select r.*, extract(year from r.d)::int as y, extract(quarter from r.d)::int as q, extract(month from r.d)::int as m, ${dateWeekSql('r.d')} as w
+  from rq r
+  where ${optionalWindowSql("to_char(r.d, 'YYYY-MM-DD')")}
+),
+g as (
+  select (array_agg(b.province order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as province,
+    (array_agg(b.district order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as district,
+    (array_agg(b.facility order by b.facility collate "C" nulls last, b.province collate "C" nulls last, b.district collate "C" nulls last))[1] as facility,
+    min(b.requester_code collate "C") as code, ${foldSql('b.requester_code')} as code_key,
+    b.y, b.q, b.m, b.w,
+    count(b.request_id) as total,
+    ${reasons.join(',\n    ')}
+  from b
+  group by ${foldSql('b.requester_code')}, b.y, b.q, b.m, b.w
+)
+select g.province as "ProvinceName", g.district as "DistrictName", g.facility as "FacilityName", g.code as "RequestingFacilityCode",
+  g.y as "Year", g.q as "Quarter", g.m as "Month", g.w as "Week", g.total as "TotalSampleRejections",
+  ${outputs.join(',\n  ')}
+from g
+order by ${ssTextKey('g.province')} collate "C" nulls first, g.province collate "C" nulls first,
+  ${ssTextKey('g.district')} collate "C" nulls first, g.district collate "C" nulls first,
+  ${ssTextKey('g.facility')} collate "C" nulls first, g.facility collate "C" nulls first,
+  g.code_key collate "C" nulls first, g.y nulls first, g.q nulls first, g.m nulls first, g.w nulls first`;
+}
+
+export const rejectionsByReasonParams = () => [
+  {
+    id: 'test_type', label: 'Test type: all (blank), EID (panel HIVPC) or VL (panels HIVVL and VIRAL, dated by collection date else registered date)',
+    type: 'select', required: false, optionsSql: optionsListSql('test_type', ['all', 'EID', 'VL']),
+  },
+  ...windowParams(),
+];
+
+// ---- VL rejections by facility (total) ----
+//
+// Replaces vVLTotalRejectionsByFacility (T). Columns: FacilityName, Rejections. Parameters: `from` and `to`, both optional.
+//
+// What v1 does (T lines):
+//   - FacilityList right join Requests on DisaCodes = RequestingFacilityCode (lines 8-9): every request is kept, a facility missing from the
+//     list has a NULL name.
+//   - Panel HIVVL only (not VIRAL), a code that is not NULL and not blank (line 11). Grouped by FacilityName (line 12); count(Distinct
+//     RequestID): a request in several OBR sets, or spelled in another case, counts once (case and trailing spaces are ignored).
+//
+// Kept v1 quirks (spec ruling 1):
+//   - The group key is the facility NAME, so two facility codes with one name (case and trailing spaces ignored) are ONE row, and every
+//     facility without a name (unmapped code, no code) is one row with a NULL name. The distinct count runs over the whole group.
+//   - A request without a RequestID is not counted (count(distinct) skips NULL).
+//
+// Window (spec ruling 7): no window in v1, so both parameters are optional and blank is all history. A given side filters on the local
+// date of the request's collection, else its registered date: the VL bucket date of the period query, so the same window gives the same
+// requests in both reports. A request with no such date is out as soon as one side is given. Facility names: see the first query.
+export function vlRejectionsTotalSql() {
+  return `with rq as (
+  select lr.request_id, fmr.name as facility,
+    coalesce(${collectionDateSql('lr')}, ${localDate('lr.authored_at')}) as d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr', 'left join')}
+  where ${inListSql('lr.panel_code', ['HIVVL'])} and ${rejectedSql('lr.rejection_code')}
+),
+g as (
+  select min(r.facility collate "C") as facility, ${foldSql('r.facility')} as name_key, count(distinct ${foldSql('r.request_id')}) as rejections
+  from rq r
+  where ${optionalWindowSql("to_char(r.d, 'YYYY-MM-DD')")}
+  group by ${foldSql('r.facility')}
+)
+select g.facility as "FacilityName", g.rejections as "Rejections"
+from g
+order by ${ssTextKey('g.facility')} collate "C" nulls first, g.facility collate "C" nulls first, g.rejections`;
+}
+
+// ---- VL rejections by lab ----
+//
+// Replaces vVLSpecimenRejections (L). Columns: Laboratory, Rejections. Parameters: `from` and `to`, both optional.
+//
+// What v1 does (L lines):
+//   - Requests left join Laboratories on (TestingFacilityCode, else the receiving code when it is '') = LabCode (lines 18-23): a lab not in
+//     the dictionary has a NULL name.
+//   - Panel HIVVL only (not VIRAL), code not NULL and not blank (lines 25-27). Grouped by the lab NAME, count(Distinct RequestID).
+//
+// Kept v1 quirks (spec ruling 1): the group key is the lab name, so two lab codes with one name are one row (case and trailing spaces
+// ignored) and every lab with no name is one row with a NULL name; a request without a RequestID is not counted.
+//
+// CE mapping and gaps (spec rulings 5, 6, 7 and 8):
+//   - The lab is the report's performer, which cdr writes from OPENLDR_LAB_CODE for each push (cdr v2-transform.ts:401). A request with no
+//     report, or a blank performer (not pushed by cdr: a blank DISA testing code is credited to the pushing lab, v2-transform.ts:401), has no lab: v1 would
+//     use the receiving code, which CE does not carry, so these requests are one row with a NULL name.
+//   - CE has no Laboratories dictionary. The name is the report's (labNameSql: its display, else the register name of the mapped code, else the
+//     code) with ONE name per lab code, the Task 16 rule (labNamesCte): the rows never split on per-report names, and the code's name is the
+//     one among its listed rows that is not just the code, the smallest in byte order. A lab with no name anywhere is shown by its code
+//     (v1 would show NULL).
+//   - A request with several reports counts once for each of its labs (v1 holds one testing code per request row).
+//
+// Window (spec ruling 7): none in v1 (its Year and Month columns are commented out and read RegisteredDateTime), so both parameters are
+// optional and blank is all history. A given side filters on the local date of the registered date (authored_at); a request with none is
+// out as soon as one side is given.
+export function vlRejectionsByLabSql() {
+  return `with sel as (
+  select ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, lr.request_id
+  from lab_requests lr
+  left join diagnostic_reports dr on dr.based_on_id = lr.id
+  where ${inListSql('lr.panel_code', ['HIVVL'])} and ${rejectedSql('lr.rejection_code')}
+    and ${optionalWindowSql('lr.authored_at')}
+),
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()},
+g as (
+  select min(n.lab_name collate "C") as lab, ${foldSql('n.lab_name')} as lab_key, count(distinct ${foldSql('s.request_id')}) as rejections
+  from sel s
+  left join names n on n.code_key = ${foldSql('s.code')}
+  group by ${foldSql('n.lab_name')}
+)
+select g.lab as "Laboratory", g.rejections as "Rejections"
+from g
+order by ${ssTextKey('g.lab')} collate "C" nulls first, g.lab collate "C" nulls first, g.rejections`;
+}
+
+// ---- Date completeness (Task 29a) ----
+//
+// Replaces nine views, all one body: for each group of requests, how many requests have each of five dates, as a percentage.
+//   vDatesCompletionRatesByFacility (target), ByFacilityEID, ByFacilityVL   FacilityName                 (F, FE, FV)
+//   vDatesCompletionRatesByProvince                                         ProvinceName                 (P)
+//   vDatesCompletionRatesByDistrict                                         DistrictName                 (D)
+//   vDatesCompletionRatesByLab                                              LabPrefix, LabFacility       (L)
+//   vDatesCompletionRatesByLabEID, ByLabVL                                  LabFacility                  (LE, LV)
+//   vDatesCompletionRatesByLabArea                                          LabName                      (A)
+//
+// One SQL statement cannot rename its grouping column by parameter, so the column sets decide the queries (the Task 10 and 24 ruling).
+// Six queries, one helper (completenessSql) that holds the shared logic:
+//   Date completeness by province      ProvinceName                    from, to
+//   Date completeness by district      DistrictName                    from, to
+//   Date completeness by facility      FacilityName                    test_type (all, EID, VL), from, to
+//   Date completeness by lab           LabPrefix, LabFacility          from, to              (L: its column set has LabPrefix, LE and LV do not)
+//   Date completeness by lab facility  LabFacility                     test_type (EID, VL), from, to
+//   Date completeness by lab area      LabName                         from, to
+// Every query ends in the same six v1 columns: Requests, SampleCollectionDate, SampleReceivedDate, RegisteredDate, AnalyzedDate,
+// AuthorisedDate (F lines 7-11). test_type is only on the two levels where v1 has the variants.
+//
+// What v1 does (F lines 6-23 and the others):
+//   - From Requests (OBR rows), joined to FacilityList (RequestingFacilityCode = DisaCodes; F, FE, FV, P, D) or LabList (TestingFacilityCode =
+//     LabPrefix; A, LE, LV; L is a right join from LabList but its WHERE clause on Requests columns makes it an inner join). Grouped by the
+//     name column. FacilityList and LabList are not in the script.
+//   - Requests = count(RequestID); each rate = convert(Double precision, round(cast(count(date) as Decimal) / cast(count(RequestId) as
+//     decimal) * 100, 1)). count() skips NULL.
+//   - FE, LE: LIMSPanelCode = 'HIVPC'. FV, LV: 'HIVVL' or 'VIRAL'. L: 'HIVVL', 'HIVPC', 'VIRAL' or 'HIVST'. The others have no panel filter.
+//   - L (line 23) also has a window: the first of SpecimenDateTime, ReceivedDateTime, RegisteredDateTime is after 2017-10-31 and before
+//     2018-04-01. No other view has a window.
+//
+// CE mapping (global constraints):
+//   SpecimenDateTime = diagnostic_reports.effective, ReceivedDateTime = specimens.received_time (the report's specimen), RegisteredDateTime =
+//   lab_requests.authored_at, AnalysisDateTime = lab_requests.analysis_at, AuthorisedDateTime = diagnostic_reports.issued.
+//   Request rows are lab_requests rows (one per OBR). Facilities come from the register mapping (requesterJoin, an inner join), with the
+//   register's region, district and name for FacilityList's ProvinceName, DistrictName and FacilityName. Labs come from the report's performer
+//   (the testing lab, cdr's OPENLDR_LAB_CODE per push, cdr v2-transform.ts:401), named by labNamesCte (the Task 16 rule: one name per code).
+//
+// Rates (measured on the local SQL Server, all (count, requests) pairs up to 600 requests):
+//   - cast(x as Decimal) is decimal(18,0). The division, the * 100 and the round run in exact decimal arithmetic (the result is decimal(38,16)),
+//     round() takes half away from zero (6.25 -> 6.3, 28.75 -> 28.8). Postgres numeric does the same, so the port divides numerics and rounds
+//     with round(numeric, 1). A float computation would round 28.75 down (23 / 80 * 100 is 28.749999 in floating point).
+//   - The result is float, so the port casts to double precision. 180,899 pairs gave the same value as SQL Server, digit for digit.
+//   - count(date) counts the NOT NULL dates. A CE stamp is text: '' is not NULL, and neither is a partial FHIR dateTime like '2026-07'. A v1
+//     datetime column cannot hold either, so a stamp counts only when it starts with a full date (YYYY-MM-DD, with or without a time). The
+//     same rule the other Task 25 to 28 reports use for a collection date.
+//   - count(RequestID) is a ROW count: a RequestID on two OBR rows counts twice, a spelling in another case counts again, and a NULL RequestID
+//     is not counted (its dates still count, so a rate can pass 100). The port counts the request_id column the same way.
+//   - Division by zero (ruling 2): a group whose RequestIDs are all NULL has count(RequestId) = 0, and v1 raises "Divide by zero error
+//     encountered" for the whole view. An error is not real output, and CE can reach this case: lab_requests.request_id is nullable
+//     (openldr_ce 003_v2_core.ts:39) and a form requisition builds a ServiceRequest with no identifier (packages/forms/src/extract/extract.ts:175-180).
+//     The port divides by nullif(count(RequestID), 0): such a group is a row with Requests 0 and five NULL rates.
+//
+// Rows. A facility level counts one row per lab_requests row (a request with two reports is still one request row, as in v1, which holds
+// one set of dates per row): its dates are the earliest valid date among the reports, so a request has a date when any report has it. A lab
+// level counts one row per (request row, lab code), because the lab is the report's performer: v1 holds one testing code per request row,
+// so a request with reports from two labs counts for each lab, and a request with several reports from one lab (codes equal ignoring case
+// and trailing spaces) counts once, with the earliest valid date of each column among those reports, as the facility levels do. A report with
+// no performer (blank or NULL) or a request with no report has no lab and is in no row: LabList cannot match a blank code (inner join).
+//
+// Joins and names (CE gaps, ruling 7):
+//   - FacilityList is the ZMFAC register mapping. A request whose requester code is not mapped to a register row is out (v1's inner join),
+//     including a NULL code. A facility with a NULL region or district is a row with a NULL name.
+//   - LabList (LabPrefix, LabFacility, LabName) is not defined anywhere in the script. LabPrefix is the performer code. LabFacility and LabName
+//     are both the lab's register name (the report's name, else the register's, else the code; labNamesCte). v1's LabName is likely a
+//     different name (a lab area), which Zambia has not sent (QUESTIONS-FOR-ZM). CE lists every performer code it has; v1 lists only the codes
+//     in LabList. The name of a lab is chosen among the rows the view lists (after the panel and window filter), as in the Task 16 rule.
+//
+// Kept v1 quirks (ruling 1):
+//   - The facility, province, district and lab name rows group on the NAME, in SQL Server's collation (case and trailing spaces ignored). Two
+//     facilities with one name are one row. The same district name in two provinces is one row. The shown spelling is the smaller in byte
+//     order (v1's choice is not defined). The lab view groups on the code (LabPrefix, LabFacility).
+//   - A group of facilities with a NULL name is one NULL row.
+//   - Panel codes compare as SQL Server does: case and trailing spaces ignored. F, P, D, A have no panel filter, so requests with a NULL
+//     or other panel are in.
+//
+// Window (ruling 3: a fixed window becomes parameters; the views scan all history). `from` and `to` are optional (blank is all history),
+// YYYY-MM-DD, on the local date (the stamp's own first ten characters, so a +02:00 stamp stays on its day). The date is v1's own window date, from
+// L line 23: the first of the collection date, the received date and the registered date. Why that date and not the registered date alone:
+// it is the date v1's one window used, so the window v1 computed (from = 2017-10-31, to = 2018-03-31 for L) gives the same requests; and a window on the
+// registered date alone would force RegisteredDate to 100% in every windowed row. A request with none of the three dates is out as soon as one
+// side is given. L's v1 window was exclusive at both ends of a datetime (after 2017-10-31 00:00:00, before 2018-04-01 00:00:00), so
+// from = 2017-10-31 and to = 2018-03-31 gives the same rows except a stamp at exactly 2017-10-31 00:00:00.
+// The date parameters are validated (dateParamSql).
+//
+// Order. v1 has no ORDER BY; the port orders by every output column (the name in SQL Server's text order, then the rest), so CE can page.
+const DATE_START = "'^[0-9]{4}-[0-9]{2}-[0-9]{2}'";
+// The date part of a stamp (YYYY-MM-DD text) when the stamp starts with a full date, else NULL. v1 datetime columns have no ''.
+const dateOfStamp = (x) => `(case when ${x} ~ ${DATE_START} then left(${x}, 10) end)`;
+// The five rate columns: [v1 name, column of the row source].
+const RATE_COLUMNS = [
+  ['SampleCollectionDate', 'spec_d'],
+  ['SampleReceivedDate', 'recv_d'],
+  ['RegisteredDate', 'reg_d'],
+  ['AnalyzedDate', 'ana_d'],
+  ['AuthorisedDate', 'auth_d'],
+];
+const COMPLETENESS_EID = ['HIVPC'];
+const COMPLETENESS_VL = ['HIVVL', 'VIRAL'];
+const COMPLETENESS_LAB = ['HIVVL', 'HIVPC', 'VIRAL', 'HIVST'];
+
+// The panel condition. `testType`: 'optional' (blank or 'all' is every panel: facility), 'required' (EID or VL only: lab facility),
+// or a list of panels (the lab view), or null (no filter). An unknown test_type gives no rows.
+function panelCondition(testType) {
+  if (testType === null) return 'true';
+  if (Array.isArray(testType)) return inListSql('lr.panel_code', testType);
+  const t = foldSql('{{param.test_type}}');
+  const kinds = `(${t} = 'eid' and ${inListSql('lr.panel_code', COMPLETENESS_EID)}) or (${t} = 'vl' and ${inListSql('lr.panel_code', COMPLETENESS_VL)})`;
+  return testType === 'optional' ? `(${t} in ('', 'all') or ${kinds})` : `(${kinds})`;
+}
+
+// The shared helper. `level`: 'province', 'district', 'facility' (a key from the register row), 'lab' (code and name), 'labfacility' or
+// 'labarea' (the lab name). `panels`: see panelCondition. `labels`: the v1 column names of the key columns.
+function completenessSql({ level, panels, labels }) {
+  const isLab = level === 'lab' || level === 'labfacility' || level === 'labarea';
+  const dates = isLab
+    ? `${dateOfStamp('dr.effective')} as spec_d, ${dateOfStamp('s.received_time')} as recv_d, ${dateOfStamp('dr.issued')} as auth_d`
+    : `(select min(${dateOfStamp('d.effective')}) from diagnostic_reports d where d.based_on_id = lr.id) as spec_d,
+    (select min(${dateOfStamp('x.received_time')}) from diagnostic_reports d join specimens x on x.id = d.specimen_id where d.based_on_id = lr.id) as recv_d,
+    (select min(${dateOfStamp('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth_d`;
+  const keyColumns = { province: 'fmr.region as k', district: 'fmr.district as k', facility: 'fmr.name as k' };
+  // The request rows of the view (before its window). A facility level is one row per request; a lab level one row per (request row, lab
+  // code): rr has one row per report, rq folds the reports of one lab into one row (earliest valid date per column; the report name that
+  // labNamesCte would choose among them).
+  const rows = isLab
+    ? `rr as (
+  select lr.id as row_id, lr.request_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name, ${dates},
+    ${dateOfStamp('lr.authored_at')} as reg_d, ${dateOfStamp('lr.analysis_at')} as ana_d
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${panelCondition(panels)}
+),
+rq as (
+  select r.row_id, min(r.request_id) as request_id, min(r.code collate "C") as code,
+    (array_agg(r.report_name order by ${foldSql('r.report_name')} = ${foldSql('r.code')}, r.report_name collate "C"))[1] as report_name,
+    min(r.spec_d) as spec_d, min(r.recv_d) as recv_d, min(r.auth_d) as auth_d, min(r.reg_d) as reg_d, min(r.ana_d) as ana_d
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
+)`
+    : `rq as (
+  select lr.request_id, ${keyColumns[level]}, ${dates},
+    ${dateOfStamp('lr.authored_at')} as reg_d, ${dateOfStamp('lr.analysis_at')} as ana_d
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  where ${panelCondition(panels)}
+)`;
+  const windowed = `sel as (
+  select q.*
+  from rq q
+  where ${isLab ? 'q.code is not null and ' : ''}${optionalWindowSql('coalesce(q.spec_d, q.recv_d, q.reg_d)')}
+)`;
+  const rates = RATE_COLUMNS.map(([, c], i) => `(round(count(q.${c})::numeric / nullif(count(q.request_id), 0) * 100, 1))::float8 as r${i + 1}`).join(',\n    ');
+  const nameCtes = isLab ? `,
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()}` : '';
+  const order = (cols) => cols.map((c) => `${ssTextKey(c)} collate "C" nulls first, ${c} collate "C" nulls first`);
+  const tailOrder = ['g.requests', 'g.r1', 'g.r2', 'g.r3', 'g.r4', 'g.r5'];
+  let group;
+  let select;
+  let sortBy;
+  if (level === 'lab') {
+    group = `select min(q.code collate "C") as prefix, min(n.lab_name collate "C") as facility, count(q.request_id) as requests,
+    ${rates}
+  from sel q
+  join names n on n.code_key = ${foldSql('q.code')}
+  group by ${foldSql('q.code')}`;
+    select = `g.prefix as "${labels[0]}", g.facility as "${labels[1]}"`;
+    sortBy = [...order(['g.prefix', 'g.facility']), ...tailOrder];
+  } else {
+    const keyExpr = isLab ? 'n.lab_name' : 'q.k';
+    group = `select min(${keyExpr} collate "C") as k, count(q.request_id) as requests,
+    ${rates}
+  from sel q${isLab ? `\n  join names n on n.code_key = ${foldSql('q.code')}` : ''}
+  group by ${foldSql(keyExpr)}`;
+    select = `g.k as "${labels[0]}"`;
+    sortBy = [...order(['g.k']), ...tailOrder];
+  }
+  const tailSelect = ['Requests', ...RATE_COLUMNS.map(([name]) => name)].map((name, i) => `g.${i === 0 ? 'requests' : `r${i}`} as "${name}"`).join(', ');
+  return `with ${rows},
+${windowed}${nameCtes},
+g as (
+  ${group}
+)
+select ${select}, ${tailSelect}
+from g
+order by ${sortBy.join(',\n  ')}`;
+}
+
+export const provinceCompletenessSql = () => completenessSql({ level: 'province', panels: null, labels: ['ProvinceName'] });
+export const districtCompletenessSql = () => completenessSql({ level: 'district', panels: null, labels: ['DistrictName'] });
+export const facilityCompletenessSql = () => completenessSql({ level: 'facility', panels: 'optional', labels: ['FacilityName'] });
+export const labCompletenessSql = () => completenessSql({ level: 'lab', panels: COMPLETENESS_LAB, labels: ['LabPrefix', 'LabFacility'] });
+export const labFacilityCompletenessSql = () => completenessSql({ level: 'labfacility', panels: 'required', labels: ['LabFacility'] });
+export const labAreaCompletenessSql = () => completenessSql({ level: 'labarea', panels: null, labels: ['LabName'] });
+
+// ---- Turnaround times (Task 29b) ----
+//
+// Replaces seven v1 views, which fall into three column sets (the Task 10, 24 and 29a ruling: the column set decides the query count):
+//   Turnaround times by lab       vTATLab (TL), vTATEIDLab (TEL), vTATVLoadLab (TVL)      LabFacility, Year, Quarter, Month, Week + 5 steps
+//   Turnaround times by province  vTATProvince (TP), vTATEIDProvince (TEP), vTATVLoadProvince (TVP)   ProvinceName, Year, Quarter, Month, Week + 5 steps
+//   VL turnaround by month        vTATVLoadLabMonth (TM)                                  Year, Month, LabFacility, TATTotal
+// One local helper, tatSql, builds all three. A `test_type` parameter (all, EID, VL; blank is all) switches the real differences of the views
+// of one column set together:
+//
+//                      lab: all (TL)       lab: EID (TEL)      lab: VL (TVL)               province: all (TP)   province: EID (TEP)   province: VL (TVP)
+//   panel              any (also NULL)     HIVPC (TEL 42)      HIVVL, VIRAL (TVL 48)       any                  HIVPC (TEP 43)        HIVVL, VIRAL (TVP 44)
+//   rejected requests  out (TL 41)         out                 out                         IN (no where)        out                   out
+//   bucket date        registered          analysed            collection, else registered analysed             analysed              analysed
+//   missing dates      no fallback         no fallback         no fallback                 fallbacks (TP 25, 27, 33)   none           none
+//
+// The month view is the VL lab view reduced to the total, grouped by year and month only (TM 25-28, 38, 53-56): no test_type, no weeks.
+//
+// Steps (TL 25-33; each is AVG of an integer DATEDIFF(d), so SQL Server cuts the average toward zero to a whole number, measured on the
+// local SQL Server: AVG of -1 and -2 is -1, of -7, -8, -8 is -7, of -3 and 1 is -1; the port does sum / count in integers, which cuts the same):
+//   TATCollectedReceived   received - collection         TP 25: coalesce(collection, coalesce(received, registered)) to coalesce(received, registered)
+//   TATReceivedRegistered  registered - received         TP 27: coalesce(received, registered) to registered
+//   TATRegisteredTested    coalesce(analysed, today) - registered
+//   TATTestedAuthorized    coalesce(authorised, today) - analysed
+//   TATTotal               coalesce(authorised, today) - collection     TP 33: from coalesce(collection, registered)
+// DATEDIFF(d) counts date boundaries on LOCAL dates (a stamp's own first ten characters, so a +02:00 stamp stays on its day). A step with a
+// NULL end is NULL and AVG skips it; a group with nothing to average gives NULL, not 0. An unfinished step runs to "today", v1's getdate(),
+// the Zambian date (TODAY_ZM, as Task 26). A stamp that is not a date ('', '2026-07', 'garbage') is NULL, as a v1 datetime column cannot hold it.
+// Year, Quarter, Month and Week are DATEPART of the bucket date; Week is the US week (dateWeekSql: Sunday first, week 1 holds 1 January).
+// A request with no bucket date is a group of its own with NULL Year, Quarter, Month and Week (SQL Server groups NULLs together).
+//
+// Rows. One row per request row: a request with two reports in one lab is one row (the earliest date of each column among its reports), a
+// request with reports from two labs counts for each lab (v1 has one testing code per row). Province level: one row per request, the
+// earliest date of each column among its reports. The same request number on two rows is two rows; a NULL request number is a row.
+//
+// Joins (CE gaps, ruling 7):
+//   - FacilityList is the ZMFAC register mapping (requesterJoin, an exact code). A request whose requester is not mapped to a register row
+//     is out (v1's inner join). ProvinceName is the mapped row's region; groups fold case and trailing spaces (SQL Server's collation) and
+//     show the smaller spelling in byte order. A NULL region is one NULL group.
+//   - LabList is not in the script. The lab is the report's performer (cdr: OPENLDR_LAB_CODE, v2-transform.ts:401); LabFacility is the lab's
+//     register name from the shared labNamesCte (one name per code, the Task 16 rule), chosen among the rows the view lists. A blank or
+//     missing performer, or a request with no report, is in no row. Two codes with one name are one row.
+//   - The VL views fall back to ReceivingFacilityCode when TestingFacilityCode is '' (TVL 42-46, TM 44-48). CE has no receiving code, but a
+//     blank DISA testing code is not lost: cdr writes the configured lab code (OPENLDR_LAB_CODE) for every push (cdr v2-transform.ts:401,
+//     site-config.ts:64-73), so those requests are credited to the pushing lab. The difference from v1 is which lab gets the credit, not lower
+//     counts. Only a report with a blank performer (data cdr did not push) has no lab and is left out.
+//
+// Window (ruling 5): v1 has none. `from` and `to` are optional (blank is all history), YYYY-MM-DD, on the local date of the view's bucket
+// date (optionalWindowSql); a request with no bucket date is out as soon as one side is given. The date parameters are validated (dateParamSql).
+//
+// Rejected: a rejection code that is not blank (rtrim length above 0). NULL, '' and spaces are not rejections (TL 41: is null or = '').
+// Order: v1 has none; the port orders by every output column (name in SQL Server's text order, then the rest, NULL first), so CE can page.
+const TAT_EID = ['HIVPC'];
+const TAT_VL = ['HIVVL', 'VIRAL'];
+const TAT_STEPS = ['cr', 'rr', 'rt', 'ta', 'tot'];
+// AVG of an integer: sum and count are integers, the division cuts toward zero. NULL when there is nothing to average.
+const avgDays = (x) => `(sum(${x}) / nullif(count(${x}), 0))::int`;
+
+function tatSql({ level }) {
+  const isLab = level !== 'province';
+  const isMonth = level === 'month';
+  // The month view is the VL view: no test_type.
+  const t = foldSql('{{param.test_type}}');
+  const isAll = `${t} in ('', 'all')`;
+  const panel = isMonth
+    ? inListSql('lr.panel_code', TAT_VL)
+    : `(${isAll} or (${t} = 'eid' and ${inListSql('lr.panel_code', TAT_EID)}) or (${t} = 'vl' and ${inListSql('lr.panel_code', TAT_VL)}))`;
+  const notRejected = `not coalesce(${rejectedSql('lr.rejection_code')}, false)`;
+  const rejectionOk = level === 'province' ? `(${isAll} or ${notRejected})` : notRejected;
+  const rows = isLab
+    ? `rr as (
+  select lr.id as row_id, ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name,
+    ${localDate('dr.effective')} as spec, ${localDate('s.received_time')} as recv, ${localDate('dr.issued')} as auth,
+    ${localDate('lr.authored_at')} as reg, ${localDate('lr.analysis_at')} as ana
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+  where ${panel} and ${rejectionOk}
+),
+rq as (
+  select r.row_id, min(r.code collate "C") as code,
+    (array_agg(r.report_name order by ${foldSql('r.report_name')} = ${foldSql('r.code')}, r.report_name collate "C"))[1] as report_name,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.auth) as auth, min(r.reg) as reg, min(r.ana) as ana
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
+)`
+    : `rq as (
+  select lr.id as row_id, fmr.region as k,
+    (select min(${localDate('d.effective')}) from diagnostic_reports d where d.based_on_id = lr.id) as spec,
+    (select min(${localDate('x.received_time')}) from diagnostic_reports d join specimens x on x.id = d.specimen_id where d.based_on_id = lr.id) as recv,
+    (select min(${localDate('d.issued')}) from diagnostic_reports d where d.based_on_id = lr.id) as auth,
+    ${localDate('lr.authored_at')} as reg, ${localDate('lr.analysis_at')} as ana
+  from lab_requests lr
+  ${requesterJoin('lr', 'fmr')}
+  where ${panel} and ${rejectionOk}
+)`;
+  // The bucket date of each view (TL 21-24, TEL 22-25, TVL 24-27, TP 21-24, TM 25-27).
+  const bucket = level === 'province' ? 'q.ana'
+    : isMonth ? 'coalesce(q.spec, q.reg)'
+      : `case when ${isAll} then q.reg when ${t} = 'eid' then q.ana else coalesce(q.spec, q.reg) end`;
+  // The province view for all requests falls back where a date is missing (TP 25, 27, 33); every other view takes the dates as they are.
+  const fallback = (withFallback, plain) => (level === 'province' ? `case when ${isAll} then ${withFallback} else ${plain} end` : plain);
+  const steps = {
+    cr: fallback('coalesce(q.recv, q.reg) - coalesce(q.spec, q.recv, q.reg)', 'q.recv - q.spec'),
+    rr: fallback('q.reg - coalesce(q.recv, q.reg)', 'q.reg - q.recv'),
+    rt: `coalesce(q.ana, ${TODAY_ZM}) - q.reg`,
+    ta: `coalesce(q.auth, ${TODAY_ZM}) - q.ana`,
+    tot: fallback(`coalesce(q.auth, ${TODAY_ZM}) - coalesce(q.spec, q.reg)`, `coalesce(q.auth, ${TODAY_ZM}) - q.spec`),
+  };
+  const used = isMonth ? ['tot'] : TAT_STEPS;
+  const calc = `calc as (
+  select q.*, ${bucket} as bucket, ${used.map((c) => `${steps[c]} as ${c}`).join(',\n    ')}
+  from rq q
+),
+sel as (
+  select c.*, extract(year from c.bucket)::int as y, extract(quarter from c.bucket)::int as qt, extract(month from c.bucket)::int as mo,
+    ${dateWeekSql('c.bucket')} as wk
+  from calc c
+  where ${optionalWindowSql("to_char(c.bucket, 'YYYY-MM-DD')")}
+)`;
+  const nameCtes = isLab ? `,
+src as (
+  select s.code, s.report_name
+  from sel s
+),
+${labNamesCte()}` : '';
+  const keyExpr = isLab ? 'n.lab_name' : 'c.k';
+  const parts = isMonth ? ['c.y', 'c.mo'] : ['c.y', 'c.qt', 'c.mo', 'c.wk'];
+  const grouped = `g as (
+  select min(${keyExpr} collate "C") as k, ${parts.map((p) => `${p}`).join(', ')}, ${used.map((c) => `${avgDays(`c.${c}`)} as ${c}`).join(', ')}
+  from sel c${isLab ? `\n  join names n on n.code_key = ${foldSql('c.code')}` : ''}
+  group by ${foldSql(keyExpr)}, ${parts.join(', ')}
+)`;
+  const keyOrder = `${ssTextKey('g.k')} collate "C" nulls first, g.k collate "C" nulls first`;
+  const partOrder = isMonth ? ['g.y', 'g.mo'] : ['g.y', 'g.qt', 'g.mo', 'g.wk'];
+  const stepOrder = used.map((c) => `g.${c}`);
+  const order = (isMonth ? [...partOrder, keyOrder, ...stepOrder] : [keyOrder, ...partOrder, ...stepOrder])
+    .map((x) => (x.includes('nulls first') ? x : `${x} nulls first`));
+  const select = isMonth
+    ? 'g.y as "Year", g.mo as "Month", g.k as "LabFacility", g.tot as "TATTotal"'
+    : `g.k as "${level === 'province' ? 'ProvinceName' : 'LabFacility'}", g.y as "Year", g.qt as "Quarter", g.mo as "Month", g.wk as "Week", g.cr as "TATCollectedReceived", g.rr as "TATReceivedRegistered", g.rt as "TATRegisteredTested", g.ta as "TATTestedAuthorized", g.tot as "TATTotal"`;
+  return `with ${rows},
+${calc}${nameCtes},
+${grouped}
+select ${select}
+from g
+order by ${order.join(',\n  ')}`;
+}
+
+export const labTurnaroundSql = () => tatSql({ level: 'lab' });
+export const provinceTurnaroundSql = () => tatSql({ level: 'province' });
+export const monthTurnaroundSql = () => tatSql({ level: 'month' });
+
+// ---- Requests received by week (Task 30) ----
+//
+// Replaces vWeeklyRequestTrend (W, the target) and vReceivedRequestsSummary (V, its merge). Both count the requests received at each laboratory
+// per year, quarter, month and week, and split them into PCR (EID), viral load and other. They differ in their output columns (V has labFacility
+// beside LabPrefix and LabName), so they are two queries (the Task 10, 24, 29a ruling: the column set decides the query count), built by one
+// helper, weeklySql:
+//   Requests received by week                  W   Labprefix, LabName, Year, Quarter, Month, Week, TotalRequests, PCRRequests, VLRequests, OtherRequests
+//   Requests received by week (VLEID copy)     V   LabPrefix, labFacility, LabName, then the same eight columns
+// Both take `from` and `to` (text, YYYY-MM-DD; validated, dateParamSql). W's `from` is REQUIRED: v1's 2018-05-31 floor is a fixed window,
+// which ruling 3 turns into a required parameter (as "Days since last transmission" does with its 2019 floor). W's `to` and both of V's are optional.
+//
+// What differs (W lines, V lines):
+//
+//                      W                                              V
+//   rows               every request (OpenLDRData.Requests)           the copy VLEIDRequests: panels HIVPC, HIVST, HIVVL, VIRAL only
+//   bucket date        coalesce(collection, received, registered)     coalesce(collection, registered)                    (W 15-18, V 25-28)
+//   PCR                HIVPC                                          HIVPC, HIVWB                                        (W 22, V 33)
+//   VL                 HIVVL                                          HIVVL, VIRAL                                        (W 29, V 41)
+//   Other              not HIVPC, HIVST, HIVVL, VIRAL                 not HIVPC, HIVWB, HIVVL, VIRAL                      (W 36, V 49)
+//   floor              coalesce(...) > '2018-05-31'                   none                                                (W 47)
+//   labs               Laboratories (inner, the WHERE kills the NULLs) LabList (right join, labs without requests are listed)
+//
+// The mapping (global constraints). Requests are lab_requests rows. Collection is diagnostic_reports.effective, received is
+// specimens.received_time (the report's specimen), registered is lab_requests.authored_at. V's copy is vleidRequestsCte (sp_UpdateVLEIDRequests):
+// the four panels plus a VIRAL row for each host request with a VIRAL questionnaire answer (spec ruling 6), so the VIRAL members of V's VL group
+// come from those rows. The lab is the report's performer (testingCodeSql), which is cdr's configured OPENLDR_LAB_CODE for each push
+// (cdr v2-transform.ts:401); LabPrefix is that code, LabFacility and LabName are the lab's one name (labNamesCte, the Task 16 rule: the display,
+// else the register name, else the code; a name that is not just the code first, then the smallest in byte order).
+//
+// Counts. Every count is COUNT(DISTINCT RequestID) (W lines 19, 20, 27, 34; V lines 29, 30, 38, 46): distinct request numbers, compared as SQL Server
+// compares text (case and trailing spaces ignored), a NULL number not counted. Not rows. So a request on two panels is one request in Total and
+// in each part it belongs to; the same number on three rows is one; and a week whose requests all have no number is a row of zeros.
+// The base set is one row per request row and folded lab code (the Task 29a pattern), never one per report: a request with two reports of one
+// lab (the code in two spellings) is one row with the earliest valid date of each column, a request with reports from two labs counts for each
+// lab. V's copy holds one row per v1 key (request number, OBR set, panel; sp_createVLEIDRequestsPK) and lab. V folds on that key plus the
+// request row's id (vleidRequestsCte rowIds): the several reports of one row merge, but two CE rows that share a number, OBR set and panel are
+// not merged. Only lab_requests.id is unique in CE, and an OBR set that is not numeric is NULL, so a CE key can repeat; v1's cannot (its primary
+// key), so the id changes no result v1 can reach. A VIRAL row from a form carries its host's id and has its own panel, so it is never merged
+// with its host. The zero row for a week of requests that all have a NULL number is CE-only: v1's RequestID is NOT NULL.
+//
+// Kept v1 quirks (spec ruling 1):
+//   - Total counts every panel at the lab (W has no panel filter on the group; V's copy has four). PCR, VL and Other follow the panel rules, so Total
+//     is not PCR + VL + Other. In W, HIVST and VIRAL are in Total only (Other excludes them) and so is a request with a NULL panel (a NULL fails
+//     `not in`); a request on HIVWB, on any other panel or on '' is Other. In V the copy holds HIVST as its only Other; a request on HIVWB, TB,
+//     '' or NULL is not in the copy, so it is not there at all. HIVWB can never reach V's PCR (not in the copy), as the inventory says.
+//   - The three sub-selects (W lines 20-40, V lines 30-53) are not the group. They count over ALL the lab's requests of the same year, month and
+//     week: no floor, no window, no panel filter beyond their own. So with a floor or an end date PCR, VL and Other can pass Total (a week the
+//     floor cuts in two: Total counts the part after the floor, the parts count the whole week). `to` is not in v1; it ends the group like the
+//     floor and, like the floor, not the sub-selects.
+//   - The sub-selects match year, month and week but not quarter. A month is in one quarter, so leaving the quarter out changes no output
+//     (the mutation "match the quarter too" is an equivalent change; the month and the year are what the fixtures pin).
+//   - A group whose bucket date is NULL (V only; W's WHERE drops a request with no date, as it drops any NULL under a floor) has NULL year, quarter,
+//     month and week; the sub-selects compare a NULL year with `=` and match nothing, so its PCR, VL and Other are 0 and Total counts its requests.
+//   - Year, Quarter, Month, Week are DATEPART of the bucket date (integers); Week is SQL Server's US week (dateWeekSql: Sunday first, week 1 holds
+//     1 January), so a year has a partial week 1 and a week 53, and a week crossing a month is two groups.
+//   - The group shows the lab code as the smaller spelling in byte order (v1's pick among spellings is not defined); the groups fold case and
+//     trailing spaces. Two codes with one name are two rows.
+//
+// The floor (spec ruling 3). W's `> '2018-05-31'` (W line 47) compares a datetime with a date: the stamp must be after 00:00:00 of that day. It
+// becomes the parameter `from`, and keeps that compare: a stamp at exactly 00:00:00 of the day (also a stamp that is a date alone) is out, one
+// second later is in; the time is the stamp's own local wall time (a +02:00 stamp stays on its local day). A stamp with a fraction of a second
+// is read to the second (v1's datetime would keep the fraction), so one at 00:00:00.5 is out here and in v1. `from` is required (2018-05-31
+// gives v1's output); a blank `from` raises the date error, as every required date does. `to` is
+// a whole local day, inclusive. V has no floor in v1: its `from` and `to` are the usual inclusive local-date window on the bucket date, and
+// blank both is all history (the NULL-date group stays; as soon as one side is given it goes, as in Task 29b). W drops a NULL bucket date always.
+//
+// Differences from v1 and CE gaps (spec ruling 7):
+//   - LabList (V) and Laboratories (W) are not in the script. CE lists every lab it has a report for; v1 lists the codes in its dictionary. A lab
+//     that CE has no report for has no row, and neither does a lab with no row in the copy. V's right join to LabList lists a lab with no
+//     requests as one row with NULL year, quarter, month and week and four zeros; CE cannot list a lab without requests (it has no lab list), so
+//     those rows are missing. W's WHERE on the request's date makes its right join an inner join, so W has no such rows in v1 either.
+//   - V's labFacility is the lab's name (as LabFacility is in Tasks 29a and 29b), the same as LabName; v1's LabName is likely a lab area name that
+//     Zambia has not sent (QUESTIONS-FOR-ZM).
+//   - A lab is the performer of a report. A request with no report, or a report with a blank performer, has no lab here and is in no row. cdr gives
+//     every report the pushing lab as performer (v2-transform.ts:401), so on cdr data this is a request with no report yet, not a lost lab code.
+//     v1's fallback to the receiving and requesting facility codes when the testing code is blank has no CE source (the receiving code is not
+//     carried; the requesting code is a facility, not a lab).
+//   - A VIRAL request in v1 shares the host's request number, bucket date and lab, and the group counts it in nothing (W: Other excludes VIRAL) or
+//     in VL (V). In W it adds nothing, so W reads plain lab_requests. A specimen with only a VIRAL panel (no host) is in v1 and not in CE
+//     (the form has no request to attach to).
+//   - The lab's name is taken from all the reports of the lab, not only the listed ones (the copy does not carry the report's display, and the
+//     two queries should name a lab the same way). The names never depend on the window.
+//   - The date windows are validated (dateParamSql); a blank optional date is no limit.
+//
+// Order: v1 has no ORDER BY; the port orders by every output column (the lab code and name in SQL Server's text order, then year, quarter,
+// month, week and the four counts, NULL first), so CE can page the result. labFacility and LabName are one value, so one key covers both.
+function weeklySql({ copy }) {
+  const panels = copy
+    ? { pcr: ['HIVPC', 'HIVWB'], vl: ['HIVVL', 'VIRAL'], other: ['HIVPC', 'HIVWB', 'HIVVL', 'VIRAL'] }
+    : { pcr: ['HIVPC'], vl: ['HIVVL'], other: ['HIVPC', 'HIVST', 'HIVVL', 'VIRAL'] };
+  const rows = copy
+    ? `${vleidRequestsCte('vleid', { rowIds: true })},
+rr as (
+  select v.request_id, v.request_row_id, v.obr_set_id as obr, v.lims_panel_code as panel,
+    case when rtrim(v.testing_facility_code) = '' then null else v.testing_facility_code end as code,
+    ${localTs('v.specimen_date_time')} as spec, null::timestamp as recv, ${localTs('v.registered_date_time')} as reg
+  from vleid v
+),
+rq as (
+  select min(r.request_id) as request_id, min(r.panel) as panel, min(r.code collate "C") as code,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.reg) as reg
+  from rr r
+  where r.code is not null
+  group by ${foldSql('r.request_id')}, r.obr, ${foldSql('r.panel')}, r.request_row_id, ${foldSql('r.code')}
+)`
+    : `rr as (
+  select lr.id as row_id, lr.request_id, lr.panel_code as panel, ${testingCodeSql('dr')} as code,
+    ${localTs('dr.effective')} as spec, ${localTs('s.received_time')} as recv, ${localTs('lr.authored_at')} as reg
+  from lab_requests lr
+  join diagnostic_reports dr on dr.based_on_id = lr.id
+  left join specimens s on s.id = dr.specimen_id
+),
+rq as (
+  select r.row_id, min(r.request_id) as request_id, min(r.panel) as panel, min(r.code collate "C") as code,
+    min(r.spec) as spec, min(r.recv) as recv, min(r.reg) as reg
+  from rr r
+  where r.code is not null
+  group by r.row_id, ${foldSql('r.code')}
+)`;
+  const bucket = copy ? 'coalesce(q.spec, q.reg)' : 'coalesce(q.spec, q.recv, q.reg)';
+  const window = copy
+    ? optionalWindowSql("to_char(c.b, 'YYYY-MM-DD')")
+    : `c.b is not null
+    and c.b > ${dateParamSql('from')}::timestamp
+    and ({{param.to}} = '' or c.b::date <= ${dateParamSql('to', { optional: true })})`;
+  const distinctIds = (cond) => `count(distinct ${foldSql('c.request_id')})${cond === undefined ? '' : ` filter (where ${cond})`}`;
+  const lead = copy ? ['"LabPrefix"', '"labFacility"', '"LabName"'] : ['"Labprefix"', '"LabName"'];
+  const leadValues = copy ? ['g.code', 'g.nm', 'g.nm'] : ['g.code', 'g.nm'];
+  return `with ${rows},
+calc as (
+  select q.request_id, q.panel, q.code, ${bucket} as b
+  from rq q
+),
+base as (
+  select c.*, extract(year from c.b)::int as y, extract(quarter from c.b)::int as qt, extract(month from c.b)::int as mo, ${dateWeekSql('c.b::date')} as wk
+  from calc c
+),
+sel as (
+  select c.*
+  from base c
+  where ${window}
+),
+parts as (
+  select ${foldSql('c.code')} as k, c.y, c.mo, c.wk,
+    ${distinctIds(inListSql('c.panel', panels.pcr))} as pcr,
+    ${distinctIds(inListSql('c.panel', panels.vl))} as vl,
+    ${distinctIds(`not (${inListSql('c.panel', panels.other)})`)} as oth
+  from base c
+  where c.b is not null
+  group by ${foldSql('c.code')}, c.y, c.mo, c.wk
+),
+src as (
+  select ${testingCodeSql('dr')} as code, ${labNameSql('dr')} as report_name
+  from diagnostic_reports dr
+  where ${foldSql('dr.performer')} in (select ${foldSql('q.code')} from sel q)
+),
+${labNamesCte()},
+grp as (
+  select min(c.code collate "C") as code, c.y, c.qt, c.mo, c.wk, ${distinctIds()} as tot
+  from sel c
+  group by ${foldSql('c.code')}, c.y, c.qt, c.mo, c.wk
+),
+g as (
+  select p.code, n.lab_name as nm, p.y, p.qt, p.mo, p.wk, p.tot::int as tot,
+    coalesce(s.pcr, 0)::int as pcr, coalesce(s.vl, 0)::int as vl, coalesce(s.oth, 0)::int as oth
+  from grp p
+  join names n on n.code_key = ${foldSql('p.code')}
+  left join parts s on s.k = ${foldSql('p.code')} and s.y = p.y and s.mo = p.mo and s.wk = p.wk
+)
+select ${lead.map((name, i) => `${leadValues[i]} as ${name}`).join(', ')}, g.y as "Year", g.qt as "Quarter", g.mo as "Month", g.wk as "Week",
+  g.tot as "TotalRequests", g.pcr as "PCRRequests", g.vl as "VLRequests", g.oth as "OtherRequests"
+from g
+order by ${ssTextKey('g.code')} collate "C" nulls first, g.code collate "C" nulls first,
+  ${ssTextKey('g.nm')} collate "C" nulls first, g.nm collate "C" nulls first,
+  g.y nulls first, g.qt nulls first, g.mo nulls first, g.wk nulls first, g.tot, g.pcr, g.vl, g.oth`;
+}
+
+export const weeklyRequestsSql = () => weeklySql({ copy: false });
+export const weeklyRequestsCopySql = () => weeklySql({ copy: true });
+
+// The two date parameters of the weekly request queries. W's `from` is v1's floor (a datetime after 00:00:00 of the day); V's is the usual
+// inclusive date. W's `from` is required, the others optional text; all are validated (dateParamSql).
+const weeklyParams = (floor) => [
+  { id: 'from', label: floor ? 'Date after (YYYY-MM-DD; use 2018-05-31 to match v1; a request at exactly 00:00 of that day is out)' : 'Date from (YYYY-MM-DD; blank for no limit)', type: 'text', required: floor },
+  { id: 'to', label: 'Date to (YYYY-MM-DD; blank for no limit)', type: 'text', required: false },
+];
+
+const windowParams = () => dateParams(false).map((p) => ({ ...p, label: `${p.label} (blank for no limit)` }));
+
+// The test type of the two completeness queries that have v1 variants. Facility: v1 has the all view, so blank is all. Lab facility: v1 has
+// the EID and VL views only, so the choice is required.
+const completenessTypeParam = (withAll) => ({
+  id: 'test_type',
+  label: withAll
+    ? 'Test type: all (blank), EID (panel HIVPC) or VL (panels HIVVL and VIRAL)'
+    : 'Test type: EID (panel HIVPC) or VL (panels HIVVL and VIRAL)',
+  type: 'select',
+  required: !withAll,
+  optionsSql: withAll ? optionsListSql('test_type', ['all', 'EID', 'VL']) : optionsListSql('test_type', ['EID', 'VL']),
+});
+
+export function queries() {
+  return [
+    { name: 'VL lab performance', sql: vlLabPerformanceSql(), params: dateParams(true) },
+    { name: 'EID lab performance', sql: eidLabPerformanceSql(), params: dateParams(true) },
+    { name: 'TB lab performance', sql: tbLabPerformanceSql(), params: dateParams(true) },
+    { name: 'Days since last transmission', sql: daysSinceSql(), params: [{ id: 'from', label: 'Registered after (YYYY-MM-DD; v1 used 2019-01-01)', type: 'text', required: true }] },
+    { name: 'Suspect collection dates', sql: suspectDatesSql(), params: dateParams(true) },
+    { name: 'DISA Link weekly stats', sql: disaLinkSql(), params: dateParams(true) },
+    { name: 'VL and EID weekly stats', sql: weeklyStatsSql(), params: dateParams(true) },
+    { name: 'Tests authorised by lab and type', sql: labSummarySql(), params: dateParams(true) },
+    { name: 'VL throughput by lab and month', sql: throughputSql(), params: [{ id: 'year', label: 'Year (YYYY)', type: 'text', required: true }] },
+    { name: 'Rejections by facility and reason', sql: rejectionsByReasonSql(), params: rejectionsByReasonParams() },
+    { name: 'VL rejections by facility (total)', sql: vlRejectionsTotalSql(), params: windowParams() },
+    { name: 'VL rejections by lab', sql: vlRejectionsByLabSql(), params: windowParams() },
+    { name: 'Date completeness by province', sql: provinceCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by district', sql: districtCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by facility', sql: facilityCompletenessSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'Date completeness by lab', sql: labCompletenessSql(), params: windowParams() },
+    { name: 'Date completeness by lab facility', sql: labFacilityCompletenessSql(), params: [completenessTypeParam(false), ...windowParams()] },
+    { name: 'Date completeness by lab area', sql: labAreaCompletenessSql(), params: windowParams() },
+    { name: 'Turnaround times by lab', sql: labTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'Turnaround times by province', sql: provinceTurnaroundSql(), params: [completenessTypeParam(true), ...windowParams()] },
+    { name: 'VL turnaround by month', sql: monthTurnaroundSql(), params: windowParams() },
+    { name: 'Requests received by week', sql: weeklyRequestsSql(), params: weeklyParams(true) },
+    { name: 'Requests received by week (VLEID copy)', sql: weeklyRequestsCopySql(), params: weeklyParams(false) },
+  ];
+}

@@ -146,3 +146,6 @@ temp/
 
 # pnpm
 .pnpm-store/
+
+# Agent work notes (task briefs and reports), never committed
+.superpowers/

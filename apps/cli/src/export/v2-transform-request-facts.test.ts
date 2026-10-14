@@ -262,3 +262,17 @@ test("newborn is absent from attributes when the bit is clear", () => {
   const attrs = (req.source_payload.request_facts as { attributes?: { code: string }[] }).attributes!;
   assert.deepEqual(attrs.map((a) => a.code), ["therapy", "ordering-notes"]);
 });
+
+test("reference numbers and unique id are sent when the specimen has them", () => {
+  const req = run(specimen({ ReferenceNumber: ",ELABS 12AT.3456", UniqueID: "ZM-001" }), TZ_OFFSETS, TZ_FACTS).lab_requests[0]!;
+  const attrs = (req.source_payload.request_facts as { attributes?: { code: string; valueString?: string }[] }).attributes!;
+  assert.deepEqual(attrs.map((a) => a.code), ["therapy", "ordering-notes", "reference-numbers", "unique-id", "newborn"]);
+  assert.equal(attrs.find((a) => a.code === "reference-numbers")?.valueString, ",ELABS 12AT.3456");
+  assert.equal(attrs.find((a) => a.code === "unique-id")?.valueString, "ZM-001");
+});
+
+test("blank reference numbers and unique id are not sent", () => {
+  const req = run(specimen({ ReferenceNumber: "  ", UniqueID: null }), TZ_OFFSETS, TZ_FACTS).lab_requests[0]!;
+  const attrs = (req.source_payload.request_facts as { attributes?: { code: string }[] }).attributes!;
+  assert.deepEqual(attrs.map((a) => a.code), ["therapy", "ordering-notes", "newborn"]);
+});

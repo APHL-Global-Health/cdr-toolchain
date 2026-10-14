@@ -26,6 +26,8 @@ hl7_section_codes:
 const ATTRS = `request_attributes:
   therapy: therapy
   folder_number: ordering-notes
+  reference_numbers: reference-numbers
+  unique_id: unique-id
   newborn: newborn
 `;
 
@@ -41,7 +43,7 @@ test("loads registration offsets, section codes and attribute codes", () => {
     assert.deepEqual(c.registration.newborn, { offset: 409, mask: 2 });
     assert.equal(c.sectionCodes.get("V"), "VR");
     assert.equal(c.sectionCodes.get(""), "OTH");
-    assert.deepEqual(c.attributeCodes, { therapy: "therapy", folderNumber: "ordering-notes", newborn: "newborn" });
+    assert.deepEqual(c.attributeCodes, { therapy: "therapy", folderNumber: "ordering-notes", referenceNumbers: "reference-numbers", uniqueId: "unique-id", newborn: "newborn" });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -59,7 +61,7 @@ test("an unknown country decodes nothing but still gets the shared attribute cod
 test("no attribute file means no attribute is sent", () => {
   const dir = dirWith(COUNTRY, null);
   try {
-    assert.deepEqual(loadRequestFactConfig("tanzania", dir).attributeCodes, { therapy: null, folderNumber: null, newborn: null });
+    assert.deepEqual(loadRequestFactConfig("tanzania", dir).attributeCodes, { therapy: null, folderNumber: null, referenceNumbers: null, uniqueId: null, newborn: null });
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -88,5 +90,5 @@ test("the real config directory carries the Tanzania measurements", () => {
   assert.equal(c.sectionCodes.get("V"), "VR");
   assert.equal(c.sectionCodes.get("HT"), "OTH");
   assert.equal(c.sectionCodes.get(""), "OTH");
-  assert.deepEqual(c.attributeCodes, { therapy: "therapy", folderNumber: "ordering-notes", newborn: "newborn" });
+  assert.deepEqual(c.attributeCodes, { therapy: "therapy", folderNumber: "ordering-notes", referenceNumbers: "reference-numbers", uniqueId: "unique-id", newborn: "newborn" });
 });
